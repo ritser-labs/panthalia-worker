@@ -58,12 +58,20 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, output
     seqlen = inputs.shape[1]
     freqs_cis = freqs_cis[start_pos: start_pos + seqlen]
 
+    # Ensure that the batch size of inputs is correctly handled
+    bsz = inputs.shape[0]
+    if layer.attention.cache_k is not None and layer.attention.cache_k.shape[0] != bsz:
+        layer.attention.cache_k = torch.zeros(bsz, layer.attention.cache_k.shape[1], layer.attention.cache_k.shape[2], layer.attention.cache_k.shape[3], device=device)
+    if layer.attention.cache_v is not None and layer.attention.cache_v.shape[0] != bsz:
+        layer.attention.cache_v = torch.zeros(bsz, layer.attention.cache_v.shape[1], layer.attention.cache_v.shape[2], layer.attention.cache_v.shape[3], device=device)
+
     outputs = layer(inputs.to(device), start_pos, freqs_cis.to(device), mask.to(device))
     check_for_nans(outputs, f"layer {layer_idx} outputs")
     logging.info(f"Outputs after layer {layer_idx}: {outputs}")
 
     # Save outputs, inputs, and layer to disk
     save_to_disk((outputs, inputs, layer), outputs_file)
+
 
 def backward_task(layer_idx, error_file, state_dict_file, error_output_file, inputs_file, freqs_cis_file, mask_file):
     error, _ = load_from_disk(error_file)
@@ -188,10 +196,10 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
 
     # Reshape logits to [batch_size * seq_len, vocab_size]
     batch_size, seq_len, vocab_size = logits.shape
-    logits = logits.view(batch_size * seq_len, vocab_size)  # Shape: [batch_size * seq_len, vocab_size]
+    logits = logits.reshape(batch_size * seq_len, vocab_size)  # Shape: [batch_size * seq_len, vocab_size]
 
     # Ensure targets match the reshaped logits structure
-    targets = targets.view(-1)  # Shape: [batch_size * seq_len]
+    targets = targets.reshape(-1)  # Shape: [batch_size * seq_len]
 
     loss = F.cross_entropy(logits.to(device), targets.to(device), ignore_index=pad_id)
     save_to_disk(loss.item(), loss_file)
@@ -202,7 +210,7 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     logging.info(f"Logits gradients for loss: {logits.grad.shape}")
 
     # Reshape logits_grad to match the original logits shape
-    logits_grad = logits.grad.view(batch_size, seq_len, vocab_size)  # Shape: [batch_size, seq_len, vocab_size]
+    logits_grad = logits.grad.reshape(batch_size, seq_len, vocab_size)  # Shape: [batch_size, seq_len, vocab_size]
 
     # Save logits_grad to be used as the error for the final layer's backward pass
     save_to_disk((logits_grad, inputs, output_layer), logits_grad_file)
