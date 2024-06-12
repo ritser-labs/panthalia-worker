@@ -11,7 +11,7 @@ from common import load_contracts
 logging.basicConfig(level=logging.INFO)
 
 class Master:
-    def __init__(self, rpc_url, private_key, sot_url, subnet_addresses):
+    def __init__(self, rpc_url, private_key, sot_url, subnet_addresses, detailed_logs=False):
         self.web3 = Web3(Web3.HTTPProvider(rpc_url))
         self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
         self.account = self.web3.eth.account.from_key(private_key)
@@ -19,8 +19,12 @@ class Master:
         self.subnet_addresses = subnet_addresses
         self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, subnet_addresses)
 
-        if 'SubnetManager' not in self.contracts:
-            raise ValueError("SubnetManager contract not found. Please check the subnet_addresses configuration.")
+        if not self.contracts:
+            raise ValueError("SubnetManager contracts not found. Please check the subnet_addresses configuration.")
+
+        # Adjust logging level based on detailed_logs flag
+        if detailed_logs:
+            logging.getLogger().setLevel(logging.DEBUG)
 
     def approve_token(self, token_address, spender_address, amount):
         token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['SubnetManager'])
@@ -262,11 +266,19 @@ class Master:
         return response.json()['targets_url']
 
 if __name__ == "__main__":
-    rpc_url = "http://localhost:8545"
-    private_key = os.environ['PRIVATE_KEY']
-    sot_url = os.environ['SOT_URL']
-    with open(os.environ['SUBNET_ADDRESSES_JSON'], 'r') as file:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Master process for task submission")
+    parser.add_argument('--rpc_url', type=str, required=True, help="RPC URL for Ethereum node")
+    parser.add_argument('--private_key', type=str, required=True, help="Private key for Ethereum account")
+    parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
+    parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
+    parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
+
+    args = parser.parse_args()
+
+    with open(args.subnet_addresses, 'r') as file:
         subnet_addresses = json.load(file)
 
-    master = Master(rpc_url, private_key, sot_url, subnet_addresses)
+    master = Master(args.rpc_url, args.private_key, args.sot_url, subnet_addresses, detailed_logs=args.detailed_logs)
     master.main()

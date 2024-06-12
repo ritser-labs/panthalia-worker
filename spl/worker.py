@@ -24,33 +24,13 @@ class SuppressTracebackFilter(logging.Filter):
             return False
         return True
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger()
-logger.addFilter(SuppressTracebackFilter())
-
-@dataclass
-class ModelArgs:
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
-    n_kv_heads: Optional[int] = None
-    vocab_size: int = -1
-    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
-    ffn_dim_multiplier: Optional[float] = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 500000
-    max_batch_size: int = 32
-    max_seq_len: int = 2048
-
-args = ModelArgs()
-
 # Command-line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
     parser.add_argument('--task_type', type=str, required=True, choices=[
         'embed', 'forward', 'backward', 'final_logits', 'final_logits_backward', 'embed_backward', 'loss'
     ], help="Type of task to process")
+    parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks")
     parser.add_argument('--subnet_address', type=str, required=True, help="Subnet contract address")
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the worker's Ethereum account")
     parser.add_argument('--rpc_url', type=str, default='http://localhost:8545', help="URL of the Ethereum RPC node")
@@ -59,9 +39,15 @@ def parse_args():
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='local_storage', help="Directory for local storage of files")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
+    parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for this worker")
     return parser.parse_args()
 
 args = parse_args()
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG if args.detailed_logs else logging.INFO)
+logger = logging.getLogger()
+logger.addFilter(SuppressTracebackFilter())
 
 # Ensure local storage directory exists
 os.makedirs(args.local_storage_dir, exist_ok=True)
@@ -174,6 +160,9 @@ def apply_gradient_updates():
             except json.JSONDecodeError as e:
                 logging.error(f"Failed to decode JSON: {e}")
                 continue
+            except KeyError as e:
+                logging.error(f"Missing key in JSON update: {e}")
+                continue
 
 def pause_gradient_updates():
     global gradient_update_paused
@@ -185,17 +174,36 @@ def resume_gradient_updates():
     apply_gradient_updates()
 
 def sync_tensors_to_latest_state():
-    while True:
-        response = requests.get(f"{args.sot_url}/latest_state")
-        latest_state = response.json()
-        need_update = False
-        for tensor_name, state in latest_state.items():
-            if tensor_name not in tensors or last_gradient_update[tensor_name] < state['block_number']:
-                need_update = True
-                break
-        if not need_update:
-            break
-        apply_gradient_updates()
+    task_type = args.task_type
+    layer_idx = args.layer_idx
+    tensors_to_sync = get_tensors_for_task(task_type, layer_idx)
+    response = requests.post(f"{args.sot_url}/stream_specific_tensors", json={"tensors": tensors_to_sync})
+    
+    for line in response.iter_lines():
+        if line:
+            update = json.loads(line.decode('utf-8'))
+            tensor_name = update['tensor_name']
+            tensor_data = update['tensor']
+            tensors[tensor_name] = torch.tensor(tensor_data, device=device)
+            last_gradient_update[tensor_name] = update.get('block_number', 0)
+
+def get_tensors_for_task(task_type, layer_idx=None):
+    if task_type == 'embed':
+        return ['embedding']
+    elif task_type == 'forward':
+        return [f'layer_{layer_idx}']
+    elif task_type == 'backward':
+        return [f'layer_{layer_idx}', f'adam_m[layer_{layer_idx}]', f'adam_v[layer_{layer_idx}]']
+    elif task_type == 'final_logits':
+        return ['output_layer_state_dict']
+    elif task_type == 'final_logits_backward':
+        return ['output_layer_state_dict', 'adam_m[output]', 'adam_v[output]']
+    elif task_type == 'embed_backward':
+        return ['embedding', 'adam_m[embedding]', 'adam_v[embedding]']
+    elif task_type == 'loss':
+        return ['logits']
+    else:
+        return []
 
 def deposit_stake():
     global stake_deposited

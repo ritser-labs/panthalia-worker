@@ -72,12 +72,12 @@ def load_contracts(web3, subnet_addresses):
     if os.path.exists(subnet_manager_abi_path):
         with open(subnet_manager_abi_path, 'r') as abi_file:
             abi = json.load(abi_file).get('abi', [])
-            for task in subnet_addresses.keys():
+            for task, address in subnet_addresses.items():
                 abis[task] = abi
                 logging.info(f"Loaded ABI for {task}")
                 extract_error_selectors(abi, web3, error_selectors)
-                contracts[task] = web3.eth.contract(address=subnet_addresses[task], abi=abi)
-                logging.info(f"Loaded contract for {task} with address {subnet_addresses[task]}")
+                contracts[task] = web3.eth.contract(address=address, abi=abi)
+                logging.info(f"Loaded contract for {task} with address {address}")
     else:
         logging.error(f"SubnetManager ABI not found at {subnet_manager_abi_path}")
 

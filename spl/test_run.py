@@ -17,6 +17,7 @@ def parse_args():
     parser.add_argument('--local_storage_dir', type=str, default='local_storage', help="Directory for local storage of files")
     parser.add_argument('--forge_script', type=str, default='script/Deploy.s.sol', help="Path to the Forge deploy script")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
+    parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
     return parser.parse_args()
 
 def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
@@ -83,7 +84,7 @@ if not wait_for_sot(args.sot_url):
 print("Starting worker processes...")
 
 # Start worker.py for each subnet
-for task_type, subnet_address in subnet_addresses.items():
+for index, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
     # Determine base_task_type correctly
     if 'forward_layer' in task_type:
         base_task_type = 'forward'
@@ -104,9 +105,12 @@ for task_type, subnet_address in subnet_addresses.items():
         '--pool_address', pool_address,
         '--group', str(args.group),
         '--local_storage_dir', args.local_storage_dir,
-        '--backend', args.backend
+        '--backend', args.backend,
     ]
-    worker_processes.append(subprocess.Popen(command))
+    if args.detailed_logs or index == 0:
+        worker_processes.append(subprocess.Popen(command))
+    else:
+        worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
 
 # Print workers started stage
@@ -124,8 +128,10 @@ master_command = [
     '--rpc_url', args.rpc_url,
     '--private_key', args.private_key,
     '--sot_url', args.sot_url,
-    '--subnet_addresses', args.subnet_addresses
+    '--subnet_addresses', args.subnet_addresses,
 ]
+if args.detailed_logs:
+    master_command.append('--detailed_logs')
 master_process = subprocess.Popen(master_command)
 print(f"Started master process with command: {' '.join(master_command)}")
 
