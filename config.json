@@ -5,6 +5,7 @@
   ],
   "attention_bias": false,
   "attention_dropout": 0.0,
+  "attn_implementation": "flash_attention_2",
   "auto_map": {
     "AutoConfig": "Crystalcareai/GemMoE-Beta-1--configuration_gemmoe.GemmoeConfig",
     "AutoModelForCausalLM": "Crystalcareai/GemMoE-Beta-1--modeling_gemmoe.GemmoeForCausalLM",

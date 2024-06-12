@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 from transformers import AutoTokenizer, TrainingArguments, Trainer
-from transformers import DataCollatorWithPadding
+from transformers import DataCollatorForLanguageModeling
 import numpy as np
 from sklearn.metrics import accuracy_score
 from modeling_gemmoe import GemmoeForCausalLM
@@ -18,12 +18,13 @@ dataset = load_dataset("wikipedia", language="en", date="20240401", split='train
 tokenizer = GemmoeTokenizer("tokenizer.model", trust_remote_code=True)
 
 config = GemmoeConfig().from_json_file("config.json")
-
 def tokenize_function(examples):
     return tokenizer(examples["text"], padding="max_length", truncation=True)
 
 # Tokenize the dataset
 tokenized_datasets = dataset.map(tokenize_function, batched=True, num_proc=NUM_PROC)
+
+
 
 # Define a simple get_label function if your dataset has labels
 # def get_label(example): 
@@ -33,12 +34,12 @@ tokenized_datasets = dataset.map(tokenize_function, batched=True, num_proc=NUM_P
 # tokenized_datasets = tokenized_datasets.map(get_label)
 
 # Data collator will dynamically pad the batch during training
-data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
 # Initialize our model
 model = GemmoeForCausalLM(config)
-
-print(model.config.num_experts_per_tok)
+model_size = sum(t.numel() for t in model.parameters())
+print(f"Model size: {model_size / 1024**2:.2f} M params")
 
 # Define training arguments
 training_args = TrainingArguments(
@@ -48,7 +49,8 @@ training_args = TrainingArguments(
     per_device_eval_batch_size=1,
     warmup_steps=500,
     weight_decay=0.01,
-    evaluate_during_training=True,
+    bf16=True,                              # use bfloat16 precision
+    tf32=True,
     logging_dir='./logs',
 )
 
@@ -62,8 +64,7 @@ def compute_metrics(pred):
 trainer = Trainer(
     model=model,
     args=training_args,
-    train_dataset=dataset["train"],
-    eval_dataset=dataset["valid"],
+    train_dataset=tokenized_datasets,
     data_collator=data_collator,
     compute_metrics=compute_metrics,
 )
