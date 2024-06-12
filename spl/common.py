@@ -85,7 +85,7 @@ def load_contracts(web3, subnet_addresses):
 
 def load_abi(name):
     abi_dir = 'abis'
-    contract_path = os.path.join(abi_dir, 'SubnetManager.sol', 'SubnetManager.json')
+    contract_path = os.path.join(abi_dir, f'{name}.sol', f'{name}.json') 
     with open(contract_path, 'r') as abi_file:
         return json.load(abi_file).get('abi', [])
 
