@@ -6,8 +6,6 @@ import os
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from eth_utils import function_signature_to_4byte_selector
-import struct
 
 logging.basicConfig(level=logging.INFO)
 
@@ -18,27 +16,57 @@ class Master:
         self.account = self.web3.eth.account.from_key(private_key)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
+        self.abis = {}
+        self.contracts = {}
+        self.error_selectors = {}
         self.load_contracts()
 
     def load_contracts(self):
-        self.contracts = {}
         abi_dir = 'abis'
-        self.abis = {}
 
         for root, _, files in os.walk(abi_dir):
             for file in files:
                 if file.endswith('.json'):
                     with open(os.path.join(root, file), 'r') as abi_file:
+                        abi = json.load(abi_file).get('abi', [])
                         contract_name = os.path.splitext(file)[0]
-                        self.abis[contract_name] = json.load(abi_file).get('abi', [])
-        
+                        self.abis[contract_name] = abi
+                        logging.info(f"Loaded ABI for {contract_name}")
+                        self.extract_error_selectors(abi)
+
         for task, address in self.subnet_addresses.items():
-            contract_name = 'SubnetManager'  # Assuming all tasks use SubnetManager ABI for simplicity
-            if contract_name in self.abis:
-                self.contracts[task] = self.web3.eth.contract(address=address, abi=self.abis[contract_name])
+            if 'SubnetManager' in self.abis:
+                self.contracts[task] = self.web3.eth.contract(address=address, abi=self.abis['SubnetManager'])
                 logging.info(f"Loaded contract for {task} with address {address}")
             else:
-                logging.error(f"ABI for {contract_name} not found")
+                logging.error(f"ABI for SubnetManager not found")
+
+    def extract_error_selectors(self, abi):
+        for item in abi:
+            if item.get('type') == 'error':
+                name = item['name']
+                inputs = item['inputs']
+                selector = self.web3.keccak(text=f"{name}({','.join([input['type'] for input in inputs])})")[:4].hex()
+                selector = selector.lower()  # Ensure consistent case for matching
+                self.error_selectors[selector] = item
+                logging.info(f"Extracted error selector {selector} for {name}")
+
+    def approve_token(self, token_address, spender_address, amount):
+        token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
+        nonce = self.web3.eth.get_transaction_count(self.account.address)
+        gas_price = self.web3.eth.gas_price
+
+        approve_txn = token_contract.functions.approve(spender_address, amount).build_transaction({
+            'chainId': self.web3.eth.chain_id,
+            'gas': 100000,
+            'gasPrice': gas_price,
+            'nonce': nonce
+        })
+
+        signed_approve_txn = self.web3.eth.account.sign_transaction(approve_txn, private_key=self.account._private_key)
+        tx_hash = self.web3.eth.send_raw_transaction(signed_approve_txn.rawTransaction)
+        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
+        logging.info(f"Token approval transaction receipt: {receipt}")
 
     def submit_task(self, task_type, params):
         try:
@@ -53,23 +81,43 @@ class Master:
             if not hasattr(self.contracts[task_type].functions, 'submitTaskRequest'):
                 raise ValueError(f"'submitTaskRequest' method not found in contract for task type {task_type}")
 
-            tx = self.contracts[task_type].functions.submitTaskRequest(encoded_params).transact({
-                'from': self.account.address,
-                'gas': 10000000  # Further increase the gas limit
+            # Use a placeholder task ID for fee calculation if necessary
+            placeholder_task_id = 0
+            fee = self.contracts[task_type].functions.calculateFee(placeholder_task_id).call()
+
+            # Perform token approval using the 'embed' contract instance to get the SubnetManager details
+            subnet_manager_contract = self.contracts['embed']
+            token_address = subnet_manager_contract.functions.token().call()
+            spender_address = self.contracts[task_type].address
+            self.approve_token(token_address, spender_address, fee)
+
+            # Prepare the transaction
+            nonce = self.web3.eth.get_transaction_count(self.account.address)
+            gas_price = self.web3.eth.gas_price
+            transaction = self.contracts[task_type].functions.submitTaskRequest(encoded_params).build_transaction({
+                'chainId': self.web3.eth.chain_id,
+                'gas': 10000000,
+                'gasPrice': gas_price,
+                'nonce': nonce
             })
-            receipt = self.web3.eth.wait_for_transaction_receipt(tx)
+
+            # Sign the transaction
+            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
+            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
             logging.info(f"Transaction receipt: {receipt}")
 
             if receipt['status'] == 0:
                 try:
-                    tx_receipt = self.web3.eth.get_transaction_receipt(tx)
+                    # Try to retrieve the revert reason
+                    tx = self.web3.eth.get_transaction(receipt['transactionHash'])
                     error_message = self.web3.eth.call({
-                        'to': tx_receipt.contractAddress,
-                        'data': tx_receipt.input
-                    }, tx_receipt.blockNumber)
+                        'to': tx['to'],
+                        'data': tx['input']
+                    }, receipt['blockNumber'])
                     logging.error(f"Error message: {error_message}")
                 except (TransactionNotFound, ValueError) as e:
-                    logging.error(f"Error retrieving transaction receipt: {e}")
+                    logging.error(f"Error retrieving transaction details: {e}")
                 raise ValueError(f"Transaction failed: {receipt}")
 
             # Process receipt to get task ID
@@ -100,18 +148,22 @@ class Master:
 
     def decode_custom_error(self, error_bytes):
         try:
-            # Attempt to decode using common error patterns
-            function_selector = error_bytes[:4]
-            error_data = error_bytes[4:]
+            # Extract selector
+            selector = '0x' + error_bytes[:4].hex().lower()  # Ensure consistent case for matching and add '0x' prefix
+            data = error_bytes[4:]
 
-            # Example of decoding a bytes32 and uint256 from the error data
-            if len(error_data) == 64:
-                decoded_data = struct.unpack('32s32s', error_data)
-                decoded_message = f"Selector: {function_selector.hex()}, Decoded Data: {decoded_data}"
-            else:
-                decoded_message = f"Selector: {function_selector.hex()}, Raw Data: {error_data.hex()}"
-            
-            return decoded_message
+            logging.info(f"Selector: {selector}, Data: {data.hex()}")
+            logging.info(f"Error Selectors: {self.error_selectors.keys()}")
+
+            if selector in self.error_selectors:
+                error_info = self.error_selectors[selector]
+                error_name = error_info['name']
+                inputs = error_info['inputs']
+                decoded_params = self.web3.codec.decode([input['type'] for input in inputs], data)
+                param_str = ', '.join(f"{input['name']}: {value}" for input, value in zip(inputs, decoded_params))
+                return f"Error {error_name}: {param_str}"
+
+            return f"Unknown error with selector {selector} and data {data.hex()}"
         except Exception as e:
             logging.error(f"Error decoding message chunk: {e}")
             raise
@@ -179,13 +231,15 @@ class Master:
     def handle_final_logits_forward(self, inputs_url):
         task_params = {'inputs_url': inputs_url}
         task_id = self.submit_task('final_logits', task_params)
-        return self.wait_for_result('final_logits', task_id)
+        result = self.wait_for_result('final_logits', task_id)
+        return result
 
     def handle_loss_computation(self, logits_url):
         targets_url = self.get_targets_url()
         task_params = {'logits_url': logits_url, 'targets_url': targets_url}
         task_id = self.submit_task('loss', task_params)
-        return self.wait_for_result('loss', task_id)
+        result = self.wait_for_result('loss', task_id)
+        return result
 
     def handle_layer_backward(self, layer_idx, error_url, model_params):
         task_type = f'backward_layer_{layer_idx}'
@@ -193,10 +247,10 @@ class Master:
         task_id = self.submit_task(task_type, task_params)
         result = self.wait_for_result(task_type, task_id)
         self.update_adam_state(task_type, result['adam_m_url'], result['adam_v_url'])
-        return result['result_url']
+        return result['error_url']
 
-    def handle_final_logits_backward(self, error_url, logits_url, model_params):
-        task_params = {'error_url': error_url, 'logits_url': logits_url, 'model_params': model_params}
+    def handle_final_logits_backward(self, error_url, inputs_url, model_params):
+        task_params = {'error_url': error_url, 'inputs_url': inputs_url, 'model_params': model_params}
         task_id = self.submit_task('final_logits_backward', task_params)
         result = self.wait_for_result('final_logits_backward', task_id)
         self.update_adam_state('final_logits_backward', result['adam_m_url'], result['adam_v_url'])
