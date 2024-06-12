@@ -54,9 +54,12 @@ print("Starting worker processes...")
 
 # Start worker.py for each subnet
 for task_type, subnet_address in subnet_addresses.items():
+    base_task_type = task_type.split('_')[0]  # Use only the base task type
+    os.environ['RANK'] = '0'
+    os.environ['WORLD_SIZE'] = '1'
     command = [
         'python', 'worker.py',
-        '--task_type', task_type.split('_')[0],  # Use only the base task type
+        '--task_type', base_task_type,
         '--subnet_address', subnet_address,
         '--private_key', args.private_key,
         '--rpc_url', args.rpc_url,
@@ -65,10 +68,6 @@ for task_type, subnet_address in subnet_addresses.items():
         '--group', str(args.group),
         '--local_storage_dir', args.local_storage_dir
     ]
-    # Add layer information as an environment variable if needed
-    if 'layer' in task_type:
-        layer_idx = task_type.split('_')[-1]
-        command += ['--layer_idx', layer_idx]
     worker_processes.append(subprocess.Popen(command))
 
 # Print workers started stage
