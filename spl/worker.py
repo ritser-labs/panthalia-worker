@@ -46,6 +46,8 @@ def parse_args():
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the worker's Ethereum account")
     parser.add_argument('--rpc_url', type=str, default='http://localhost:8545', help="URL of the Ethereum RPC node")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
+    parser.add_argument('--pool_address', type=str, required=True, help="Pool contract address")
+    parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     return parser.parse_args()
 
 args = parse_args()
@@ -61,8 +63,11 @@ worker_address = worker_account.address
 # Smart contract details
 contract_address = args.subnet_address
 contract_abi = json.loads('YourContractABI')  # Replace with your contract's ABI
+pool_address = args.pool_address
+pool_abi = json.loads('YourPoolABI')  # Replace with your pool contract's ABI
 
 contract = web3.eth.contract(address=contract_address, abi=contract_abi)
+pool_contract = web3.eth.contract(address=pool_address, abi=pool_abi)
 
 # Initialize model and embedding layer in memory
 model_initialized = False
@@ -72,6 +77,7 @@ adam_m = defaultdict(lambda: None)
 adam_v = defaultdict(lambda: None)
 last_gradient_update = defaultdict(lambda: None)
 gradient_update_paused = False
+stake_deposited = False
 
 # Placeholder for freqs_cis and mask
 freqs_cis = None
@@ -175,6 +181,16 @@ def sync_tensors_to_latest_state():
         if not need_update:
             break
         apply_gradient_updates()
+
+def deposit_stake():
+    global stake_deposited
+    if not stake_deposited:
+        tx = pool_contract.functions.depositStake(
+            args.subnet_address,
+            args.group
+        ).transact({'from': worker_address})
+        web3.eth.wait_for_transaction_receipt(tx)
+        stake_deposited = True
 
 def handle_event(event):
     task_id = event['args']['taskId']
@@ -457,6 +473,7 @@ def main():
         # Ensure tensors are up-to-date before processing tasks
         apply_gradient_updates()
         sync_tensors_to_latest_state()
+        deposit_stake()
         for event in event_filter.get_new_entries():
             handle_event(event)
 
