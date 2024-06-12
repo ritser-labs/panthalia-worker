@@ -14,7 +14,7 @@ def forward_pass_input_layer(model, data, activations_url, model_url):
         model.load_state_dict(model_state)
         print("Loaded existing model state.")
     except Exception as e:
-        print(f"No existing model state or unable to load: {e}")
+        print(f"No existing model state or unable to load, generating new weights.")
     
     optimizer.zero_grad()
     activations = model(data)

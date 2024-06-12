@@ -2,12 +2,13 @@ import torch
 from util import safe_serialize, upload_file
 from constants import INPUT_DATA_URL, OUTPUT_DATA_URL
 
-def generate_and_upload_training_data(n_samples=100, input_size=10, output_size=5):
+def generate_and_upload_training_data(n_samples=100000, input_size=10, output_size=10):
     # Generate random inputs
     x = torch.randn(n_samples, input_size)
-    # Assume a simple transformation for output
-    y = torch.randn(n_samples, output_size)  # Ensure output data matches output layer size
-
+    
+    # Linear transformation to generate outputs
+    y = x * 4 + 3
+    
     # Serialize and upload
     serialized_x = safe_serialize(x)
     serialized_y = safe_serialize(y)
