@@ -5,7 +5,7 @@ import requests
 import os
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
-from web3.exceptions import ContractCustomError
+from web3.exceptions import ContractCustomError, TransactionNotFound
 from eth_utils import function_signature_to_4byte_selector
 import struct
 
@@ -55,10 +55,31 @@ class Master:
 
             tx = self.contracts[task_type].functions.submitTaskRequest(encoded_params).transact({
                 'from': self.account.address,
-                'gas': 3000000  # Increase the gas limit
+                'gas': 10000000  # Further increase the gas limit
             })
             receipt = self.web3.eth.wait_for_transaction_receipt(tx)
-            task_id = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)[0]['args']['taskId']
+            logging.info(f"Transaction receipt: {receipt}")
+
+            if receipt['status'] == 0:
+                try:
+                    tx_receipt = self.web3.eth.get_transaction_receipt(tx)
+                    error_message = self.web3.eth.call({
+                        'to': tx_receipt.contractAddress,
+                        'data': tx_receipt.input
+                    }, tx_receipt.blockNumber)
+                    logging.error(f"Error message: {error_message}")
+                except (TransactionNotFound, ValueError) as e:
+                    logging.error(f"Error retrieving transaction receipt: {e}")
+                raise ValueError(f"Transaction failed: {receipt}")
+
+            # Process receipt to get task ID
+            logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
+            logging.info(f"Event logs: {logs}")
+
+            if not logs:
+                raise ValueError("No TaskRequestSubmitted event found in the receipt")
+
+            task_id = logs[0]['args']['taskId']
             logging.info(f"Task submitted successfully. Task ID: {task_id}")
             return task_id
         except ContractCustomError as e:
@@ -172,7 +193,7 @@ class Master:
         task_id = self.submit_task(task_type, task_params)
         result = self.wait_for_result(task_type, task_id)
         self.update_adam_state(task_type, result['adam_m_url'], result['adam_v_url'])
-        return result
+        return result['result_url']
 
     def handle_final_logits_backward(self, error_url, logits_url, model_params):
         task_params = {'error_url': error_url, 'logits_url': logits_url, 'model_params': model_params}
