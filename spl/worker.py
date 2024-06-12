@@ -234,16 +234,16 @@ def handle_event(event):
         result_url = upload_tensor(tensors['outputs'])
     elif task_type == 'backward':
         backward_task(task_params['layer_idx'], error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'])
+        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], task_params['layer_idx'])
     elif task_type == 'final_logits':
         final_logits_task(inputs)
         result_url = upload_tensor(tensors['logits'])
     elif task_type == 'final_logits_backward':
         final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'])
+        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -1)
     elif task_type == 'embed_backward':
         embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'])
+        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -2)
     elif task_type == 'loss':
         loss_task(targets)
         result_url = upload_tensor(tensors['loss'])
@@ -265,10 +265,36 @@ def submit_solution(task_id, result_url, last_block):
     }
     contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')).transact({'from': worker_address})
 
-def upload_tensors_and_grads(error_output, grads):
+def upload_tensors_and_grads(error_output, grads, layer_idx):
     error_output_url = upload_tensor(error_output)
     grads_url = upload_tensor(grads_to_sparse(grads))
-    return json.dumps({'error_output_url': error_output_url, 'grads_url': grads_url})
+    adam_m_sparse, adam_v_sparse = extract_sparse_adam_params(grads, layer_idx)
+    adam_m_url = upload_tensor(adam_m_sparse)
+    adam_v_url = upload_tensor(adam_v_sparse)
+    return json.dumps({'error_output_url': error_output_url, 'grads_url': grads_url, 'adam_m_url': adam_m_url, 'adam_v_url': adam_v_url})
+
+def extract_sparse_adam_params(grads, layer_idx):
+    indices, values_m, values_v = [], [], []
+    if layer_idx == -1:
+        tensor_name = "output"
+    elif layer_idx == -2:
+        tensor_name = "embedding"
+    else:
+        tensor_name = f"layer_{layer_idx}"
+    
+    for grad in grads:
+        if grad is not None:
+            flat_grad = grad.flatten()
+            k = max(1, int(flat_grad.numel() * 0.01))  # 1% of the highest elements in magnitude
+            topk = torch.topk(flat_grad.abs(), k)
+            indices.append(topk.indices)
+            values_m.append(adam_m[tensor_name].flatten()[topk.indices])
+            values_v.append(adam_v[tensor_name].flatten()[topk.indices])
+    indices = torch.cat(indices)
+    values_m = torch.cat(values_m)
+    values_v = torch.cat(values_v)
+    shape = grads[0].shape  # Assuming all grads have the same shape
+    return torch.sparse_coo_tensor(indices.unsqueeze(0), values_m, shape, device=device), torch.sparse_coo_tensor(indices.unsqueeze(0), values_v, shape, device=device)
 
 def grads_to_sparse(grads):
     indices, values = [], []
@@ -279,6 +305,8 @@ def grads_to_sparse(grads):
             topk = torch.topk(flat_grad.abs(), k)
             indices.append(topk.indices)
             values.append(flat_grad[topk.indices])
+            # Zero out the rest of the gradient
+            flat_grad[topk.indices] = 0
     indices = torch.cat(indices)
     values = torch.cat(values)
     shape = grads[0].shape  # Assuming all grads have the same shape
