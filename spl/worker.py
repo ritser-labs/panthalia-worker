@@ -68,10 +68,6 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, output
 def backward_task(layer_idx, error_file, state_dict_file, error_output_file, outputs_file):
     error, _ = load_from_disk(error_file)
     
-    # Check if error is None
-    if error is None:
-        raise ValueError(f"Failed to load error tensor from {error_file}")
-
     # Load outputs, inputs, and layer from the forward pass
     outputs, inputs, layer = load_from_disk(outputs_file)
 
@@ -124,12 +120,22 @@ def final_logits_backward_task(error_file, logits_file, error_output_file):
 
     logits_grad = logits.grad  # Get the gradients with respect to logits
     logging.debug(f"Gradients for logits: {logits_grad.shape}")
-    
+
+    # Reshape logits_grad to match the expected shape for transformer layers
+    batch_size, seq_len, vocab_size = logits_grad.shape
+    model_dim = model_args.dim
+
+    # Compute the gradients with respect to the transformer layer outputs
+    # Sum over the vocabulary dimension to get the error tensor for the transformer layers
+    transformer_error = torch.einsum('bij,jk->bik', logits_grad, output_layer.weight)
+
     # Get the gradients for the output layer parameters
     grads = [param.grad for param in output_layer.parameters() if param.grad is not None]
     logging.debug(f"Gradients for final logits layer parameters: {grads}")
 
-    save_to_disk((logits_grad, grads), error_output_file)
+    save_to_disk((transformer_error, grads), error_output_file)
+
+
 
 
 def embed_backward_task(error_file, inputs_file, error_output_file):
