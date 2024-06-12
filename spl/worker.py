@@ -65,7 +65,7 @@ worker_address = worker_account.address
 
 # Load contract ABIs from the abis folder
 def load_abi(contract_name):
-    with open(f"abis/{contract_name}.json", 'r') as file:
+    with open(f"abis/{contract_name}.sol/{contract_name}.json", 'r') as file:
         return json.load(file)['abi']
 
 subnet_manager_abi = load_abi('SubnetManager')
