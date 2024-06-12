@@ -1,6 +1,23 @@
 import torch
 import os
 
+class ModelArgs:
+    def __init__(self, vocab_size, dim, n_layers, n_heads, ffn_dim_multiplier):
+        self.vocab_size = vocab_size
+        self.dim = dim
+        self.n_layers = n_layers
+        self.n_heads = n_heads
+        self.ffn_dim_multiplier = ffn_dim_multiplier
+
+# Define global model_args
+model_args = ModelArgs(
+    vocab_size=50257,  # Example value, update as needed
+    dim=512,
+    n_layers=6,
+    n_heads=8,
+    ffn_dim_multiplier=4
+)
+
 def save_to_disk(data, filename):
     torch.save(data, filename)
     print(f"Saved to {filename}")

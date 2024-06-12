@@ -1,7 +1,7 @@
 import argparse
 import torch
-from common import load_from_disk, save_to_disk, load_layer_state_dict, save_layer_state_dict
-from model import TransformerLayer, ModelArgs, Transformer
+from common import load_from_disk, save_to_disk, load_layer_state_dict, save_layer_state_dict, model_args  # Import global model_args
+from model import TransformerLayer, Transformer
 from tokenizer import Tokenizer
 
 def run_layer_step(layer, x, is_forward=True, next_error=None, optimizer=None, scaler=None, loss_fn=None, pad_id=None):
@@ -28,9 +28,6 @@ def run_layer_step(layer, x, is_forward=True, next_error=None, optimizer=None, s
         grads = [param.grad for param in layer.parameters()]
         return loss.item(), grads
 
-
-
-
 def embed_task(batch_file):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     batch = load_from_disk(batch_file)
@@ -38,32 +35,17 @@ def embed_task(batch_file):
         raise ValueError(f"Failed to load batch from {batch_file}")
     batch = batch.to(device)
     tokenizer = Tokenizer(encoding_name='cl100k_base')
-    model_args = ModelArgs(
-        vocab_size=tokenizer.get_vocab_size(),
-        dim=512,
-        n_layers=6,
-        n_heads=8,
-        ffn_dim_multiplier=4
-    )
-    model = Transformer(model_args).to(device)
+    model = Transformer().to(device)
     inputs = model.embedding(batch).permute(1, 0, 2)
     save_to_disk(inputs.cpu(), "data/inputs.pt")
 
 def forward_task(layer_idx, inputs_file):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    layer = TransformerLayer(dim=512, n_heads=8, ffn_dim=2048).to(device)
-    tokenizer = Tokenizer(encoding_name='cl100k_base')
+    layer = TransformerLayer(dim=model_args.dim, n_heads=model_args.n_heads, ffn_dim=model_args.dim * model_args.ffn_dim_multiplier).to(device)
     state_dict = load_layer_state_dict(f"data/layer_{layer_idx}.pt")
     if state_dict is None:
         # Initialize the layer state dictionary if missing
         print(f"Initializing state dict for layer {layer_idx}")
-        model_args = ModelArgs(
-            vocab_size=tokenizer.get_vocab_size(),
-            dim=512,
-            n_layers=6,
-            n_heads=8,
-            ffn_dim_multiplier=4
-        )
         layer = TransformerLayer(model_args.dim, model_args.n_heads, model_args.dim * model_args.ffn_dim_multiplier).to(device)
         save_layer_state_dict(layer.state_dict(), f"data/layer_{layer_idx}.pt")
         state_dict = load_layer_state_dict(f"data/layer_{layer_idx}.pt")
@@ -84,21 +66,13 @@ def final_logits_task(inputs_file):
     if inputs is None:
         raise ValueError(f"Failed to load inputs from {inputs_file}")
     inputs = inputs.to(device)
-    tokenizer = Tokenizer(encoding_name='cl100k_base')
-    model_args = ModelArgs(
-        vocab_size=tokenizer.get_vocab_size(),
-        dim=512,
-        n_layers=6,
-        n_heads=8,
-        ffn_dim_multiplier=4
-    )
-    model = Transformer(model_args).to(device)
+    model = Transformer().to(device)
     logits = model.fc(inputs.permute(1, 0, 2))
     save_to_disk(logits.cpu(), "data/logits.pt")
 
 def backward_task(layer_idx, error_file):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    layer = TransformerLayer(dim=512, n_heads=8, ffn_dim=2048).to(device)
+    layer = TransformerLayer(dim=model_args.dim, n_heads=model_args.n_heads, ffn_dim=model_args.dim * model_args.ffn_dim_multiplier).to(device)
     state_dict = load_layer_state_dict(f"data/layer_{layer_idx}.pt")
     if state_dict is None:
         raise ValueError(f"Failed to load layer state dict for layer {layer_idx}")
@@ -108,7 +82,7 @@ def backward_task(layer_idx, error_file):
         raise ValueError(f"Failed to load error from {error_file}")
     error = error.to(device)
     if len(error.shape) == 2:
-        error = error.unsqueeze(0) 
+        error = error.unsqueeze(0)
     optimizer = torch.optim.Adam(layer.parameters(), lr=1e-4)
     scaler = torch.cuda.amp.GradScaler()
     tokenizer = Tokenizer(encoding_name='cl100k_base')
@@ -120,7 +94,6 @@ def backward_task(layer_idx, error_file):
     print(f"Saving error_grads with shape {len(error_grads)}")
     save_to_disk(error_grads, f"data/error_layer_{layer_idx}.pt")
     save_layer_state_dict(layer.state_dict(), f"data/layer_{layer_idx}.pt")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
