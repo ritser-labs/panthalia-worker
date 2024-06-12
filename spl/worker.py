@@ -10,7 +10,7 @@ import os
 import torch.distributed as dist
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
@@ -118,15 +118,17 @@ def final_logits_task(inputs_file, state_dict_file, logits_file):
     # Save logits along with the computation graph
     save_to_disk((logits, inputs, output_layer), logits_file)
 
-def final_logits_backward_task(error_file, logits_file, error_output_file):
+def final_logits_backward_task(error_file, inputs_file, state_dict_file, error_output_file):
+    inputs = load_from_disk(inputs_file)
     error = load_from_disk(error_file)
-    
-    # Load logits, inputs, and output_layer from the forward pass
-    logits, inputs, output_layer = load_from_disk(logits_file)
+    state_dict = load_layer_state_dict(state_dict_file)
 
-    # Ensure the error tensor matches the logits shape
-    if error.shape != logits.shape:
-        raise ValueError(f"Error tensor shape {error.shape} does not match logits shape {logits.shape}")
+    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
+    output_layer.load_state_dict(state_dict)
+    
+    logits = output_layer(inputs.to(device))
+    
+    logits.retain_grad()
 
     # Perform the backward pass on the loaded logits
     logits.backward(error.to(device), retain_graph=True)  # Backward pass on logits
@@ -136,13 +138,13 @@ def final_logits_backward_task(error_file, logits_file, error_output_file):
 
     # Compute the gradients with respect to the transformer layer outputs
     # Sum over the vocabulary dimension to get the error tensor for the transformer layers
-    transformer_error = torch.einsum('bij,jk->bik', logits_grad, output_layer.weight)
+    #logits_grad = torch.einsum('bij,jk->bik', logits_grad, output_layer.weight)
 
     # Get the gradients for the output layer parameters
     grads = [param.grad for param in output_layer.parameters() if param.grad is not None]
     logging.debug(f"Gradients for final logits layer parameters: {grads}")
 
-    save_to_disk((transformer_error, grads), error_output_file)
+    save_to_disk((logits_grad, grads), error_output_file)
 
 def embed_backward_task(error_file, batch_file, embedding_file, error_output_file):
     error, _ = load_from_disk(error_file)
@@ -159,6 +161,8 @@ def embed_backward_task(error_file, batch_file, embedding_file, error_output_fil
 
     error = error.view(embeddings.shape)  # Ensure the gradient tensor matches the output tensor shape
     logging.info(f"Reshaped error tensor shape: {error.shape}")
+    
+    embeddings.retain_grad()
 
     embeddings.backward(error.to(device), retain_graph=True)
 
@@ -291,7 +295,7 @@ if __name__ == "__main__":
     elif args.task == "final_logits":
         final_logits_task(args.inputs, args.state_dict, args.logits_file)
     elif args.task == "final_logits_backward":
-        final_logits_backward_task(args.error, args.logits_file, args.error_output_file)
+        final_logits_backward_task(args.error, args.inputs, args.state_dict, args.error_output_file)
     elif args.task == "embed_backward":
         embed_backward_task(args.error, args.batch, args.embedding_file, args.error_output_file)
     elif args.task == "loss":
