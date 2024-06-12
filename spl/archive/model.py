@@ -76,6 +76,16 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
+import logging
+
+# Add this at the beginning of your model.py
+logging.basicConfig(level=logging.DEBUG)
+
+# Add a function to check for NaNs and log details
+def check_for_nans(tensor, name):
+    if torch.isnan(tensor).any():
+        logging.error(f"NaNs detected in {name}")
+        logging.error(f"Tensor details: {tensor}")
 
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
@@ -116,8 +126,22 @@ class Attention(nn.Module):
             init_method=lambda x: x,
         )
 
-        self.cache_k = None
-        self.cache_v = None
+        self.cache_k = torch.zeros(
+            (
+                args.max_batch_size,
+                args.max_seq_len,
+                self.n_local_kv_heads,
+                self.head_dim,
+            )
+        ).cuda()
+        self.cache_v = torch.zeros(
+            (
+                args.max_batch_size,
+                args.max_seq_len,
+                self.n_local_kv_heads,
+                self.head_dim,
+            )
+        ).cuda()
 
     def forward(
         self,
@@ -129,32 +153,27 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
+        check_for_nans(xq, "xq after wq")
+        check_for_nans(xk, "xk after wk")
+        check_for_nans(xv, "xv after wv")
+
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        if self.cache_k is None or self.cache_v is None:
-            self.cache_k = torch.zeros(
-                (bsz, start_pos + seqlen, self.n_local_kv_heads, self.head_dim),
-                device=xq.device,
-                dtype=xq.dtype,
-            )
-            self.cache_v = torch.zeros(
-                (bsz, start_pos + seqlen, self.n_local_kv_heads, self.head_dim),
-                device=xq.device,
-                dtype=xq.dtype,
-            )
-        else:
-            self.cache_k = self.cache_k[:, :start_pos + seqlen, :, :]
-            self.cache_v = self.cache_v[:, :start_pos + seqlen, :, :]
+        check_for_nans(xq, "xq after rotary embedding")
+        check_for_nans(xk, "xk after rotary embedding")
 
-        self.cache_k[:, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:, start_pos : start_pos + seqlen] = xv
+        self.cache_k = self.cache_k.to(xq)
+        self.cache_v = self.cache_v.to(xq)
 
-        keys = self.cache_k[:, : start_pos + seqlen]
-        values = self.cache_v[:, : start_pos + seqlen]
+        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+
+        keys = self.cache_k[:bsz, : start_pos + seqlen]
+        values = self.cache_v[:bsz, : start_pos + seqlen]
 
         keys = repeat_kv(keys, self.n_rep)
         values = repeat_kv(values, self.n_rep)
@@ -166,6 +185,7 @@ class Attention(nn.Module):
         if mask is not None:
             scores = scores + mask
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+        check_for_nans(scores, "attention scores after softmax")
         output = torch.matmul(scores, values)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
@@ -196,9 +216,17 @@ class FeedForward(nn.Module):
         )
 
     def forward(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        h = self.w1(x)
+        check_for_nans(h, "w1 output")
+        h = F.silu(h)
+        check_for_nans(h, "silu output")
+        h = h * self.w3(x)
+        check_for_nans(h, "silu * w3 output")
+        h = self.w2(h)
+        check_for_nans(h, "w2 output")
+        return h
 
-
+# Inside the TransformerBlock forward method, add NaN checks
 class TransformerBlock(nn.Module):
     def __init__(self, layer_id: int, args: ModelArgs):
         super().__init__()
@@ -223,10 +251,18 @@ class TransformerBlock(nn.Module):
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
     ):
-        h = x + self.attention(self.attention_norm(x), start_pos, freqs_cis, mask)
-        out = h + self.feed_forward(self.ffn_norm(h))
-        return out
-
+        h = self.attention_norm(x)
+        check_for_nans(h, f"layer {self.layer_id} attention norm output")
+        h = self.attention(h, start_pos, freqs_cis, mask)
+        check_for_nans(h, f"layer {self.layer_id} attention output")
+        x = x + h
+        h = self.ffn_norm(x)
+        check_for_nans(h, f"layer {self.layer_id} feed forward norm output")
+        h = self.feed_forward(h)
+        check_for_nans(h, f"layer {self.layer_id} feed forward output")
+        x = x + h
+        check_for_nans(x, f"layer {self.layer_id} final output")
+        return x
 
 class Transformer(nn.Module):
     def __init__(self, params: ModelArgs):

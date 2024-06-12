@@ -10,6 +10,13 @@ import os
 import torch.distributed as dist
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 
+logging.basicConfig(level=logging.DEBUG)
+
+def check_for_nans(tensor, name):
+    if torch.isnan(tensor).any():
+        logging.error(f"NaNs detected in {name}")
+
+
 def initialize_distributed_environment():
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12356'
@@ -19,27 +26,30 @@ def initialize_distributed_environment():
 def embed_task(batch_file, embedding_file, inputs_file):
     batch = load_from_disk(batch_file)
     vocab_size = tokenizer.get_vocab_size()
-    
+
     embedding = VocabParallelEmbedding(vocab_size, model_args.dim)
     embedding.load_state_dict(load_layer_state_dict(embedding_file))
-    
+
     inputs = embedding(batch)
+    check_for_nans(inputs, "embedding outputs")
     save_to_disk(inputs, inputs_file)
 
 def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits_file):
     inputs = load_from_disk(inputs_file)
     state_dict = load_layer_state_dict(state_dict_file)
     freqs_cis = load_from_disk(freqs_cis_file)
-    
+
     layer = TransformerBlock(layer_idx, model_args)
     layer.load_state_dict(state_dict)
-    
+
     start_pos = 0  # Adjust as necessary
     seqlen = inputs.shape[1]
     freqs_cis = freqs_cis[start_pos: start_pos + seqlen]
-    
+
     outputs = layer(inputs, start_pos, freqs_cis, None)
+    check_for_nans(outputs, f"layer {layer_idx} outputs")
     save_to_disk(outputs, logits_file)
+
 
 def backward_task(layer_idx, error_file, inputs_file, state_dict_file, error_output_file):
     error = load_from_disk(error_file)
@@ -68,14 +78,15 @@ def backward_task(layer_idx, error_file, inputs_file, state_dict_file, error_out
 def final_logits_task(inputs_file, state_dict_file, logits_file):
     inputs = load_from_disk(inputs_file)
     state_dict = load_layer_state_dict(state_dict_file)
-    
+
     if state_dict is None:
         raise ValueError("Failed to load state dict for the output layer")
 
     output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False)
     output_layer.load_state_dict(state_dict)
-    
+
     logits = output_layer(inputs)
+    check_for_nans(logits, "final logits")
     save_to_disk(logits, logits_file)
 
 def final_logits_backward_task(error_file, inputs_file, state_dict_file, error_output_file):
@@ -122,15 +133,17 @@ def embed_backward_task(error_file, batch_file, embedding_file, error_output_fil
 def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     logits = load_from_disk(logits_file)
     targets = load_from_disk(targets_file)
-    
+
     pad_id = tokenizer.pad_id
-    
+
     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=pad_id)
     save_to_disk(loss.item(), loss_file)
-    
+
     logits.retain_grad()
     loss.backward()
+    check_for_nans(logits.grad, "logits gradients")
     save_to_disk(logits.grad, logits_grad_file)
+
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     if layer_idx == -1:
