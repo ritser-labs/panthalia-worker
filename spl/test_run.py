@@ -56,7 +56,14 @@ print("Starting worker processes...")
 
 # Start worker.py for each subnet
 for task_type, subnet_address in subnet_addresses.items():
-    base_task_type = task_type.split('_')[0]  # Use only the base task type
+    # Determine base_task_type correctly
+    if 'forward_layer' in task_type:
+        base_task_type = 'forward'
+    elif 'backward_layer' in task_type:
+        base_task_type = 'backward'
+    else:
+        base_task_type = task_type  # Use the full task type as is
+
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
     command = [
