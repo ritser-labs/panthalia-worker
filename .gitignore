@@ -5,3 +5,4 @@ __pycache__/
 
 pipeline/storage
 spl/data/*
+spl/out.txt
