@@ -15,6 +15,7 @@ from fairscale.nn.model_parallel.initialize import initialize_model_parallel, mo
 from ipfs import upload_to_ipfs  # Assuming a function to upload files to IPFS or any other storage service
 from typing import Optional
 from io import BytesIO
+import time
 
 import os
 
@@ -78,6 +79,7 @@ adam_v = defaultdict(lambda: None)
 last_gradient_update = defaultdict(lambda: None)
 gradient_update_paused = False
 stake_deposited = False
+processed_tasks = set()
 
 # Placeholder for freqs_cis and mask
 freqs_cis = None
@@ -249,6 +251,8 @@ def handle_event(event):
     if result_url:
         last_block = last_gradient_update[task_type]
         submit_solution(task_id, result_url, last_block)
+
+    processed_tasks.add(task_id)
 
     # Resume gradient updates and ensure tensors are up-to-date
     resume_gradient_updates()
@@ -466,6 +470,20 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
     logging.info(f"Updated state dict for {tensor_name}")
 
+def check_and_finalize_verifications():
+    current_time = int(time.time())
+    for task_id in list(processed_tasks):
+        task = contract.functions.getTask(task_id).call()
+        task_status = task[0]  # Assuming task.status is the first item in the Task struct
+        time_status_changed = task[3]  # Assuming task.timeStatusChanged is the fourth item in the Task struct
+        max_dispute_time = contract.functions.maxDisputeTime().call()
+
+        if task_status == 2 and (current_time - time_status_changed) >= max_dispute_time:  # Status 2 means SolutionSubmitted
+            if contract.functions.canVerificationBeFinalized(task_id).call():
+                tx = contract.functions.finalizeVerification(task_id).transact({'from': worker_address})
+                web3.eth.wait_for_transaction_receipt(tx)
+                processed_tasks.remove(task_id)
+
 def main():
     initialize_model_and_embedding()
     event_filter = contract.events.SolverSelected.createFilter(fromBlock='latest')
@@ -476,6 +494,8 @@ def main():
         deposit_stake()
         for event in event_filter.get_new_entries():
             handle_event(event)
+        check_and_finalize_verifications()
+        time.sleep(10)  # Adjust the sleep time as needed
 
 if __name__ == "__main__":
     main()
