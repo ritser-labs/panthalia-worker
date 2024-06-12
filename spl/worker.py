@@ -12,7 +12,6 @@ from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
 from common import model_args, tokenizer, device
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
-from ipfs import upload_to_ipfs  # Assuming a function to upload files to IPFS or any other storage service
 from typing import Optional
 from io import BytesIO
 import time
@@ -48,9 +47,13 @@ def parse_args():
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--pool_address', type=str, required=True, help="Pool contract address")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
+    parser.add_argument('--local_storage_dir', type=str, default='local_storage', help="Directory for local storage of files")
     return parser.parse_args()
 
 args = parse_args()
+
+# Ensure local storage directory exists
+os.makedirs(args.local_storage_dir, exist_ok=True)
 
 # Initialize web3
 web3 = Web3(Web3.HTTPProvider(args.rpc_url))
@@ -128,7 +131,9 @@ def download_file(url):
     return torch.load(BytesIO(response.content))
 
 def upload_tensor(tensor):
-    return upload_to_ipfs(tensor)  # Function to upload the tensor to IPFS or any other storage service
+    local_file_path = os.path.join(args.local_storage_dir, f'{int(time.time())}.pt')
+    torch.save(tensor, local_file_path)
+    return f'file://{local_file_path}'
 
 def apply_gradient_updates():
     global tensors, adam_m, adam_v, last_gradient_update

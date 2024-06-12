@@ -12,6 +12,7 @@ def parse_args():
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the worker's Ethereum account")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
+    parser.add_argument('--local_storage_dir', type=str, default='local_storage', help="Directory for local storage of files")
     return parser.parse_args()
 
 args = parse_args()
