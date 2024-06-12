@@ -94,7 +94,7 @@ def embed_backward_task(error_file):
     
     batch = load_from_disk("data/batch.pt")
     embeddings = embedding(batch)
-    embeddings.requires_grad = True
+    embeddings.retain_grad()  # Ensure gradients are retained
     
     # Backward pass
     embeddings.backward(error)
