@@ -19,8 +19,11 @@ class Master:
         self.subnet_addresses = subnet_addresses
         self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, subnet_addresses)
 
+        if 'SubnetManager' not in self.contracts:
+            raise ValueError("SubnetManager contract not found. Please check the subnet_addresses configuration.")
+
     def approve_token(self, token_address, spender_address, amount):
-        token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
+        token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['SubnetManager'])
         nonce = self.web3.eth.get_transaction_count(self.account.address)
         gas_price = self.web3.eth.gas_price
 
@@ -53,8 +56,8 @@ class Master:
             placeholder_task_id = 0
             fee = self.contracts[task_type].functions.calculateFee(placeholder_task_id).call()
 
-            # Perform token approval using the 'embed' contract instance to get the SubnetManager details
-            subnet_manager_contract = self.contracts['embed']
+            # Perform token approval using the 'SubnetManager' contract instance
+            subnet_manager_contract = self.contracts[task_type]
             token_address = subnet_manager_contract.functions.token().call()
             spender_address = self.contracts[task_type].address
             self.approve_token(token_address, spender_address, fee)
@@ -267,4 +270,3 @@ if __name__ == "__main__":
 
     master = Master(rpc_url, private_key, sot_url, subnet_addresses)
     master.main()
-

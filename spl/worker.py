@@ -141,35 +141,39 @@ def apply_gradient_updates():
 
     response = requests.get(args.sot_url, stream=True)
     for line in response.iter_lines():
-        if line and not gradient_update_paused:
-            update = json.loads(line)
-            block_number = update['block_number']
-            for tensor_name, sparse_update in update['gradients'].items():
-                values = torch.tensor(sparse_update['values'], device=device)
-                indices = torch.tensor(sparse_update['indices'], device=device)
-                shape = sparse_update['shape']
+        if line:
+            try:
+                update = json.loads(line.decode('utf-8'))
+                block_number = update['block_number']
+                for tensor_name, sparse_update in update['gradients'].items():
+                    values = torch.tensor(sparse_update['values'], device=device)
+                    indices = torch.tensor(sparse_update['indices'], device=device)
+                    shape = sparse_update['shape']
 
-                # Apply gradient update
-                tensor = tensors[tensor_name]
-                if tensor is None:
-                    tensor = torch.zeros(shape, device=device)
-                    tensors[tensor_name] = tensor
+                    # Apply gradient update
+                    tensor = tensors[tensor_name]
+                    if tensor is None:
+                        tensor = torch.zeros(shape, device=device)
+                        tensors[tensor_name] = tensor
 
-                grad_update = torch.sparse_coo_tensor(indices, values, shape, device=device).to_dense()
-                tensor.add_(grad_update)
-                
-                last_gradient_update[tensor_name] = block_number
+                    grad_update = torch.sparse_coo_tensor(indices, values, shape, device=device).to_dense()
+                    tensor.add_(grad_update)
 
-                # Apply Adam updates if needed
-                if tensor_name in adam_m:
-                    m = adam_m[tensor_name]
-                    v = adam_v[tensor_name]
-                    if m is None:
-                        m = torch.zeros_like(tensor, device=device)
-                        adam_m[tensor_name] = m
-                    if v is None:
-                        v = torch.zeros_like(tensor, device=device)
-                        adam_v[tensor_name] = v
+                    last_gradient_update[tensor_name] = block_number
+
+                    # Apply Adam updates if needed
+                    if tensor_name in adam_m:
+                        m = adam_m[tensor_name]
+                        v = adam_v[tensor_name]
+                        if m is None:
+                            m = torch.zeros_like(tensor, device=device)
+                            adam_m[tensor_name] = m
+                        if v is None:
+                            v = torch.zeros_like(tensor, device=device)
+                            adam_v[tensor_name] = v
+            except json.JSONDecodeError as e:
+                logging.error(f"Failed to decode JSON: {e}")
+                continue
 
 def pause_gradient_updates():
     global gradient_update_paused
