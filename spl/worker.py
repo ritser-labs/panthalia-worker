@@ -109,7 +109,11 @@ def final_logits_backward_task(error_file, inputs_file, state_dict_file, error_o
     inputs = load_from_disk(inputs_file)
     inputs.requires_grad = True
     logits = output_layer(inputs)
-    
+
+    # Select only the last token logits
+    logits = logits[:, -1, :]
+
+    error = error.view(logits.shape)  # Ensure the gradient tensor matches the output tensor shape
     logits.backward(error)
     
     grads = [param.grad for param in output_layer.parameters()]
@@ -150,7 +154,7 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
 
     pad_id = tokenizer.pad_id
 
-    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=pad_id)
+    loss = F.cross_entropy(logits, targets.view(-1), ignore_index=pad_id)
     save_to_disk(loss.item(), loss_file)
 
     logits.retain_grad()
