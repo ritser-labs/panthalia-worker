@@ -35,7 +35,7 @@ def embed_task(batch_file):
         raise ValueError(f"Failed to load batch from {batch_file}")
     batch = batch.to(device)
     tokenizer = Tokenizer(encoding_name='cl100k_base')
-    model = Transformer().to(device)
+    model = Transformer(model_args).to(device)
     inputs = model.embedding(batch).permute(1, 0, 2)
     save_to_disk(inputs.cpu(), "data/inputs.pt")
 
@@ -66,7 +66,7 @@ def final_logits_task(inputs_file):
     if inputs is None:
         raise ValueError(f"Failed to load inputs from {inputs_file}")
     inputs = inputs.to(device)
-    model = Transformer().to(device)
+    model = Transformer(model_args).to(device)
     logits = model.fc(inputs.permute(1, 0, 2))
     save_to_disk(logits.cpu(), "data/logits.pt")
 
