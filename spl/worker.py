@@ -34,7 +34,7 @@ def embed_task(batch_file, embedding_file, inputs_file):
     check_for_nans(inputs, "embedding outputs")
     save_to_disk(inputs, inputs_file)
 
-def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits_file):
+def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits_file, mask_file):
     inputs = load_from_disk(inputs_file)
     if torch.isnan(inputs).any() or torch.isinf(inputs).any():
         raise ValueError(f"NaNs or Infs detected in inputs for layer {layer_idx}")
@@ -45,6 +45,7 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits
             raise ValueError(f"NaNs or Infs detected in weights of layer {layer_idx}")
 
     freqs_cis = load_from_disk(freqs_cis_file)
+    mask = load_from_disk(mask_file)
 
     layer = TransformerBlock(layer_idx, model_args)
     layer.load_state_dict(state_dict)
@@ -53,33 +54,47 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits
     seqlen = inputs.shape[1]
     freqs_cis = freqs_cis[start_pos: start_pos + seqlen]
 
-    outputs = layer(inputs, start_pos, freqs_cis, None)
+    outputs = layer(inputs, start_pos, freqs_cis, mask)
     check_for_nans(outputs, f"layer {layer_idx} outputs")
     save_to_disk(outputs, logits_file)
 
-def backward_task(layer_idx, error_file, inputs_file, state_dict_file, error_output_file):
+def backward_task(layer_idx, error_file, inputs_file, state_dict_file, error_output_file, mask_file):
     error = load_from_disk(error_file)
     state_dict = load_layer_state_dict(state_dict_file)
     
     layer = TransformerBlock(layer_idx, model_args)
     layer.load_state_dict(state_dict)
     
-    # Forward pass
+    # Use precomputed forward activations
     inputs = load_from_disk(inputs_file)
     inputs.requires_grad = True
-    start_pos = 0  # Adjust as necessary
-    freqs_cis = precompute_freqs_cis(model_args.dim // model_args.n_heads, model_args.max_seq_len * 2, model_args.rope_theta)
-    freqs_cis = freqs_cis[start_pos: start_pos + inputs.shape[1]]
-    outputs = layer(inputs, start_pos, freqs_cis, None)
-    
-    # Reshape error to match the output shape
-    error = error.view(outputs.shape)
-    
     # Backward pass
-    outputs.backward(error)
+    error = error.view(inputs.shape)  # Ensure the gradient tensor matches the output tensor shape
+    inputs.backward(error)
     
     grads = [param.grad for param in layer.parameters()]
     save_to_disk((inputs.grad, grads), error_output_file)
+
+def rmsnorm_backward_task(inputs_file, error_file, normed_error_file):
+    inputs = load_from_disk(inputs_file)
+    inputs.requires_grad = True
+    
+    error = load_from_disk(error_file)
+    
+    norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+    
+    # Forward pass
+    normed_inputs = norm(inputs)
+    
+    # Ensure error has the same shape as normed_inputs
+    error = error.view_as(normed_inputs)
+    
+    # Backward pass
+    normed_inputs.backward(error)
+    
+    # Save the gradients
+    save_to_disk(inputs.grad, normed_error_file)
+
 
 def final_logits_task(inputs_file, state_dict_file, logits_file):
     inputs = load_from_disk(inputs_file)
@@ -208,7 +223,10 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=str, required=True, choices=["embed", "forward", "backward", "final_logits", "final_logits_backward", "embed_backward", "loss", "apply_adamw"])
+    parser.add_argument("--task", type=str, required=True, choices=[
+        "embed", "forward", "backward", "final_logits", "final_logits_backward", 
+        "embed_backward", "loss", "apply_adamw", "rmsnorm_backward"
+    ])
     parser.add_argument("--layer_idx", type=int, required=False)
     parser.add_argument("--inputs", type=str, required=False)
     parser.add_argument("--error", type=str, required=False)
@@ -229,16 +247,19 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, required=False)
     parser.add_argument("--t", type=int, required=False)
     parser.add_argument("--freqs_cis", type=str, required=False)
+    parser.add_argument("--mask", type=str, required=False)
+    parser.add_argument("--normed_error_file", type=str, required=False)
     args = parser.parse_args()
+
     initialize_distributed_environment()
     initialize_model_parallel(model_parallel_size_=1)
 
     if args.task == "embed":
         embed_task(args.batch, args.embedding_file, args.inputs)
     elif args.task == "forward":
-        forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.logits_file)
+        forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.logits_file, args.mask)
     elif args.task == "backward":
-        backward_task(args.layer_idx, args.error, args.inputs, args.state_dict, args.error_output_file)
+        backward_task(args.layer_idx, args.error, args.inputs, args.state_dict, args.error_output_file, args.mask)
     elif args.task == "final_logits":
         final_logits_task(args.inputs, args.state_dict, args.logits_file)
     elif args.task == "final_logits_backward":
@@ -250,5 +271,7 @@ if __name__ == "__main__":
     elif args.task == "apply_adamw":
         grads = load_from_disk(args.grads)
         apply_adamw(args.layer_idx, grads, args.learning_rate, args.beta1, args.beta2, args.epsilon, args.weight_decay, args.t)
+    elif args.task == "rmsnorm_backward":
+        rmsnorm_backward_task(args.inputs, args.error, args.normed_error_file)
 
     dist.destroy_process_group()
