@@ -14,6 +14,7 @@ from common import model_args, tokenizer, device
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from ipfs import upload_to_ipfs  # Assuming a function to upload files to IPFS or any other storage service
 from typing import Optional
+from io import BytesIO
 
 import os
 
@@ -113,7 +114,7 @@ def initialize_distributed_environment():
 
 def download_file(url):
     response = requests.get(url)
-    return torch.load(response.content)
+    return torch.load(BytesIO(response.content))
 
 def upload_tensor(tensor):
     return upload_to_ipfs(tensor)  # Function to upload the tensor to IPFS or any other storage service
@@ -127,8 +128,8 @@ def apply_gradient_updates():
             update = json.loads(line)
             block_number = update['block_number']
             for tensor_name, sparse_update in update['gradients'].items():
-                values = sparse_update['values']
-                indices = sparse_update['indices']
+                values = torch.tensor(sparse_update['values'], device=device)
+                indices = torch.tensor(sparse_update['indices'], device=device)
                 shape = sparse_update['shape']
 
                 # Apply gradient update
@@ -164,15 +165,16 @@ def resume_gradient_updates():
 
 def sync_tensors_to_latest_state():
     while True:
-        response = requests.get(args.sot_url + "/latest_state")
+        response = requests.get(f"{args.sot_url}/latest_state")
         latest_state = response.json()
+        need_update = False
         for tensor_name, state in latest_state.items():
-            tensor = tensors[tensor_name]
-            if tensor is None or last_gradient_update[tensor_name] < state['block_number']:
-                apply_gradient_updates()
+            if tensor_name not in tensors or last_gradient_update[tensor_name] < state['block_number']:
+                need_update = True
                 break
-        else:
+        if not need_update:
             break
+        apply_gradient_updates()
 
 def handle_event(event):
     task_id = event['args']['taskId']
