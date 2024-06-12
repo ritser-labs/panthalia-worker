@@ -27,6 +27,14 @@ pool_address = deployment_config['pool']
 
 worker_processes = []
 
+# Start sot.py
+sot_command = ['python', 'sot.py']
+sot_process = subprocess.Popen(sot_command)
+print("Started sot.py with PID:", sot_process.pid)
+
+# Wait for SOT service to be available
+time.sleep(10)
+
 # Start worker.py for each subnet
 for task_type, subnet_address in subnet_addresses.items():
     command = [
@@ -61,3 +69,7 @@ master_process.wait()
 for p in worker_processes:
     p.terminate()
     p.wait()
+
+# Terminate SOT process
+sot_process.terminate()
+sot_process.wait()
