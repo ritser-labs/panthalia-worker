@@ -1,16 +1,104 @@
 import argparse
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from common import save_to_disk, load_from_disk, load_layer_state_dict, save_layer_state_dict, model_args, tokenizer, device
-from tokenizer import Tokenizer
-from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, RMSNorm, precompute_freqs_cis
+import json
 import logging
-import os
+import requests
+import torch
+import torch.nn.functional as F
 import torch.distributed as dist
+from dataclasses import dataclass
+from web3 import Web3
+from web3.middleware import geth_poa_middleware
+from collections import defaultdict
+from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
+from common import model_args, tokenizer, device
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
+from ipfs import upload_to_ipfs  # Assuming a function to upload files to IPFS or any other storage service
+from typing import Optional
+
+import os
 
 logging.basicConfig(level=logging.DEBUG)
+
+@dataclass
+class ModelArgs:
+    dim: int = 4096
+    n_layers: int = 32
+    n_heads: int = 32
+    n_kv_heads: Optional[int] = None
+    vocab_size: int = -1
+    multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
+    ffn_dim_multiplier: Optional[float] = None
+    norm_eps: float = 1e-5
+    rope_theta: float = 500000
+    max_batch_size: int = 32
+    max_seq_len: int = 2048
+
+args = ModelArgs()
+
+# Command-line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
+    parser.add_argument('--task_type', type=str, required=True, choices=[
+        'embed', 'forward', 'backward', 'final_logits', 'final_logits_backward', 'embed_backward', 'loss'
+    ], help="Type of task to process")
+    parser.add_argument('--subnet_address', type=str, required=True, help="Subnet contract address")
+    parser.add_argument('--private_key', type=str, required=True, help="Private key of the worker's Ethereum account")
+    parser.add_argument('--rpc_url', type=str, default='http://localhost:8545', help="URL of the Ethereum RPC node")
+    parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
+    return parser.parse_args()
+
+args = parse_args()
+
+# Initialize web3
+web3 = Web3(Web3.HTTPProvider(args.rpc_url))
+web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
+# Set the worker's Ethereum account
+worker_account = web3.eth.account.from_key(args.private_key)
+worker_address = worker_account.address
+
+# Smart contract details
+contract_address = args.subnet_address
+contract_abi = json.loads('YourContractABI')  # Replace with your contract's ABI
+
+contract = web3.eth.contract(address=contract_address, abi=contract_abi)
+
+# Initialize model and embedding layer in memory
+model_initialized = False
+embedding_initialized = False
+tensors = defaultdict(lambda: None)
+adam_m = defaultdict(lambda: None)
+adam_v = defaultdict(lambda: None)
+last_gradient_update = defaultdict(lambda: None)
+
+# Placeholder for freqs_cis and mask
+freqs_cis = None
+mask = None
+
+def initialize_model_and_embedding():
+    global model_initialized, embedding_initialized, freqs_cis, mask
+
+    if not model_initialized:
+        initialize_distributed_environment()
+        initialize_model_parallel(model_parallel_size_=1)
+        model_initialized = True
+    
+    if not embedding_initialized:
+        vocab_size = tokenizer.get_vocab_size()
+        global embedding
+        embedding = VocabParallelEmbedding(vocab_size, args.dim).to(device)
+        embedding_initialized = True
+
+    # Compute freqs_cis and mask
+    global freqs_cis
+    freqs_cis = precompute_freqs_cis(
+        args.dim // args.n_heads,
+        args.max_seq_len * 2,
+        args.rope_theta,
+    )
+
+    global mask
+    mask = torch.triu(torch.full((args.max_seq_len, args.max_seq_len), float('-inf')), diagonal=1).to(device)
 
 def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
@@ -22,77 +110,184 @@ def initialize_distributed_environment():
     if not dist.is_initialized():
         dist.init_process_group(backend='nccl')
 
-def embed_task(batch_file, embedding_file, inputs_file):
-    batch = load_from_disk(batch_file)
-    vocab_size = tokenizer.get_vocab_size()
+def download_file(url):
+    response = requests.get(url)
+    return torch.load(response.content)
 
-    logging.info(f"Batch for embedding (token IDs): {batch}")
+def upload_tensor(tensor):
+    return upload_to_ipfs(tensor)  # Function to upload the tensor to IPFS or any other storage service
 
-    embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
-    embedding.load_state_dict(load_layer_state_dict(embedding_file))
+def apply_gradient_updates():
+    global tensors, adam_m, adam_v, last_gradient_update
 
+    response = requests.get(args.sot_url, stream=True)
+    for line in response.iter_lines():
+        if line:
+            update = json.loads(line)
+            block_number = update['block_number']
+            for tensor_name, sparse_update in update['gradients'].items():
+                values = sparse_update['values']
+                indices = sparse_update['indices']
+                shape = sparse_update['shape']
+
+                # Apply gradient update
+                tensor = tensors[tensor_name]
+                if tensor is None:
+                    tensor = torch.zeros(shape, device=device)
+                    tensors[tensor_name] = tensor
+
+                grad_update = torch.sparse_coo_tensor(indices, values, shape, device=device).to_dense()
+                tensor.add_(grad_update)
+                
+                last_gradient_update[tensor_name] = block_number
+
+                # Apply Adam updates if needed
+                if tensor_name in adam_m:
+                    m = adam_m[tensor_name]
+                    v = adam_v[tensor_name]
+                    if m is None:
+                        m = torch.zeros_like(tensor, device=device)
+                        adam_m[tensor_name] = m
+                    if v is None:
+                        v = torch.zeros_like(tensor, device=device)
+                        adam_v[tensor_name] = v
+
+def pause_gradient_updates():
+    global gradient_update_paused
+    gradient_update_paused = True
+
+def resume_gradient_updates():
+    global gradient_update_paused
+    gradient_update_paused = False
+    apply_gradient_updates()
+
+def handle_event(event):
+    task_id = event['args']['taskId']
+    solver = event['args']['solver']
+    
+    # Check if the worker is the solver for this task
+    if solver.lower() != worker_address.lower():
+        return
+
+    task = contract.functions.getTask(task_id).call()
+    task_params_bytes = task[6]  # Assuming task.params is the 7th item in the Task struct
+    task_params = json.loads(task_params_bytes.decode('utf-8'))
+
+    # Extract URLs from task_params
+    batch_file_url = task_params.get('batch_file')
+    inputs_file_url = task_params.get('inputs_file')
+    error_file_url = task_params.get('error_file')
+    targets_file_url = task_params.get('targets_file')
+
+    # Download files
+    if batch_file_url:
+        batch = download_file(batch_file_url)
+    if inputs_file_url:
+        inputs = download_file(inputs_file_url)
+    if error_file_url:
+        error = download_file(error_file_url)
+    if targets_file_url:
+        targets = download_file(targets_file_url)
+
+    # Pause gradient updates and note block number
+    pause_gradient_updates()
+
+    task_type = args.task_type
+    if task_type == 'embed':
+        embed_task(batch)
+        result_url = upload_tensor(tensors['outputs'])
+    elif task_type == 'forward':
+        forward_task(task_params['layer_idx'], inputs)
+        result_url = upload_tensor(tensors['outputs'])
+    elif task_type == 'backward':
+        backward_task(task_params['layer_idx'], error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
+        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'])
+    elif task_type == 'final_logits':
+        final_logits_task(inputs)
+        result_url = upload_tensor(tensors['logits'])
+    elif task_type == 'final_logits_backward':
+        final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
+        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'])
+    elif task_type == 'embed_backward':
+        embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
+        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'])
+    elif task_type == 'loss':
+        loss_task(targets)
+        result_url = upload_tensor(tensors['loss'])
+
+    if result_url:
+        last_block = last_gradient_update[task_type]
+        submit_solution(task_id, result_url, last_block)
+
+    # Resume gradient updates
+    resume_gradient_updates()
+
+def submit_solution(task_id, result_url, last_block):
+    result = {
+        'result_url': result_url,
+        'last_block': last_block
+    }
+    contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')).transact({'from': worker_address})
+
+def upload_tensors_and_grads(error_output, grads):
+    error_output_url = upload_tensor(error_output)
+    grads_url = upload_tensor(grads_to_sparse(grads))
+    return json.dumps({'error_output_url': error_output_url, 'grads_url': grads_url})
+
+def grads_to_sparse(grads):
+    indices, values = [], []
+    for grad in grads:
+        if grad is not None:
+            flat_grad = grad.flatten()
+            k = max(1, int(flat_grad.numel() * 0.01))  # 1% of the highest elements in magnitude
+            topk = torch.topk(flat_grad.abs(), k)
+            indices.append(topk.indices)
+            values.append(flat_grad[topk.indices])
+    indices = torch.cat(indices)
+    values = torch.cat(values)
+    shape = grads[0].shape  # Assuming all grads have the same shape
+    return torch.sparse_coo_tensor(indices.unsqueeze(0), values, shape, device=device)
+
+def embed_task(batch):
+    global embedding
     inputs = embedding(batch)
     check_for_nans(inputs, "embedding outputs")
-    logging.info(f"Embedded inputs: {inputs}")
+    tensors['outputs'] = inputs
 
-    # Save embeddings along with the computation graph
-    save_to_disk(inputs, inputs_file)
-
-def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, outputs_file, mask_file):
-    inputs = load_from_disk(inputs_file)
+def forward_task(layer_idx, inputs):
+    global freqs_cis, mask, tensors
     if torch.isnan(inputs).any() or torch.isinf(inputs).any():
         raise ValueError(f"NaNs or Infs detected in inputs for layer {layer_idx}")
 
-    state_dict = load_layer_state_dict(state_dict_file)
-    for param in state_dict.values():
-        if torch.isnan(param).any() or torch.isinf(param).any():
-            raise ValueError(f"NaNs or Infs detected in weights of layer {layer_idx}")
-
-    freqs_cis = load_from_disk(freqs_cis_file)
-    mask = load_from_disk(mask_file)
-
-    layer = TransformerBlock(layer_idx, model_args).to(device)
-    layer.load_state_dict(state_dict)
+    layer = tensors[f'layer_{layer_idx}']
 
     start_pos = 0  # Adjust as necessary
     seqlen = inputs.shape[1]
-    freqs_cis = freqs_cis[start_pos: start_pos + seqlen]
+    freqs_cis_slice = freqs_cis[start_pos: start_pos + seqlen]
 
-    # Ensure that the batch size of inputs is correctly handled
     bsz = inputs.shape[0]
     if layer.attention.cache_k is not None and layer.attention.cache_k.shape[0] != bsz:
         layer.attention.cache_k = torch.zeros(bsz, layer.attention.cache_k.shape[1], layer.attention.cache_k.shape[2], layer.attention.cache_k.shape[3], device=device)
     if layer.attention.cache_v is not None and layer.attention.cache_v.shape[0] != bsz:
         layer.attention.cache_v = torch.zeros(bsz, layer.attention.cache_v.shape[1], layer.attention.cache_v.shape[2], layer.attention.cache_v.shape[3], device=device)
 
-    outputs = layer(inputs.to(device), start_pos, freqs_cis.to(device), mask.to(device))
+    outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask.to(device))
     check_for_nans(outputs, f"layer {layer_idx} outputs")
-    logging.info(f"Outputs after layer {layer_idx}: {outputs}")
+    tensors['outputs'] = outputs
 
-    # Save outputs, inputs, and layer to disk
-    save_to_disk((outputs, inputs, layer), outputs_file)
-
-
-def backward_task(layer_idx, error_file, state_dict_file, error_output_file, inputs_file, freqs_cis_file, mask_file):
-    error, _ = load_from_disk(error_file)
+def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
+    global freqs_cis, mask, tensors
 
     if error is None:
-        raise ValueError(f"Error tensor loaded from {error_file} is None")
+        raise ValueError(f"Error tensor is None")
 
-    inputs = load_from_disk(inputs_file)
-    state_dict = load_layer_state_dict(state_dict_file)
-    freqs_cis = load_from_disk(freqs_cis_file)
-    mask = load_from_disk(mask_file)
-
-    # Recompute the forward activations
-    layer = TransformerBlock(layer_idx, model_args).to(device)
-    layer.load_state_dict(state_dict)
+    layer = tensors[f'layer_{layer_idx}']
 
     start_pos = 0  # Adjust as necessary
     seqlen = inputs.shape[1]
-    freqs_cis = freqs_cis[start_pos: start_pos + seqlen]
+    freqs_cis_slice = freqs_cis[start_pos: start_pos + seqlen]
 
-    outputs = layer(inputs.to(device), start_pos, freqs_cis.to(device), mask.to(device))
+    outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask.to(device))
     check_for_nans(outputs, f"layer {layer_idx} outputs")
 
     inputs.requires_grad = True  # Ensure inputs require gradients
@@ -105,71 +300,54 @@ def backward_task(layer_idx, error_file, state_dict_file, error_output_file, inp
 
     check_for_nans(inputs.grad, f"Gradient for inputs in layer {layer_idx}")
 
-    # Get the gradients for the layer parameters
     grads = [param.grad for param in layer.parameters() if param.grad is not None]
     logging.debug(f"Gradients for layer {layer_idx}: {grads}")
 
     for i, grad in enumerate(grads):
         check_for_nans(grad, f"Gradient {i} for layer {layer_idx}")
 
-    save_to_disk((inputs.grad, grads), error_output_file)
+    apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    tensors['error_output'] = (inputs.grad, grads)
+    tensors['grads'] = grads
 
-def final_logits_task(inputs_file, state_dict_file, logits_file):
-    inputs = load_from_disk(inputs_file)
-    state_dict = load_layer_state_dict(state_dict_file)
-
-    if state_dict is None:
-        raise ValueError("Failed to load state dict for the output layer")
-
-    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
+def final_logits_task(inputs):
+    global tensors
+    state_dict = tensors['output_layer_state_dict']
+    output_layer = ColumnParallelLinear(args.dim, state_dict['weight'].shape[0], bias=False).to(device)
     output_layer.load_state_dict(state_dict)
 
     logits = output_layer(inputs.to(device))
     check_for_nans(logits, "final logits")
-    logging.info(f"Final logits: {logits.shape}")
+    tensors['logits'] = logits
 
-    # Save logits along with the computation graph
-    save_to_disk((logits, inputs, output_layer), logits_file)
-
-def final_logits_backward_task(error_file, inputs_file, state_dict_file, error_output_file):
-    inputs = load_from_disk(inputs_file)
-    error = load_from_disk(error_file)
-    state_dict = load_layer_state_dict(state_dict_file)
-
-    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
+def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
+    global tensors
+    state_dict = tensors['output_layer_state_dict']
+    output_layer = ColumnParallelLinear(args.dim, state_dict['weight'].shape[0], bias=False).to(device)
     output_layer.load_state_dict(state_dict)
     
     logits = output_layer(inputs.to(device))
     
     logits.retain_grad()
 
-    # Perform the backward pass on the loaded logits
     logits.backward(error.to(device), retain_graph=True)  # Backward pass on logits
 
     logits_grad = logits.grad  # Get the gradients with respect to logits
     logging.debug(f"Gradients for logits: {logits_grad.shape}")
 
-    # Compute the gradients with respect to the transformer layer outputs
-    # Sum over the vocabulary dimension to get the error tensor for the transformer layers
     logits_grad = torch.einsum('bij,jk->bik', logits_grad, output_layer.weight)
 
-    # Get the gradients for the output layer parameters
     grads = [param.grad for param in output_layer.parameters() if param.grad is not None]
     logging.debug(f"Gradients for final logits layer parameters: {grads}")
 
-    save_to_disk((logits_grad, grads), error_output_file)
+    apply_adamw(-1, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    tensors['error_output'] = (logits_grad, grads)
+    tensors['grads'] = grads
 
-def embed_backward_task(error_file, batch_file, embedding_file, error_output_file):
-    error, _ = load_from_disk(error_file)
+def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t):
+    global embedding, tensors
     logging.info(f"Error tensor shape: {error.shape}")
 
-    batch = load_from_disk(batch_file)
-    vocab_size = tokenizer.get_vocab_size()
-
-    embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
-    embedding.load_state_dict(load_layer_state_dict(embedding_file))
-
-    # Recompute the embeddings
     embeddings = embedding(batch)
 
     error = error.view(embeddings.shape)  # Ensure the gradient tensor matches the output tensor shape
@@ -179,71 +357,63 @@ def embed_backward_task(error_file, batch_file, embedding_file, error_output_fil
 
     embeddings.backward(error.to(device), retain_graph=True)
 
-    # Get the gradients for the embedding layer parameters
     grads = [param.grad for param in embedding.parameters() if param.grad is not None]
     logging.info(f"Gradients for embedding: {grads}")
 
-    save_to_disk((None, grads), error_output_file)
+    apply_adamw(-2, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    tensors['error_output'] = grads
+    tensors['grads'] = grads
 
-def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
-    logits, inputs, output_layer = load_from_disk(logits_file)
-    targets = load_from_disk(targets_file)
-
+def loss_task(targets):
+    global tensors
+    logits = tensors['logits']
     logging.info(f"Logits for loss: {logits.shape}")
     logging.info(f"Targets for loss: {targets.shape}")
 
     pad_id = tokenizer.pad_id
 
-    # Reshape logits to [batch_size * seq_len, vocab_size]
     batch_size, seq_len, vocab_size = logits.shape
     logits = logits.reshape(batch_size * seq_len, vocab_size)  # Shape: [batch_size * seq_len, vocab_size]
 
-    # Ensure targets match the reshaped logits structure
     targets = targets.reshape(-1)  # Shape: [batch_size * seq_len]
 
     loss = F.cross_entropy(logits.to(device), targets.to(device), ignore_index=pad_id)
-    save_to_disk(loss.item(), loss_file)
+    tensors['loss'] = loss.item()
 
     logits.retain_grad()
     loss.backward(retain_graph=True)  # Retain graph for backward pass
     check_for_nans(logits.grad, "logits gradients")
     logging.info(f"Logits gradients for loss: {logits.grad.shape}")
 
-    # Reshape logits_grad to match the original logits shape
     logits_grad = logits.grad.reshape(batch_size, seq_len, vocab_size)  # Shape: [batch_size, seq_len, vocab_size]
 
-    # Save logits_grad to be used as the error for the final layer's backward pass
-    save_to_disk((logits_grad, inputs, output_layer), logits_grad_file)
+    tensors['logits_grad'] = logits_grad
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     max_grad_norm = 1.0
 
     if layer_idx == -1:
-        state_dict_file = "data/output.pt"
-        m_file = "data/adam_m_output.pt"
-        v_file = "data/adam_v_output.pt"
+        tensor_name = "output"
     elif layer_idx == -2:
-        state_dict_file = "data/embedding.pt"
-        m_file = "data/adam_m_embedding.pt"
-        v_file = "data/adam_v_embedding.pt"
+        tensor_name = "embedding"
     else:
-        state_dict_file = f"data/layer_{layer_idx}.pt"
-        m_file = f"data/adam_m_{layer_idx}.pt"
-        v_file = f"data/adam_v_{layer_idx}.pt"
+        tensor_name = f"layer_{layer_idx}"
 
-    state_dict = load_layer_state_dict(state_dict_file)
-    if state_dict is None:
-        raise ValueError(f"Failed to load state dict for layer {layer_idx}")
+    tensor = tensors[tensor_name]
+    if tensor is None:
+        raise ValueError(f"Failed to load tensor for {tensor_name}")
 
-    m = load_from_disk(m_file)
-    v = load_from_disk(v_file)
+    m = adam_m[tensor_name]
+    v = adam_v[tensor_name]
     
     if m is None:
-        m = [torch.zeros_like(param).to(device) for param in state_dict.values()]
+        m = torch.zeros_like(tensor, device=device)
+        adam_m[tensor_name] = m
     if v is None:
-        v = [torch.zeros_like(param).to(device) for param in state_dict.values()]
+        v = torch.zeros_like(tensor, device=device)
+        adam_v[tensor_name] = v
 
-    for i, param in enumerate(state_dict.values()):
+    for i, param in enumerate(tensor):
         if param.requires_grad:
             if param.grad is not None:
                 param.grad.zero_()
@@ -258,65 +428,20 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
             param.data -= learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
 
-            check_for_nans(param.data, f"Updated param data in layer {layer_idx}")
+            check_for_nans(param.data, f"Updated param data in {tensor_name}")
 
             torch.nn.utils.clip_grad_norm_(param, max_grad_norm)
 
-    logging.info(f"Updated state dict for layer {layer_idx}: {state_dict}")
+    logging.info(f"Updated state dict for {tensor_name}")
 
-    save_layer_state_dict(state_dict, state_dict_file)
-    save_to_disk(m, m_file)
-    save_to_disk(v, v_file)
+def main():
+    initialize_model_and_embedding()
+    apply_gradient_updates()
+
+    event_filter = contract.events.SolverSelected.createFilter(fromBlock='latest')
+    while True:
+        for event in event_filter.get_new_entries():
+            handle_event(event)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=str, required=True, choices=[
-        "embed", "forward", "backward", "final_logits", "final_logits_backward", 
-        "embed_backward", "loss", "apply_adamw"
-    ])
-    parser.add_argument("--layer_idx", type=int, required=False)
-    parser.add_argument("--inputs", type=str, required=False)
-    parser.add_argument("--error", type=str, required=False)
-    parser.add_argument("--batch", type=str, required=False)
-    parser.add_argument("--outputs", type=str, required=False)
-    parser.add_argument("--state_dict", type=str, required=False)
-    parser.add_argument("--logits", type=str, required=False)
-    parser.add_argument("--targets", type=str, required=False)
-    parser.add_argument("--embedding_file", type=str, required=False)
-    parser.add_argument("--logits_file", type=str, required=False)
-    parser.add_argument("--error_output_file", type=str, required=False)
-    parser.add_argument("--loss_file", type=str, required=False)
-    parser.add_argument("--logits_grad_file", type=str, required=False)
-    parser.add_argument("--grads", type=str, required=False)
-    parser.add_argument("--learning_rate", type=float, required=False)
-    parser.add_argument("--beta1", type=float, required=False)
-    parser.add_argument("--beta2", type=float, required=False)
-    parser.add_argument("--epsilon", type=float, required=False)
-    parser.add_argument("--weight_decay", type=float, required=False)
-    parser.add_argument("--t", type=int, required=False)
-    parser.add_argument("--freqs_cis", type=str, required=False)
-    parser.add_argument("--mask", type=str, required=False)
-    args = parser.parse_args()
-
-    initialize_distributed_environment()
-    initialize_model_parallel(model_parallel_size_=1)
-
-    if args.task == "embed":
-        embed_task(args.batch, args.embedding_file, args.outputs)
-    elif args.task == "forward":
-        forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.outputs, args.mask)
-    elif args.task == "backward":
-        backward_task(args.layer_idx, args.error, args.state_dict, args.error_output_file, args.inputs, args.freqs_cis, args.mask)
-    elif args.task == "final_logits":
-        final_logits_task(args.inputs, args.state_dict, args.logits_file)
-    elif args.task == "final_logits_backward":
-        final_logits_backward_task(args.error, args.inputs, args.state_dict, args.error_output_file)
-    elif args.task == "embed_backward":
-        embed_backward_task(args.error, args.batch, args.embedding_file, args.error_output_file)
-    elif args.task == "loss":
-        loss_task(args.logits, args.targets, args.loss_file, args.logits_grad_file)
-    elif args.task == "apply_adamw":
-        _, grads = load_from_disk(args.grads)
-        apply_adamw(args.layer_idx, grads, args.learning_rate, args.beta1, args.beta2, args.epsilon, args.weight_decay, args.t)
-
-    dist.destroy_process_group()
+    main()
