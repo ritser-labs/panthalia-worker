@@ -65,21 +65,27 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, output
     # Save outputs, inputs, and layer to disk
     save_to_disk((outputs, inputs, layer), outputs_file)
 
-def backward_task(layer_idx, error_file, state_dict_file, error_output_file, outputs_file):
+def backward_task(layer_idx, error_file, state_dict_file, error_output_file, inputs_file, freqs_cis_file, mask_file):
     error, _ = load_from_disk(error_file)
     
     if error is None:
         raise ValueError(f"Error tensor loaded from {error_file} is None")
 
-    # Load outputs, inputs, and layer from the forward pass
-    outputs, inputs, layer = load_from_disk(outputs_file)
+    inputs = load_from_disk(inputs_file)
+    state_dict = load_layer_state_dict(state_dict_file)
+    freqs_cis = load_from_disk(freqs_cis_file)
+    mask = load_from_disk(mask_file)
 
-    logging.info(f"Error tensor shape: {error.shape}")
-    logging.info(f"Outputs tensor shape: {outputs.shape}")
+    # Recompute the forward activations
+    layer = TransformerBlock(layer_idx, model_args).to(device)
+    layer.load_state_dict(state_dict)
 
-    # Ensure the error tensor matches the outputs shape
-    if error.shape != outputs.shape:
-        raise ValueError(f"Error tensor shape {error.shape} does not match outputs shape {outputs.shape}")
+    start_pos = 0  # Adjust as necessary
+    seqlen = inputs.shape[1]
+    freqs_cis = freqs_cis[start_pos: start_pos + seqlen]
+
+    outputs = layer(inputs.to(device), start_pos, freqs_cis.to(device), mask.to(device))
+    check_for_nans(outputs, f"layer {layer_idx} outputs")
 
     inputs.requires_grad = True  # Ensure inputs require gradients
 
@@ -138,13 +144,18 @@ def final_logits_backward_task(error_file, logits_file, error_output_file):
 
     save_to_disk((transformer_error, grads), error_output_file)
 
-def embed_backward_task(error_file, inputs_file, error_output_file):
+def embed_backward_task(error_file, batch_file, embedding_file, error_output_file):
     error, _ = load_from_disk(error_file)
     logging.info(f"Error tensor shape: {error.shape}")
 
-    # Load embeddings, batch, and embedding module from the forward pass
-    embeddings, batch, embedding = load_from_disk(inputs_file)
-    embeddings.requires_grad = True  # Ensure the embeddings tensor requires gradients
+    batch = load_from_disk(batch_file)
+    vocab_size = tokenizer.get_vocab_size()
+
+    embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
+    embedding.load_state_dict(load_layer_state_dict(embedding_file))
+
+    # Recompute the embeddings
+    embeddings = embedding(batch)
 
     error = error.view(embeddings.shape)  # Ensure the gradient tensor matches the output tensor shape
     logging.info(f"Reshaped error tensor shape: {error.shape}")
@@ -276,13 +287,13 @@ if __name__ == "__main__":
     elif args.task == "forward":
         forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.outputs, args.mask)
     elif args.task == "backward":
-        backward_task(args.layer_idx, args.error, args.state_dict, args.error_output_file, args.inputs)
+        backward_task(args.layer_idx, args.error, args.state_dict, args.error_output_file, args.inputs, args.freqs_cis, args.mask)
     elif args.task == "final_logits":
         final_logits_task(args.inputs, args.state_dict, args.logits_file)
     elif args.task == "final_logits_backward":
         final_logits_backward_task(args.error, args.logits_file, args.error_output_file)
     elif args.task == "embed_backward":
-        embed_backward_task(args.error, args.inputs, args.error_output_file)
+        embed_backward_task(args.error, args.batch, args.embedding_file, args.error_output_file)
     elif args.task == "loss":
         loss_task(args.logits, args.targets, args.loss_file, args.logits_grad_file)
     elif args.task == "apply_adamw":
