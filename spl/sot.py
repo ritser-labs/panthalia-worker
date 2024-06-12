@@ -39,6 +39,10 @@ for layer, state in initial_state.items():
         with open(state_file_path, 'w') as file:
             json.dump(state, file)
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy'}), 200
+
 @app.route('/latest_model_params', methods=['GET'])
 def get_latest_model_params():
     with open(os.path.join(data_dir, 'latest_model_params.json'), 'r') as file:

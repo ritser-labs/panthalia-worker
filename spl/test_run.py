@@ -3,6 +3,7 @@ import json
 import os
 import time
 import argparse
+import requests
 from common import model_args
 
 def parse_args():
@@ -17,6 +18,20 @@ def parse_args():
     parser.add_argument('--forge_script', type=str, default='script/Deploy.s.sol', help="Path to the Forge deploy script")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     return parser.parse_args()
+
+def wait_for_sot(sot_url, timeout=600):
+    """Wait for the SOT service to be available."""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            response = requests.get(f"{sot_url}/health")
+            if response.status_code == 200:
+                print("SOT service is available.")
+                return True
+        except requests.ConnectionError:
+            print("Waiting for SOT service to be available...")
+        time.sleep(2)
+    return False
 
 args = parse_args()
 
@@ -50,6 +65,18 @@ with open(args.deployment_config, 'r') as file:
 pool_address = deployment_config['pool']
 
 worker_processes = []
+
+# Print SOT service initialization stage
+print("Starting SOT service...")
+
+# Start the SOT service
+sot_process = subprocess.Popen(['python', 'sot.py'])
+
+# Wait for the SOT service to be available
+if not wait_for_sot(args.sot_url):
+    print("Error: SOT service did not become available within the timeout period.")
+    sot_process.terminate()
+    exit(1)
 
 # Print worker initialization stage
 print("Starting worker processes...")
@@ -109,6 +136,9 @@ master_process.wait()
 for p in worker_processes:
     p.terminate()
     p.wait()
+
+# Terminate the SOT process
+sot_process.terminate()
 
 # Print final stage
 print("Test run completed.")
