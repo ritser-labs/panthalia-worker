@@ -63,14 +63,14 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits
 
     save_to_disk(outputs, logits_file)
 
-def backward_task(layer_idx, error_file, inputs_file, state_dict_file, error_output_file, mask_file):
-    error = load_from_disk(error_file)
+def backward_task(layer_idx, error_file, state_dict_file, error_output_file, mask_file, inputs_file):
+    error, _ = load_from_disk(error_file)
     state_dict = load_layer_state_dict(state_dict_file)
+    inputs = load_from_disk(inputs_file)
     
     layer = TransformerBlock(layer_idx, model_args)
     layer.load_state_dict(state_dict)
     
-    inputs = load_from_disk(inputs_file)
     inputs.requires_grad = True
     
     error = error.view(inputs.shape)  # Ensure the gradient tensor matches the output tensor shape
@@ -96,10 +96,10 @@ def final_logits_task(inputs_file, state_dict_file, logits_file):
 
     save_to_disk(logits, logits_file)
 
-def final_logits_backward_task(error_file, inputs_file, state_dict_file, error_output_file):
+def final_logits_backward_task(error_file, state_dict_file, error_output_file, inputs_file, logits_file):
     error = load_from_disk(error_file)
     state_dict = load_layer_state_dict(state_dict_file)
-    
+
     if state_dict is None:
         raise ValueError("Failed to load state dict for the output layer")
 
@@ -108,11 +108,9 @@ def final_logits_backward_task(error_file, inputs_file, state_dict_file, error_o
     
     inputs = load_from_disk(inputs_file)
     inputs.requires_grad = True
-    logits = output_layer(inputs)
-
-    # Select only the last token logits
-    logits = logits[:, -1, :]
-
+    logits = load_from_disk(logits_file)
+    logits.requires_grad = True
+    
     error = error.view(logits.shape)  # Ensure the gradient tensor matches the output tensor shape
     logits.backward(error)
     
@@ -132,7 +130,7 @@ def embed_backward_task(error_file, batch_file, embedding_file, error_output_fil
     batch = load_from_disk(batch_file)
     logging.debug(f"Batch tensor shape: {batch.shape}")
 
-    embeddings = embedding(batch)
+    embeddings = load_from_disk(embedding_file)
     embeddings.retain_grad()
     logging.debug(f"Embeddings tensor shape: {embeddings.shape}")
 
@@ -242,6 +240,7 @@ if __name__ == "__main__":
     parser.add_argument("--t", type=int, required=False)
     parser.add_argument("--freqs_cis", type=str, required=False)
     parser.add_argument("--mask", type=str, required=False)
+    parser.add_argument("--intermediate_activations", type=str, required=False)
     args = parser.parse_args()
 
     initialize_distributed_environment()
@@ -252,11 +251,11 @@ if __name__ == "__main__":
     elif args.task == "forward":
         forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.logits_file, args.mask)
     elif args.task == "backward":
-        backward_task(args.layer_idx, args.error, args.inputs, args.state_dict, args.error_output_file, args.mask)
+        backward_task(args.layer_idx, args.error, args.state_dict, args.error_output_file, args.mask, args.inputs)
     elif args.task == "final_logits":
         final_logits_task(args.inputs, args.state_dict, args.logits_file)
     elif args.task == "final_logits_backward":
-        final_logits_backward_task(args.error, args.inputs, args.state_dict, args.error_output_file)
+        final_logits_backward_task(args.error, args.state_dict, args.error_output_file, args.inputs, args.logits_file)
     elif args.task == "embed_backward":
         embed_backward_task(args.error, args.batch, args.embedding_file, args.error_output_file)
     elif args.task == "loss":
