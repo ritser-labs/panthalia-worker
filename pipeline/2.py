@@ -6,7 +6,7 @@ from constants import ACTIVATIONS_URL, NEW_WEIGHTS_2_URL, OUTPUT_DATA_URL, GRADI
 from model import OutputLayer
 
 def forward_and_backward_output_layer(model, activation_url, target_url, weights_url, grad_url):
-    optimizer = optim.SGD(model.parameters(), lr=0.01)
+    optimizer = optim.AdamW(model.parameters(), lr=0.01)
     
     # Try to load existing weights if available
     try:

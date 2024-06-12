@@ -8,7 +8,7 @@ from model import InputLayer
 # Stage 3
 def update_weights_input_layer(model_url, grad_url, activations_url):
     input_layer_model = InputLayer(10, 20)
-    optimizer = optim.SGD(input_layer_model.parameters(), lr=0.01)
+    optimizer = optim.AdamW(input_layer_model.parameters(), lr=0.01)
     
     # Load model state
     model_state = safe_deserialize(download_file(model_url))
