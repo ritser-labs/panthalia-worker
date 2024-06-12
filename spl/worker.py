@@ -10,7 +10,7 @@ from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
-from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, decode_custom_error, load_error_selectors
+from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_all_abis, load_error_selectors
 from web3.exceptions import ContractCustomError
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional
@@ -62,6 +62,7 @@ worker_account = web3.eth.account.from_key(args.private_key)
 worker_address = worker_account.address
 
 # Load error selectors
+abis = load_all_abis('abis')
 error_selectors = load_error_selectors(web3)
 
 # Load contract ABIs from the abis folder
@@ -76,6 +77,14 @@ pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
 subnet_id = contract.functions.subnetId().call()
 
 print(f"Subnet ID: {subnet_id}")
+
+
+token_address = contract.functions.token().call()
+token_contract = web3.eth.contract(address=token_address, abi=abis['ERC20'])
+
+print(f"Token address: {token_address}")
+
+solver_stake_amount = contract.functions.solverStakeAmount().call()
 
 # Initialize model and embedding layer in memory
 model_initialized = False
@@ -216,7 +225,11 @@ def get_tensors_for_task(task_type, layer_idx=None):
 def deposit_stake():
     global stake_deposited
     if not stake_deposited:
+        print(f"Depositing stake for worker {worker_address}")
         try:
+            approve_tx = token_contract.functions.approve(pool_contract.address, 2**256-1).transact({'from': worker_address})
+            web3.eth.wait_for_transaction_receipt(approve_tx)
+            print(f"Approved Pool contract")
             tx = pool_contract.functions.depositStake(
                 subnet_id,
                 args.group

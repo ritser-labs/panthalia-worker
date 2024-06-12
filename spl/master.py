@@ -27,7 +27,7 @@ class Master:
             logging.getLogger().setLevel(logging.DEBUG)
 
     def approve_token(self, token_address, spender_address, amount):
-        token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['SubnetManager'])
+        token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
         nonce = self.web3.eth.get_transaction_count(self.account.address)
         gas_price = self.web3.eth.gas_price
 

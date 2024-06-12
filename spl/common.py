@@ -61,7 +61,7 @@ def extract_error_selectors(abi, web3, error_selectors):
             selector = web3.keccak(text=f"{name}({','.join([input['type'] for input in inputs])})")[:4].hex()
             selector = selector.lower()
             error_selectors[selector] = item
-            logging.info(f"Extracted error selector {selector} for {name}")
+            logging.debug(f"Extracted error selector {selector} for {name}")
 
 def load_error_selectors(web3, abi_dir='abis'):
     error_selectors = {}
@@ -76,24 +76,32 @@ def load_error_selectors(web3, abi_dir='abis'):
 
 def load_contracts(web3, subnet_addresses):
     abi_dir = 'abis'
-    abis = {}
+    abis = load_all_abis(abi_dir)
     contracts = {}
 
     for task, address in subnet_addresses.items():
         contract_name = 'SubnetManager'
-        contract_path = os.path.join(abi_dir, f'{contract_name}.sol', f'{contract_name}.json')
-        if os.path.exists(contract_path):
-            with open(contract_path, 'r') as abi_file:
-                abi = json.load(abi_file).get('abi', [])
-                abis[task] = abi
-                contracts[task] = web3.eth.contract(address=address, abi=abi)
-                logging.info(f"Loaded contract for {task} with address {address}")
+        if contract_name in abis:
+            abi = abis[contract_name]
+            contracts[task] = web3.eth.contract(address=address, abi=abi)
+            logging.info(f"Loaded contract for {task} with address {address}")
         else:
-            logging.error(f"Contract ABI not found at {contract_path}")
+            logging.error(f"Contract ABI not found for {contract_name}")
 
     error_selectors = load_error_selectors(web3, abi_dir)
 
     return abis, contracts, error_selectors
+
+def load_all_abis(abi_dir):
+    abis = {}
+    for root, dirs, files in os.walk(abi_dir):
+        for file in files:
+            if file.endswith('.json'):
+                contract_name = file.split('.')[0]
+                with open(os.path.join(root, file), 'r') as abi_file:
+                    abi = json.load(abi_file).get('abi', [])
+                    abis[contract_name] = abi
+    return abis
 
 def load_abi(name):
     abi_dir = 'abis'
