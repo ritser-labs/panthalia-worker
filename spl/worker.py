@@ -69,6 +69,10 @@ contract_address = args.subnet_address
 contract = web3.eth.contract(address=contract_address, abi=subnet_manager_abi)
 pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
 
+subnet_id = contract.functions.subnetId().call()
+
+print(f"Subnet ID: {subnet_id}")
+
 # Initialize model and embedding layer in memory
 model_initialized = False
 embedding_initialized = False
@@ -209,7 +213,7 @@ def deposit_stake():
     global stake_deposited
     if not stake_deposited:
         tx = pool_contract.functions.depositStake(
-            args.subnet_address,
+            subnet_id,
             args.group
         ).transact({'from': worker_address})
         web3.eth.wait_for_transaction_receipt(tx)
