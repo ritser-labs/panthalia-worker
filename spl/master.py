@@ -55,9 +55,13 @@ class Master:
             error_url = self.handle_layer_backward(layer_idx, error_url, model_params)
             self.update_sot(f'backward_layer_{layer_idx}', error_url)
 
+        # Backward pass for final logits
+        final_logits_backward_result = self.handle_final_logits_backward(error_url, final_logits_result['result_url'], model_params)
+        self.update_sot('final_logits_backward', final_logits_backward_result)
+
         # Backward pass for embedding
-        self.handle_embed_backward(error_url, embed_result['batch_url'])
-        self.update_sot('embed_backward', {'error_url': error_url})
+        embed_backward_result = self.handle_embed_backward(error_url, embed_result['batch_url'])
+        self.update_sot('embed_backward', embed_backward_result)
 
     def get_latest_model_params(self):
         response = requests.get(f"{self.sot_url}/latest_model_params")
@@ -92,12 +96,22 @@ class Master:
         task_params = {'layer_idx': layer_idx, 'error_url': error_url, 'model_params': model_params}
         task_id = self.submit_task('backward', task_params)
         result = self.wait_for_result('backward', task_id)
+        self.update_adam_state(f'backward_layer_{layer_idx}', result['adam_m_url'], result['adam_v_url'])
+        return result
+
+    def handle_final_logits_backward(self, error_url, logits_url, model_params):
+        task_params = {'error_url': error_url, 'logits_url': logits_url, 'model_params': model_params}
+        task_id = self.submit_task('final_logits_backward', task_params)
+        result = self.wait_for_result('final_logits_backward', task_id)
+        self.update_adam_state('final_logits_backward', result['adam_m_url'], result['adam_v_url'])
         return result
 
     def handle_embed_backward(self, error_url, batch_url):
         task_params = {'error_url': error_url, 'batch_url': batch_url}
         task_id = self.submit_task('embed_backward', task_params)
-        self.wait_for_result('embed_backward', task_id)
+        result = self.wait_for_result('embed_backward', task_id)
+        self.update_adam_state('embed_backward', result['adam_m_url'], result['adam_v_url'])
+        return result
 
     def wait_for_result(self, task_type, task_id):
         while True:
@@ -112,6 +126,13 @@ class Master:
             logging.error(f"Failed to update SOT for {task_type}: {response.text}")
         else:
             logging.info(f"Updated SOT for {task_type}")
+
+    def update_adam_state(self, task_type, adam_m_url, adam_v_url):
+        response = requests.post(f"{self.sot_url}/update_adam", json={'task_type': task_type, 'adam_m': adam_m_url, 'adam_v': adam_v_url})
+        if response.status_code != 200:
+            logging.error(f"Failed to update Adam state for {task_type}: {response.text}")
+        else:
+            logging.info(f"Updated Adam state for {task_type}")
 
     def get_batch_url(self):
         response = requests.get(f"{self.sot_url}/get_batch")
@@ -131,7 +152,8 @@ if __name__ == "__main__":
         'final_logits': 'FinalLogitsSubnetAddress',
         'loss': 'LossSubnetAddress',
         'backward': 'BackwardSubnetAddress',
-        'embed_backward': 'EmbedBackwardSubnetAddress'
+        'embed_backward': 'EmbedBackwardSubnetAddress',
+        'final_logits_backward': 'FinalLogitsBackwardSubnetAddress'
     }
     
     master = Master(rpc_url, private_key, sot_url, subnet_addresses)

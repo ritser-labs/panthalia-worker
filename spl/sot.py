@@ -58,5 +58,19 @@ def update_state():
 
     return jsonify({'status': 'success'})
 
+@app.route('/update_adam', methods=['POST'])
+def update_adam():
+    data = request.json
+    task_type = data['task_type']
+    adam_m = data['adam_m']
+    adam_v = data['adam_v']
+
+    key_m = f'adam_m/{task_type}.json'
+    key_v = f'adam_v/{task_type}.json'
+    s3.put_object(Bucket=bucket_name, Key=key_m, Body=json.dumps(adam_m))
+    s3.put_object(Bucket=bucket_name, Key=key_v, Body=json.dumps(adam_v))
+
+    return jsonify({'status': 'success'})
+
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000)
