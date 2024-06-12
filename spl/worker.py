@@ -104,7 +104,6 @@ def final_logits_backward_task(error_file, logits_file, error_output_file):
     
     # Load logits, inputs, and output_layer from the forward pass
     logits, inputs, output_layer = load_from_disk(logits_file)
-    inputs.requires_grad = True  # Ensure the inputs tensor requires gradients
 
     error = error.view(logits.shape)  # Ensure the gradient tensor matches the output tensor shape
 
