@@ -54,10 +54,13 @@ worker_processes = []
 print("Starting worker processes...")
 
 # Start worker.py for each subnet
-for task_type, subnet_address in subnet_addresses.items():
+base_port = 12356  # Starting port for distributed environment
+
+for idx, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
     base_task_type = task_type.split('_')[0]  # Use only the base task type
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
+    os.environ['MASTER_PORT'] = str(base_port + idx)  # Assign unique port
     command = [
         'python', 'worker.py',
         '--task_type', base_task_type,
@@ -67,7 +70,8 @@ for task_type, subnet_address in subnet_addresses.items():
         '--sot_url', args.sot_url,
         '--pool_address', pool_address,
         '--group', str(args.group),
-        '--local_storage_dir', args.local_storage_dir
+        '--local_storage_dir', args.local_storage_dir,
+        '--layer_idx', str(idx)  # Pass the layer index
     ]
     worker_processes.append(subprocess.Popen(command))
 

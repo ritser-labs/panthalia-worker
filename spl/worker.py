@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument('--pool_address', type=str, required=True, help="Pool contract address")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='local_storage', help="Directory for local storage of files")
+    parser.add_argument('--layer_idx', type=int, help="Layer index for forward/backward tasks")
     return parser.parse_args()
 
 args = parse_args()
@@ -122,7 +123,7 @@ def check_for_nans(tensor, name):
 
 def initialize_distributed_environment():
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12356'
+    os.environ['MASTER_PORT'] = os.getenv('MASTER_PORT', '12356')
     if not dist.is_initialized():
         dist.init_process_group(backend='nccl')
 
@@ -238,11 +239,11 @@ def handle_event(event):
         embed_task(batch)
         result_url = upload_tensor(tensors['outputs'])
     elif task_type == 'forward':
-        forward_task(task_params['layer_idx'], inputs)
+        forward_task(args.layer_idx, inputs)
         result_url = upload_tensor(tensors['outputs'])
     elif task_type == 'backward':
-        backward_task(task_params['layer_idx'], error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], task_params['layer_idx'])
+        backward_task(args.layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
+        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], args.layer_idx)
     elif task_type == 'final_logits':
         final_logits_task(inputs)
         result_url = upload_tensor(tensors['logits'])
