@@ -10,14 +10,24 @@ from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
-from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor
+from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional
 from io import BytesIO
 import time
 import os
 
+# Define a custom filter to suppress redundant traceback logs
+class SuppressTracebackFilter(logging.Filter):
+    def filter(self, record):
+        if 'ConnectionRefusedError' in record.getMessage() or 'MaxRetryError' in record.getMessage():
+            return False
+        return True
+
+# Configure logging
 logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger()
+logger.addFilter(SuppressTracebackFilter())
 
 @dataclass
 class ModelArgs:
@@ -227,16 +237,16 @@ def handle_event(event):
     task_type = args.task_type
     if task_type == 'embed':
         embed_task(batch)
-        result_url = upload_tensor(tensors['outputs'], args.local_storage_dir)
+        result_url = upload_tensor(tensors['outputs'])
     elif task_type == 'forward':
         forward_task(task_params['layer_idx'], inputs)
-        result_url = upload_tensor(tensors['outputs'], args.local_storage_dir)
+        result_url = upload_tensor(tensors['outputs'])
     elif task_type == 'backward':
         backward_task(task_params['layer_idx'], error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
         result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], task_params['layer_idx'])
     elif task_type == 'final_logits':
         final_logits_task(inputs)
-        result_url = upload_tensor(tensors['logits'], args.local_storage_dir)
+        result_url = upload_tensor(tensors['logits'])
     elif task_type == 'final_logits_backward':
         final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
         result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -1)
@@ -245,7 +255,7 @@ def handle_event(event):
         result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -2)
     elif task_type == 'loss':
         loss_task(targets)
-        result_url = upload_tensor(tensors['loss'], args.local_storage_dir)
+        result_url = upload_tensor(tensors['loss'])
 
     if result_url:
         last_block = last_gradient_update[task_type]
@@ -265,11 +275,11 @@ def submit_solution(task_id, result_url, last_block):
     contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')).transact({'from': worker_address})
 
 def upload_tensors_and_grads(error_output, grads, layer_idx):
-    error_output_url = upload_tensor(error_output, args.local_storage_dir)
-    grads_url = upload_tensor(grads_to_sparse(grads), args.local_storage_dir)
+    error_output_url = upload_tensor(error_output)
+    grads_url = upload_tensor(grads_to_sparse(grads))
     adam_m_sparse, adam_v_sparse = extract_sparse_adam_params(grads, layer_idx)
-    adam_m_url = upload_tensor(adam_m_sparse, args.local_storage_dir)
-    adam_v_url = upload_tensor(adam_v_sparse, args.local_storage_dir)
+    adam_m_url = upload_tensor(adam_m_sparse)
+    adam_v_url = upload_tensor(adam_v_sparse)
     return json.dumps({'error_output_url': error_output_url, 'grads_url': grads_url, 'adam_m_url': adam_m_url, 'adam_v_url': adam_v_url})
 
 def extract_sparse_adam_params(grads, layer_idx):

@@ -6,6 +6,8 @@ import json
 import logging
 import torch.distributed as dist
 import time
+from io import BytesIO
+import requests
 
 # Define the new tokenizer and model arguments
 tokenizer = Tokenizer('cl100k_base')
@@ -91,6 +93,10 @@ def upload_tensor(tensor, local_storage_dir):
     local_file_path = os.path.join(local_storage_dir, f'{int(time.time())}.pt')
     torch.save(tensor, local_file_path)
     return f'file://{local_file_path}'
+
+def download_file(url):
+    response = requests.get(url)
+    return torch.load(BytesIO(response.content))
 
 def initialize_distributed_environment(backend, master_addr='localhost', master_port=None):
     if master_port is None:
