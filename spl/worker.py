@@ -103,7 +103,7 @@ def final_logits_task(inputs_file, state_dict_file, logits_file):
 
     logits = output_layer(inputs)
     check_for_nans(logits, "final logits")
-    logging.info(f"Final logits: {logits}")
+    logging.info(f"Final logits: {logits.shape}")
 
     # Save logits along with the computation graph
     save_to_disk((logits, inputs, output_layer), logits_file)
@@ -161,8 +161,11 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
 
     pad_id = tokenizer.pad_id
 
-    # Ensure logits are in the shape [batch_size * seq_len, vocab_size] for cross-entropy
-    logits = logits.view(-1, logits.size(-1))  # Shape: [batch_size * seq_len, vocab_size]
+    # Reshape logits to [batch_size * seq_len, vocab_size]
+    batch_size, seq_len, vocab_size = logits.shape
+    logits = logits.view(batch_size * seq_len, vocab_size)  # Shape: [batch_size * seq_len, vocab_size]
+
+    # Ensure targets match the reshaped logits structure
     targets = targets.view(-1)  # Shape: [batch_size * seq_len]
 
     loss = F.cross_entropy(logits, targets, ignore_index=pad_id)
@@ -173,7 +176,10 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     check_for_nans(logits.grad, "logits gradients")
     logging.info(f"Logits gradients for loss: {logits.grad.shape}")
 
-    save_to_disk((logits.grad, inputs, output_layer), logits_grad_file)
+    # Reshape logits_grad to match original logits shape
+    logits_grad = logits.grad.view(batch_size, seq_len, vocab_size)  # Shape: [batch_size, seq_len, vocab_size]
+
+    save_to_disk((logits_grad, inputs, output_layer), logits_grad_file)
 
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
