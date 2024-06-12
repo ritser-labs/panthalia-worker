@@ -137,7 +137,7 @@ def embed_backward_task(error_file, inputs_file, error_output_file):
     grads = [param.grad for param in embedding.parameters() if param.grad is not None]
     logging.info(f"Gradients for embedding: {grads}")
 
-    save_to_disk(grads, error_output_file)
+    save_to_disk((None, grads), error_output_file)
 
 def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     logits, inputs, output_layer = load_from_disk(logits_file)
@@ -246,7 +246,7 @@ if __name__ == "__main__":
     elif args.task == "forward":
         forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.logits_file, args.mask)
     elif args.task == "backward":
-        backward_task(args.layer_idx, args.error, args.state_dict, args.error_output_file, args.logits_file)
+        backward_task(args.layer_idx, args.error, args.state_dict, args.error_output_file, args.inputs)
     elif args.task == "final_logits":
         final_logits_task(args.inputs, args.state_dict, args.logits_file)
     elif args.task == "final_logits_backward":
@@ -256,7 +256,7 @@ if __name__ == "__main__":
     elif args.task == "loss":
         loss_task(args.logits, args.targets, args.loss_file, args.logits_grad_file)
     elif args.task == "apply_adamw":
-        grads = load_from_disk(args.grads)
+        _, grads = load_from_disk(args.grads)
         apply_adamw(args.layer_idx, grads, args.learning_rate, args.beta1, args.beta2, args.epsilon, args.weight_decay, args.t)
 
     dist.destroy_process_group()
