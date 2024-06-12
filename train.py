@@ -9,19 +9,21 @@ from modeling_gemmoe import GemmoeForCausalLM
 from tokenization_gemmoe import GemmoeTokenizer
 from configuration_gemmoe import GemmoeConfig
 
+NUM_PROC = 24
+
 # Load the dataset
-dataset = load_dataset("wikipedia", language="sw", date="20240401", trust_remote_code=True)
+dataset = load_dataset("wikipedia", language="en", date="20240401", split='train[:5%]', trust_remote_code=True, num_proc=NUM_PROC)
 
 # Initialize the tokenizer
 tokenizer = GemmoeTokenizer("tokenizer.model", trust_remote_code=True)
 
-config = GemmoeConfig(name_or_path="config.json")
+config = GemmoeConfig().from_json_file("config.json")
 
 def tokenize_function(examples):
     return tokenizer(examples["text"], padding="max_length", truncation=True)
 
 # Tokenize the dataset
-tokenized_datasets = dataset.map(tokenize_function, batched=True)
+tokenized_datasets = dataset.map(tokenize_function, batched=True, num_proc=NUM_PROC)
 
 # Define a simple get_label function if your dataset has labels
 # def get_label(example): 
@@ -30,22 +32,20 @@ tokenized_datasets = dataset.map(tokenize_function, batched=True)
 
 # tokenized_datasets = tokenized_datasets.map(get_label)
 
-# Use a smaller dataset for training to speed things up
-small_train_dataset = tokenized_datasets["train"].shuffle(seed=42).select(range(1000))
-small_eval_dataset = tokenized_datasets["validation"].shuffle(seed=42).select(range(1000))
-
 # Data collator will dynamically pad the batch during training
 data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
 # Initialize our model
-model = GemmoeForCausalLM(config, trust_remote_code=True)
+model = GemmoeForCausalLM(config)
+
+print(model.config.num_experts_per_tok)
 
 # Define training arguments
 training_args = TrainingArguments(
     output_dir="./results",
-    num_train_epochs=3,
-    per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
+    num_train_epochs=1,
+    per_device_train_batch_size=1,
+    per_device_eval_batch_size=1,
     warmup_steps=500,
     weight_decay=0.01,
     evaluate_during_training=True,
@@ -62,8 +62,8 @@ def compute_metrics(pred):
 trainer = Trainer(
     model=model,
     args=training_args,
-    train_dataset=small_train_dataset,
-    eval_dataset=small_eval_dataset,
+    train_dataset=dataset["train"],
+    eval_dataset=dataset["valid"],
     data_collator=data_collator,
     compute_metrics=compute_metrics,
 )
