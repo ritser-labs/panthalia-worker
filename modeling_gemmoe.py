@@ -43,7 +43,7 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from transformers.utils.import_utils import is_torch_fx_available
-from .configuration_gemmoe import GemmoeConfig
+from configuration_gemmoe import GemmoeConfig
 
 from math import sqrt as math_sqrt
 

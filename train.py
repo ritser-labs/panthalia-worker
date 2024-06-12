@@ -5,12 +5,17 @@ from transformers import AutoTokenizer, TrainingArguments, Trainer
 from transformers import DataCollatorWithPadding
 import numpy as np
 from sklearn.metrics import accuracy_score
+from modeling_gemmoe import GemmoeForCausalLM
+from tokenization_gemmoe import GemmoeTokenizer
+from configuration_gemmoe import GemmoeConfig
 
 # Load the dataset
-dataset = load_dataset("wikipedia", language="sw", date="20240401")
+dataset = load_dataset("wikipedia", language="sw", date="20240401", trust_remote_code=True)
 
 # Initialize the tokenizer
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")  # Update with the model you're using
+tokenizer = GemmoeTokenizer("tokenizer.model", trust_remote_code=True)
+
+config = GemmoeConfig(name_or_path="config.json")
 
 def tokenize_function(examples):
     return tokenizer(examples["text"], padding="max_length", truncation=True)
@@ -33,7 +38,7 @@ small_eval_dataset = tokenized_datasets["validation"].shuffle(seed=42).select(ra
 data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
 # Initialize our model
-model = GemmoeForSequenceClassification(config)
+model = GemmoeForCausalLM(config, trust_remote_code=True)
 
 # Define training arguments
 training_args = TrainingArguments(
