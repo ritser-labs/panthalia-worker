@@ -70,6 +70,7 @@ tensors = defaultdict(lambda: None)
 adam_m = defaultdict(lambda: None)
 adam_v = defaultdict(lambda: None)
 last_gradient_update = defaultdict(lambda: None)
+gradient_update_paused = False
 
 # Placeholder for freqs_cis and mask
 freqs_cis = None
@@ -122,7 +123,7 @@ def apply_gradient_updates():
 
     response = requests.get(args.sot_url, stream=True)
     for line in response.iter_lines():
-        if line:
+        if line and not gradient_update_paused:
             update = json.loads(line)
             block_number = update['block_number']
             for tensor_name, sparse_update in update['gradients'].items():
@@ -160,6 +161,18 @@ def resume_gradient_updates():
     global gradient_update_paused
     gradient_update_paused = False
     apply_gradient_updates()
+
+def sync_tensors_to_latest_state():
+    while True:
+        response = requests.get(args.sot_url + "/latest_state")
+        latest_state = response.json()
+        for tensor_name, state in latest_state.items():
+            tensor = tensors[tensor_name]
+            if tensor is None or last_gradient_update[tensor_name] < state['block_number']:
+                apply_gradient_updates()
+                break
+        else:
+            break
 
 def handle_event(event):
     task_id = event['args']['taskId']
@@ -219,8 +232,9 @@ def handle_event(event):
         last_block = last_gradient_update[task_type]
         submit_solution(task_id, result_url, last_block)
 
-    # Resume gradient updates
+    # Resume gradient updates and ensure tensors are up-to-date
     resume_gradient_updates()
+    sync_tensors_to_latest_state()
 
 def submit_solution(task_id, result_url, last_block):
     result = {
@@ -436,10 +450,11 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
 def main():
     initialize_model_and_embedding()
-    apply_gradient_updates()
-
     event_filter = contract.events.SolverSelected.createFilter(fromBlock='latest')
     while True:
+        # Ensure tensors are up-to-date before processing tasks
+        apply_gradient_updates()
+        sync_tensors_to_latest_state()
         for event in event_filter.get_new_entries():
             handle_event(event)
 
