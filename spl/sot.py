@@ -3,6 +3,8 @@ import json
 from flask import Flask, request, jsonify
 from datasets import load_dataset
 from transformers import AutoTokenizer
+import torch
+from common import model_args
 
 app = Flask(__name__)
 
@@ -18,6 +20,24 @@ tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
 dataset_iter = iter(dataset)
 
+# Initialize random state based on model_args
+initial_state = {
+    "embed": {"block_number": 0, "state": torch.randn(model_args.max_seq_len, model_args.dim).tolist()}
+}
+for i in range(model_args.n_layers):
+    initial_state[f"forward_layer_{i}"] = {"block_number": 0, "state": torch.randn(model_args.max_seq_len, model_args.dim).tolist()}
+    initial_state[f"backward_layer_{i}"] = {"block_number": 0, "state": torch.randn(model_args.max_seq_len, model_args.dim).tolist()}
+initial_state["final_logits"] = {"block_number": 0, "state": torch.randn(model_args.max_seq_len, model_args.vocab_size).tolist()}
+initial_state["final_logits_backward"] = {"block_number": 0, "state": torch.randn(model_args.max_seq_len, model_args.dim).tolist()}
+initial_state["embed_backward"] = {"block_number": 0, "state": torch.randn(model_args.max_seq_len, model_args.dim).tolist()}
+
+# Save the initial state to individual layer files if they do not exist
+os.makedirs(os.path.join(data_dir, 'state'), exist_ok=True)
+for layer, state in initial_state.items():
+    state_file_path = os.path.join(data_dir, f'state/{layer}.json')
+    if not os.path.exists(state_file_path):
+        with open(state_file_path, 'w') as file:
+            json.dump(state, file)
 
 @app.route('/latest_model_params', methods=['GET'])
 def get_latest_model_params():
@@ -111,6 +131,18 @@ def update_adam():
         json.dump(adam_v, file_v)
 
     return jsonify({'status': 'success'})
+
+
+@app.route('/latest_state', methods=['GET'])
+def latest_state():
+    state_files = os.listdir(os.path.join(data_dir, 'state'))
+    latest_state = {}
+    for state_file in state_files:
+        with open(os.path.join(data_dir, f'state/{state_file}'), 'r') as file:
+            state = json.load(file)
+            task_type = state_file.split('.')[0]
+            latest_state[task_type] = state
+    return jsonify(latest_state)
 
 
 if __name__ == "__main__":
