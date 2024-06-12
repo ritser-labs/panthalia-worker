@@ -104,7 +104,7 @@ def embed_backward_task(error_file, batch_file, embedding_file, error_output_fil
     grads = [param.grad for param in embedding.parameters()]
     save_to_disk(grads, error_output_file)
 
-def loss_task(logits_file, targets_file, gradient_accumulation_steps, loss_file, logits_grad_file):
+def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     logits = load_from_disk(logits_file)
     targets = load_from_disk(targets_file)
     
@@ -112,12 +112,12 @@ def loss_task(logits_file, targets_file, gradient_accumulation_steps, loss_file,
     pad_id = tokenizer.pad_id
     
     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=pad_id)
-    loss = loss / gradient_accumulation_steps
     save_to_disk(loss.item(), loss_file)
     
     logits.retain_grad()
     loss.backward()
     save_to_disk(logits.grad, logits_grad_file)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -129,7 +129,6 @@ if __name__ == "__main__":
     parser.add_argument("--state_dict", type=str, required=False)
     parser.add_argument("--logits", type=str, required=False)
     parser.add_argument("--targets", type=str, required=False)
-    parser.add_argument("--gradient_accumulation_steps", type=int, required=False)
     parser.add_argument("--embedding_file", type=str, required=False)
     parser.add_argument("--logits_file", type=str, required=False)
     parser.add_argument("--error_output_file", type=str, required=False)
@@ -150,4 +149,4 @@ if __name__ == "__main__":
     elif args.task == "embed_backward":
         embed_backward_task(args.error, args.batch, args.embedding_file, args.error_output_file)
     elif args.task == "loss":
-        loss_task(args.logits, args.targets, args.gradient_accumulation_steps, args.loss_file, args.logits_grad_file)
+        loss_task(args.logits, args.targets, args.loss_file, args.logits_grad_file)
