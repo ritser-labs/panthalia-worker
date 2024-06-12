@@ -38,9 +38,8 @@ def embed_task(batch_file, embedding_file, inputs_file):
     # Save embeddings along with the computation graph
     save_to_disk((inputs, batch, embedding), inputs_file)
 
-
 def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, outputs_file, mask_file):
-    inputs = load_from_disk(inputs_file)
+    inputs, batch, embedding = load_from_disk(inputs_file)
     if torch.isnan(inputs).any() or torch.isinf(inputs).any():
         raise ValueError(f"NaNs or Infs detected in inputs for layer {layer_idx}")
 
@@ -83,9 +82,8 @@ def backward_task(layer_idx, error_file, state_dict_file, error_output_file, out
 
     save_to_disk((inputs.grad, grads), error_output_file)
 
-
 def final_logits_task(inputs_file, state_dict_file, logits_file):
-    inputs = load_from_disk(inputs_file)
+    inputs, _, norm = load_from_disk(inputs_file)
     state_dict = load_layer_state_dict(state_dict_file)
 
     if state_dict is None:
@@ -98,7 +96,7 @@ def final_logits_task(inputs_file, state_dict_file, logits_file):
     check_for_nans(logits, "final logits")
     logging.info(f"Final logits: {logits}")
 
-    # Save logits along with the graph
+    # Save logits along with the computation graph
     save_to_disk((logits, inputs, output_layer), logits_file)
 
 def final_logits_backward_task(error_file, logits_file, error_output_file):
@@ -122,8 +120,6 @@ def final_logits_backward_task(error_file, logits_file, error_output_file):
 
     save_to_disk((logits_grad, grads), error_output_file)
 
-
-
 def embed_backward_task(error_file, inputs_file, error_output_file):
     error = load_from_disk(error_file)
     logging.info(f"Error tensor shape: {error.shape}")
@@ -142,7 +138,6 @@ def embed_backward_task(error_file, inputs_file, error_output_file):
     logging.info(f"Gradients for embedding: {grads}")
 
     save_to_disk(grads, error_output_file)
-
 
 def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     logits, inputs, output_layer = load_from_disk(logits_file)
@@ -241,7 +236,6 @@ if __name__ == "__main__":
     parser.add_argument("--t", type=int, required=False)
     parser.add_argument("--freqs_cis", type=str, required=False)
     parser.add_argument("--mask", type=str, required=False)
-    parser.add_argument("--intermediate_activations", type=str, required=False)
     args = parser.parse_args()
 
     initialize_distributed_environment()
@@ -252,13 +246,13 @@ if __name__ == "__main__":
     elif args.task == "forward":
         forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.logits_file, args.mask)
     elif args.task == "backward":
-        backward_task(args.layer_idx, args.error, args.state_dict, args.error_output_file, args.mask, args.inputs)
+        backward_task(args.layer_idx, args.error, args.state_dict, args.error_output_file, args.logits_file)
     elif args.task == "final_logits":
         final_logits_task(args.inputs, args.state_dict, args.logits_file)
     elif args.task == "final_logits_backward":
-        final_logits_backward_task(args.error, args.state_dict, args.error_output_file, args.inputs, args.logits_file)
+        final_logits_backward_task(args.error, args.logits_file, args.error_output_file)
     elif args.task == "embed_backward":
-        embed_backward_task(args.error, args.batch, args.embedding_file, args.error_output_file)
+        embed_backward_task(args.error, args.inputs, args.error_output_file)
     elif args.task == "loss":
         loss_task(args.logits, args.targets, args.loss_file, args.logits_grad_file)
     elif args.task == "apply_adamw":
