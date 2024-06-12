@@ -116,7 +116,9 @@ def backward_task(layer_idx, error_file):
     print("Running backward step")
     loss, grads = run_layer_step(layer, None, is_forward=False, next_error=error, optimizer=optimizer, scaler=scaler, loss_fn=loss_fn, pad_id=tokenizer.pad_id)
     print(f"Saving error and grads for layer {layer_idx}")
-    save_to_disk((error.cpu(), grads), f"data/error_layer_{layer_idx}.pt")
+    error_grads = (loss, grads)
+    print(f"Saving error_grads with shape {len(error_grads)}")
+    save_to_disk(error_grads, f"data/error_layer_{layer_idx}.pt")
     save_layer_state_dict(layer.state_dict(), f"data/layer_{layer_idx}.pt")
 
 
