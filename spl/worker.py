@@ -102,13 +102,31 @@ def embed_backward_task(error_file):
     grads = [param.grad for param in embedding.parameters()]
     save_to_disk(grads, "data/embedding_grads.pt")
 
+def loss_task(logits_file, targets_file, gradient_accumulation_steps):
+    logits = load_from_disk(logits_file)
+    targets = load_from_disk(targets_file)
+    
+    tokenizer = Tokenizer(encoding_name='cl100k_base')
+    pad_id = tokenizer.pad_id
+    
+    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=pad_id)
+    loss = loss / gradient_accumulation_steps
+    save_to_disk(loss.item(), "data/loss.pt")
+    
+    logits.retain_grad()
+    loss.backward()
+    save_to_disk(logits.grad, "data/logits_grad.pt")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=str, required=True, choices=["embed", "forward", "backward", "final_logits", "final_logits_backward", "embed_backward"])
+    parser.add_argument("--task", type=str, required=True, choices=["embed", "forward", "backward", "final_logits", "final_logits_backward", "embed_backward", "loss"])
     parser.add_argument("--layer_idx", type=int, required=False)
     parser.add_argument("--inputs", type=str, required=False)
     parser.add_argument("--error", type=str, required=False)
     parser.add_argument("--batch", type=str, required=False)
+    parser.add_argument("--logits", type=str, required=False)
+    parser.add_argument("--targets", type=str, required=False)
+    parser.add_argument("--gradient_accumulation_steps", type=int, required=False)
     args = parser.parse_args()
 
     if args.task == "embed":
@@ -123,3 +141,5 @@ if __name__ == "__main__":
         final_logits_backward_task(args.error)
     elif args.task == "embed_backward":
         embed_backward_task(args.error)
+    elif args.task == "loss":
+        loss_task(args.logits, args.targets, args.gradient_accumulation_steps)
