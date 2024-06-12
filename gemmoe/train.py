@@ -8,6 +8,7 @@ from sklearn.metrics import accuracy_score
 from modeling_gemmoe import GemmoeForCausalLM
 from tokenization_gemmoe import GemmoeTokenizer
 from configuration_gemmoe import GemmoeConfig
+from torch import nn
 
 NUM_PROC = 24
 
@@ -19,7 +20,7 @@ tokenizer = GemmoeTokenizer("tokenizer.model", trust_remote_code=True)
 
 config = GemmoeConfig().from_json_file("config.json")
 def tokenize_function(examples):
-    return tokenizer(examples["text"], padding="max_length", truncation=True)
+    return tokenizer(examples["text"], padding="max_length", truncation=True, max_length=2048)
 
 # Tokenize the dataset
 tokenized_datasets = dataset.map(tokenize_function, batched=True, num_proc=NUM_PROC)
@@ -37,8 +38,25 @@ tokenized_datasets = dataset.map(tokenize_function, batched=True, num_proc=NUM_P
 data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
 # Initialize our model
-model = GemmoeForCausalLM(config)
+with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+    model = GemmoeForCausalLM(config)
 model_size = sum(t.numel() for t in model.parameters())
+# Visualize model layers
+print("Model layers:")
+for name, module in model.named_modules():
+    if isinstance(module, nn.Linear) or isinstance(module, nn.Embedding):
+        print(f"{name}: {module}")
+
+# Visualize model parameters
+print("\nModel parameters:")
+for name, param in model.named_parameters():
+    print(f"{name}: {param.shape}")
+
+# Visualize model state dict
+print("\nModel state dict:")
+for key, value in model.state_dict().items():
+    print(f"{key}: {value.shape}")
+
 print(f"Model size: {model_size / 1024**2:.2f} M params")
 
 # Define training arguments
@@ -47,6 +65,7 @@ training_args = TrainingArguments(
     num_train_epochs=1,
     per_device_train_batch_size=1,
     per_device_eval_batch_size=1,
+    gradient_accumulation_steps=8,
     warmup_steps=500,
     weight_decay=0.01,
     bf16=True,                              # use bfloat16 precision
