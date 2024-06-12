@@ -15,6 +15,8 @@ def run_layer_step(layer, x, is_forward=True, next_error=None, optimizer=None, s
             if x is None:
                 x = next_error  # Use the next_error as the input for backward pass
             print(f"Shape of x: {x.shape}")  # Debug: Check shape of x
+            # Reshape x to match the expected input shape of LayerNorm
+            x = x.view(-1, layer.norm1.normalized_shape[0])
             logits = layer(x)
             print(f"Shape of logits: {logits.shape}")  # Debug: Check shape of logits
             logits = logits.view(-1, logits.size(-1))
@@ -26,6 +28,7 @@ def run_layer_step(layer, x, is_forward=True, next_error=None, optimizer=None, s
         scaler.update()
         grads = [param.grad for param in layer.parameters()]
         return loss.item(), grads
+
 
 def embed_task(batch_file):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
