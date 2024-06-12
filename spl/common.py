@@ -11,11 +11,11 @@ class ModelArgs:
 
 # Define global model_args
 model_args = ModelArgs(
-    vocab_size=50257,  # Example value, update as needed
+    vocab_size=100256,  # Example value, update as needed
     dim=512,
     n_layers=6,
     n_heads=8,
-    ffn_dim_multiplier=4
+    ffn_dim_multiplier=1
 )
 
 def save_to_disk(data, filename):
