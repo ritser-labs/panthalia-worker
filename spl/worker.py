@@ -103,19 +103,19 @@ def initialize_model_and_embedding():
     if not embedding_initialized:
         vocab_size = tokenizer.get_vocab_size()
         global embedding
-        embedding = VocabParallelEmbedding(vocab_size, args.dim).to(device)
+        embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
         embedding_initialized = True
 
     # Compute freqs_cis and mask
     global freqs_cis
     freqs_cis = precompute_freqs_cis(
-        args.dim // args.n_heads,
-        args.max_seq_len * 2,
-        args.rope_theta,
+        model_args.dim // model_args.n_heads,
+        model_args.max_seq_len * 2,
+        model_args.rope_theta,
     )
 
     global mask
-    mask = torch.triu(torch.full((args.max_seq_len, args.max_seq_len), float('-inf')), diagonal=1).to(device)
+    mask = torch.triu(torch.full((model_args.max_seq_len, model_args.max_seq_len), float('-inf')), diagonal=1).to(device)
 
 def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
@@ -386,7 +386,7 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
 def final_logits_task(inputs):
     global tensors
     state_dict = tensors['output_layer_state_dict']
-    output_layer = ColumnParallelLinear(args.dim, state_dict['weight'].shape[0], bias=False).to(device)
+    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
     output_layer.load_state_dict(state_dict)
 
     logits = output_layer(inputs.to(device))
@@ -396,7 +396,7 @@ def final_logits_task(inputs):
 def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global tensors
     state_dict = tensors['output_layer_state_dict']
-    output_layer = ColumnParallelLinear(args.dim, state_dict['weight'].shape[0], bias=False).to(device)
+    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
     output_layer.load_state_dict(state_dict)
     
     logits = output_layer(inputs.to(device))
@@ -523,7 +523,7 @@ def check_and_finalize_verifications():
 
 def main():
     initialize_model_and_embedding()
-    event_filter = contract.events.SolverSelected.createFilter(fromBlock='latest')
+    event_filter = contract.events.SolverSelected.create_filter(fromBlock='latest')
     while True:
         # Ensure tensors are up-to-date before processing tasks
         apply_gradient_updates()
