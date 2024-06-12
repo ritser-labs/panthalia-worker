@@ -31,7 +31,7 @@ class Transformer(nn.Module):
         ])
         self.fc = nn.Linear(model_args.dim, model_args.vocab_size)
 
-    def forward(self, x, start_pos=0):
+    def forward(self, x):
         x = self.embedding(x)
         x = x.permute(1, 0, 2)  # Transformer expects (seq_len, batch, d_model)
         for layer in self.layers:

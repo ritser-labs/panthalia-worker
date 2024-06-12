@@ -14,8 +14,12 @@ def run_layer_step(layer, x, is_forward=True, next_error=None, optimizer=None, s
         with torch.cuda.amp.autocast():
             if x is None:
                 x = next_error  # Use the next_error as the input for backward pass
+            print(f"Shape of x: {x.shape}")  # Debug: Check shape of x
             logits = layer(x)
+            print(f"Shape of logits: {logits.shape}")  # Debug: Check shape of logits
             logits = logits.view(-1, logits.size(-1))
+            print(f"Shape of reshaped logits: {logits.shape}")  # Debug: Check shape of reshaped logits
+            print(f"Shape of next_error: {next_error.shape}")  # Debug: Check shape of next_error
             loss = loss_fn(logits, next_error.view(-1), ignore_index=pad_id)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -44,12 +48,13 @@ def embed_task(batch_file):
 def forward_task(layer_idx, inputs_file):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     layer = TransformerLayer(dim=512, n_heads=8, ffn_dim=2048).to(device)
+    tokenizer = Tokenizer(encoding_name='cl100k_base')
     state_dict = load_layer_state_dict(f"data/layer_{layer_idx}.pt")
     if state_dict is None:
         # Initialize the layer state dictionary if missing
         print(f"Initializing state dict for layer {layer_idx}")
         model_args = ModelArgs(
-            vocab_size=50257,  # Use your vocabulary size
+            vocab_size=tokenizer.get_vocab_size(),
             dim=512,
             n_layers=6,
             n_heads=8,
