@@ -126,7 +126,7 @@ def upload_tensor(tensor):
 def apply_gradient_updates():
     global tensors, adam_m, adam_v, last_gradient_update
 
-    response = requests.get(f"{args.sot_url}/stream_gradients", stream=True)
+    response = requests.post(f"{args.sot_url}/stream_gradients", json={}, stream=True)
     for line in response.iter_lines():
         if line and not gradient_update_paused:
             try:
@@ -134,9 +134,13 @@ def apply_gradient_updates():
             except json.JSONDecodeError as e:
                 logging.error(f"Failed to decode JSON: {e}")
                 continue
-            
-            block_number = update['block_number']
-            for tensor_name, sparse_update in update['gradients'].items():
+
+            block_number = update.get('block_number', 0)  # Default to 0 if not present
+            if block_number is None:
+                logging.error(f"Missing block_number in gradient update: {update}")
+                continue
+
+            for tensor_name, sparse_update in update.get('gradients', {}).items():
                 values = torch.tensor(sparse_update['values'], device=device)
                 indices = torch.tensor(sparse_update['indices'], device=device)
                 shape = sparse_update['shape']
@@ -176,7 +180,7 @@ def sync_tensors_to_latest_state():
         latest_state = response.json()
         need_update = False
         for tensor_name, state in latest_state.items():
-            if tensor_name not in tensors or last_gradient_update[tensor_name] < state['block_number']:
+            if tensor_name not in tensors or last_gradient_update[tensor_name] < state.get('block_number', -1):
                 need_update = True
                 break
         if not need_update:
@@ -326,7 +330,7 @@ def forward_task(layer_idx, inputs):
     if layer.attention.cache_k is not None and layer.attention.cache_k.shape[0] != bsz:
         layer.attention.cache_k = torch.zeros(bsz, layer.attention.cache_k.shape[1], layer.attention.cache_k.shape[2], layer.attention.cache_k.shape[3], device=device)
     if layer.attention.cache_v is not None and layer.attention.cache_v.shape[0] != bsz:
-        layer.attention.cache_v = torch.zeros(bsz, layer.attention.cache_v.shape[1], layer.attention.cache_v.shape[2], layer.attention.cache_v.shape[3], device=device)
+        layer.attention.cache_v = torch.zeros(bsz, layer.attention.cache_v.shape[1], layer.attention.cache_v.shape[2], layer.attention.cache_v.shape[3], device.device)
 
     outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask.to(device))
     check_for_nans(outputs, f"layer {layer_idx} outputs")

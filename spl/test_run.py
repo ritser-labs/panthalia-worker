@@ -71,12 +71,15 @@ worker_processes = []
 print("Starting SOT service...")
 
 # Start the SOT service
-sot_process = subprocess.Popen(['python', 'sot.py'])
+sot_process = subprocess.Popen(['python', 'sot.py'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 print(f"SOT service started with PID {sot_process.pid}")
 
 # Wait for the SOT service to be available
 if not wait_for_sot(args.sot_url):
     print("Error: SOT service did not become available within the timeout period.")
+    sot_stdout, sot_stderr = sot_process.communicate()
+    print(f"SOT stdout: {sot_stdout.decode()}")
+    print(f"SOT stderr: {sot_stderr.decode()}")
     sot_process.terminate()
     exit(1)
 

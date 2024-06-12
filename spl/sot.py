@@ -56,8 +56,11 @@ def get_latest_model_params():
 def publish_result():
     logging.info("Accessing /publish_result endpoint")
     data = request.json
-    task_id = data['task_id']
-    result = data['result']
+    task_id = data.get('task_id')
+    result = data.get('result')
+
+    if not task_id or not result:
+        return jsonify({'error': 'Missing task_id or result'}), 400
 
     os.makedirs(os.path.join(data_dir, 'task_results'), exist_ok=True)
     with open(os.path.join(data_dir, f'task_results/{task_id}.json'), 'w') as file:
@@ -69,12 +72,25 @@ def publish_result():
 def stream_gradients():
     logging.info("Accessing /stream_gradients endpoint")
     data = request.json
-    task_id = data['task_id']
-    gradients = data['gradients']
+    if not data:
+        logging.error("Empty request data")
+        return jsonify({'error': 'Empty request data'}), 400
+
+    task_id = data.get('task_id')
+    gradients = data.get('gradients')
+    block_number = data.get('block_number', 0)
+
+    if not task_id or not gradients:
+        logging.error(f"Missing task_id or gradients in request data: {data}")
+        return jsonify({'error': 'Missing task_id or gradients'}), 400
 
     os.makedirs(os.path.join(data_dir, 'gradients'), exist_ok=True)
+    gradient_data = {
+        'gradients': gradients,
+        'block_number': block_number
+    }
     with open(os.path.join(data_dir, f'gradients/{task_id}.json'), 'w') as file:
-        json.dump(gradients, file)
+        json.dump(gradient_data, file)
 
     return jsonify({'status': 'success'})
 
@@ -113,11 +129,15 @@ def get_targets():
 def update_state():
     logging.info("Accessing /update_state endpoint")
     data = request.json
-    task_type = data['task_type']
-    result = torch.tensor(data['result'])
+    task_type = data.get('task_type')
+    result = data.get('result')
+
+    if not task_type or result is None:
+        logging.error(f"Missing task_type or result in request data: {data}")
+        return jsonify({'error': 'Missing task_type or result'}), 400
 
     os.makedirs(os.path.join(data_dir, 'state'), exist_ok=True)
-    torch.save(result, os.path.join(data_dir, f'state/{task_type}.pt'))
+    torch.save(torch.tensor(result), os.path.join(data_dir, f'state/{task_type}.pt'))
 
     return jsonify({'status': 'success'})
 
@@ -125,14 +145,18 @@ def update_state():
 def update_adam():
     logging.info("Accessing /update_adam endpoint")
     data = request.json
-    task_type = data['task_type']
-    adam_m = torch.tensor(data['adam_m'])
-    adam_v = torch.tensor(data['adam_v'])
+    task_type = data.get('task_type')
+    adam_m = data.get('adam_m')
+    adam_v = data.get('adam_v')
+
+    if not task_type or adam_m is None or adam_v is None:
+        logging.error(f"Missing task_type, adam_m, or adam_v in request data: {data}")
+        return jsonify({'error': 'Missing task_type, adam_m, or adam_v'}), 400
 
     os.makedirs(os.path.join(data_dir, 'adam_m'), exist_ok=True)
     os.makedirs(os.path.join(data_dir, 'adam_v'), exist_ok=True)
-    torch.save(adam_m, os.path.join(data_dir, f'adam_m/{task_type}.pt'))
-    torch.save(adam_v, os.path.join(data_dir, f'adam_v/{task_type}.pt'))
+    torch.save(torch.tensor(adam_m), os.path.join(data_dir, f'adam_m/{task_type}.pt'))
+    torch.save(torch.tensor(adam_v), os.path.join(data_dir, f'adam_v/{task_type}.pt'))
 
     return jsonify({'status': 'success'})
 

@@ -66,7 +66,7 @@ class Master:
             gas_price = self.web3.eth.gas_price
             transaction = self.contracts[task_type].functions.submitTaskRequest(encoded_params).build_transaction({
                 'chainId': self.web3.eth.chain_id,
-                'gas': 10000000,
+                'gas': 1000000,
                 'gasPrice': gas_price,
                 'nonce': nonce
             })
@@ -104,10 +104,14 @@ class Master:
             raise
 
     def get_task_result(self, task_type, task_id):
-        task = self.contracts[task_type].functions.getTask(task_id).call()
-        if task[0] == 4:
-            return json.loads(task[6].decode('utf-8'))
-        return None
+        try:
+            task = self.contracts[task_type].functions.getTask(task_id).call()
+            if task[0] == 4:
+                return json.loads(task[6].decode('utf-8'))
+            return None
+        except Exception as e:
+            logging.error(f"Error getting task result for {task_type} with task ID {task_id}: {e}")
+            return None
 
     def main(self):
         model_params = self.get_latest_model_params()
