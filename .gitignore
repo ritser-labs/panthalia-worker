@@ -4,4 +4,4 @@ __pycache__/
 *$py.class
 
 pipeline/storage
-spl/data/
+spl/data/*

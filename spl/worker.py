@@ -20,7 +20,8 @@ def run_layer_step(layer, x, is_forward=True, next_error=None, optimizer=None, s
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        return loss.item(), [param.grad for param in layer.parameters()]
+        grads = [param.grad for param in layer.parameters()]
+        return loss.item(), grads
 
 def embed_task(batch_file):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -45,7 +46,20 @@ def forward_task(layer_idx, inputs_file):
     layer = TransformerLayer(dim=512, n_heads=8, ffn_dim=2048).to(device)
     state_dict = load_layer_state_dict(f"data/layer_{layer_idx}.pt")
     if state_dict is None:
-        raise ValueError(f"Failed to load layer state dict for layer {layer_idx}")
+        # Initialize the layer state dictionary if missing
+        print(f"Initializing state dict for layer {layer_idx}")
+        model_args = ModelArgs(
+            vocab_size=50257,  # Use your vocabulary size
+            dim=512,
+            n_layers=6,
+            n_heads=8,
+            ffn_dim_multiplier=4
+        )
+        layer = TransformerLayer(model_args.dim, model_args.n_heads, model_args.dim * model_args.ffn_dim_multiplier).to(device)
+        save_layer_state_dict(layer.state_dict(), f"data/layer_{layer_idx}.pt")
+        state_dict = load_layer_state_dict(f"data/layer_{layer_idx}.pt")
+        if state_dict is None:
+            raise ValueError(f"Failed to initialize and load state dict for layer {layer_idx}")
     layer.load_state_dict(state_dict)
     inputs = load_from_disk(inputs_file)
     if inputs is None:
