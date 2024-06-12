@@ -67,7 +67,7 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, output
 
 def backward_task(layer_idx, error_file, state_dict_file, error_output_file, inputs_file, freqs_cis_file, mask_file):
     error, _ = load_from_disk(error_file)
-    
+
     if error is None:
         raise ValueError(f"Error tensor loaded from {error_file} is None")
 
@@ -95,9 +95,14 @@ def backward_task(layer_idx, error_file, state_dict_file, error_output_file, inp
     if inputs.grad is None:
         raise ValueError(f"Gradient for inputs is None after backward pass for layer {layer_idx}")
 
+    check_for_nans(inputs.grad, f"Gradient for inputs in layer {layer_idx}")
+
     # Get the gradients for the layer parameters
     grads = [param.grad for param in layer.parameters() if param.grad is not None]
     logging.debug(f"Gradients for layer {layer_idx}: {grads}")
+
+    for i, grad in enumerate(grads):
+        check_for_nans(grad, f"Gradient {i} for layer {layer_idx}")
 
     save_to_disk((inputs.grad, grads), error_output_file)
 
@@ -138,7 +143,7 @@ def final_logits_backward_task(error_file, inputs_file, state_dict_file, error_o
 
     # Compute the gradients with respect to the transformer layer outputs
     # Sum over the vocabulary dimension to get the error tensor for the transformer layers
-    #logits_grad = torch.einsum('bij,jk->bik', logits_grad, output_layer.weight)
+    logits_grad = torch.einsum('bij,jk->bik', logits_grad, output_layer.weight)
 
     # Get the gradients for the output layer parameters
     grads = [param.grad for param in output_layer.parameters() if param.grad is not None]
@@ -244,6 +249,8 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
             v_hat = v[i] / (1 - beta2 ** t)
 
             param.data -= learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
+
+            check_for_nans(param.data, f"Updated param data in layer {layer_idx}")
 
             torch.nn.utils.clip_grad_norm_(param, max_grad_norm)
 
