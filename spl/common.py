@@ -1,25 +1,24 @@
 import torch
 import os
 from tokenizer import Tokenizer
+from model import ModelArgs
 
-class ModelArgs:
-    def __init__(self, vocab_size, dim, n_layers, n_heads, ffn_dim_multiplier):
-        self.vocab_size = vocab_size
-        self.dim = dim
-        self.n_layers = n_layers
-        self.n_heads = n_heads
-        self.ffn_dim_multiplier = ffn_dim_multiplier
+# Define the new tokenizer and model arguments
+tokenizer = Tokenizer('cl100k_base')
 
-tokenizer = Tokenizer(encoding_name='cl100k_base')
-
-# Define global model_args
 model_args = ModelArgs(
-    vocab_size=tokenizer.get_vocab_size(),  # Example value, update as needed
+    vocab_size=tokenizer.get_vocab_size(),
     dim=512,
-    n_layers=6,
+    n_layers=4,
     n_heads=8,
-    ffn_dim_multiplier=1
+    multiple_of=256,
+    norm_eps=1e-5,
+    rope_theta=500000,
+    max_batch_size=32,
+    max_seq_len=2048
 )
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def save_to_disk(data, filename):
     torch.save(data, filename)
@@ -27,7 +26,7 @@ def save_to_disk(data, filename):
 
 def load_from_disk(filename):
     if os.path.exists(filename):
-        data = torch.load(filename)
+        data = torch.load(filename, map_location=device)
         print(f"Loaded from {filename}")
         return data
     else:
