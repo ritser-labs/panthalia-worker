@@ -36,7 +36,14 @@ def embed_task(batch_file, embedding_file, inputs_file):
 
 def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits_file):
     inputs = load_from_disk(inputs_file)
+    if torch.isnan(inputs).any() or torch.isinf(inputs).any():
+        raise ValueError(f"NaNs or Infs detected in inputs for layer {layer_idx}")
+
     state_dict = load_layer_state_dict(state_dict_file)
+    for param in state_dict.values():
+        if torch.isnan(param).any() or torch.isinf(param).any():
+            raise ValueError(f"NaNs or Infs detected in weights of layer {layer_idx}")
+
     freqs_cis = load_from_disk(freqs_cis_file)
 
     layer = TransformerBlock(layer_idx, model_args)
@@ -49,7 +56,6 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits
     outputs = layer(inputs, start_pos, freqs_cis, None)
     check_for_nans(outputs, f"layer {layer_idx} outputs")
     save_to_disk(outputs, logits_file)
-
 
 def backward_task(layer_idx, error_file, inputs_file, state_dict_file, error_output_file):
     error = load_from_disk(error_file)
@@ -146,6 +152,8 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
 
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
+    max_grad_norm = 1.0  # Adjust as necessary
+
     if layer_idx == -1:
         state_dict_file = "data/output.pt"
         m_file = "data/adam_m_output.pt"
@@ -189,9 +197,13 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
             param.data -= learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
 
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(param, max_grad_norm)
+
     save_layer_state_dict(state_dict, state_dict_file)
     save_to_disk(m, m_file)
     save_to_disk(v, v_file)
+
 
 
 if __name__ == "__main__":
