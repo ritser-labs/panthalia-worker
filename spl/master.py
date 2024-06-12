@@ -5,7 +5,9 @@ import requests
 import os
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
-from common import model_args
+from web3.exceptions import ContractCustomError
+from eth_utils import function_signature_to_4byte_selector
+import struct
 
 logging.basicConfig(level=logging.INFO)
 
@@ -16,18 +18,82 @@ class Master:
         self.account = self.web3.eth.account.from_key(private_key)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
+        self.load_contracts()
+
+    def load_contracts(self):
+        self.contracts = {}
+        abi_dir = 'abis'
+        self.abis = {}
+
+        for root, _, files in os.walk(abi_dir):
+            for file in files:
+                if file.endswith('.json'):
+                    with open(os.path.join(root, file), 'r') as abi_file:
+                        contract_name = os.path.splitext(file)[0]
+                        self.abis[contract_name] = json.load(abi_file).get('abi', [])
         
-        # Load the ABI
-        with open('./abis/SubnetManager.json', 'r') as abi_file:
-            contract_abi = json.load(abi_file)
-        
-        self.contracts = {task: self.web3.eth.contract(address=address, abi=contract_abi) for task, address in subnet_addresses.items()}
+        for task, address in self.subnet_addresses.items():
+            contract_name = 'SubnetManager'  # Assuming all tasks use SubnetManager ABI for simplicity
+            if contract_name in self.abis:
+                self.contracts[task] = self.web3.eth.contract(address=address, abi=self.abis[contract_name])
+                logging.info(f"Loaded contract for {task} with address {address}")
+            else:
+                logging.error(f"ABI for {contract_name} not found")
 
     def submit_task(self, task_type, params):
-        tx = self.contracts[task_type].functions.submitTaskRequest(json.dumps(params).encode('utf-8')).transact({'from': self.account.address})
-        receipt = self.web3.eth.wait_for_transaction_receipt(tx)
-        task_id = self.contracts[task_type].events.TaskSubmitted().processReceipt(receipt)[0]['args']['taskId']
-        return task_id
+        try:
+            if task_type not in self.contracts:
+                raise ValueError(f"No contract loaded for task type {task_type}")
+
+            logging.info(f"Submitting task of type {task_type} with params: {params}")
+            encoded_params = json.dumps(params).encode('utf-8')
+            logging.info(f"Encoded params: {encoded_params}")
+
+            # Validate the presence of submitTaskRequest in ABI
+            if not hasattr(self.contracts[task_type].functions, 'submitTaskRequest'):
+                raise ValueError(f"'submitTaskRequest' method not found in contract for task type {task_type}")
+
+            tx = self.contracts[task_type].functions.submitTaskRequest(encoded_params).transact({
+                'from': self.account.address,
+                'gas': 3000000  # Increase the gas limit
+            })
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx)
+            task_id = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)[0]['args']['taskId']
+            logging.info(f"Task submitted successfully. Task ID: {task_id}")
+            return task_id
+        except ContractCustomError as e:
+            logging.error(f"Custom error encountered: {e.data}")
+            logging.error(f"Raw error data: {e.data}")
+            try:
+                error_bytes = bytes.fromhex(e.data[2:])
+                logging.error(f"Error bytes: {error_bytes}")
+                logging.error(f"Error bytes as integers: {list(error_bytes)}")
+                decoded_message = self.decode_custom_error(error_bytes)
+                logging.error(f"Decoded error message: {decoded_message}")
+            except Exception as decode_err:
+                logging.error(f"Failed to decode error data: {e.data}. Error: {decode_err}")
+            raise
+        except Exception as e:
+            logging.error(f"Error submitting task: {e}")
+            raise
+
+    def decode_custom_error(self, error_bytes):
+        try:
+            # Attempt to decode using common error patterns
+            function_selector = error_bytes[:4]
+            error_data = error_bytes[4:]
+
+            # Example of decoding a bytes32 and uint256 from the error data
+            if len(error_data) == 64:
+                decoded_data = struct.unpack('32s32s', error_data)
+                decoded_message = f"Selector: {function_selector.hex()}, Decoded Data: {decoded_data}"
+            else:
+                decoded_message = f"Selector: {function_selector.hex()}, Raw Data: {error_data.hex()}"
+            
+            return decoded_message
+        except Exception as e:
+            logging.error(f"Error decoding message chunk: {e}")
+            raise
 
     def get_task_result(self, task_type, task_id):
         task = self.contracts[task_type].functions.getTask(task_id).call()
@@ -127,14 +193,12 @@ class Master:
             result = self.get_task_result(task_type, task_id)
             if result:
                 return result
-            time.sleep(5)
+            time.sleep(1)
 
     def update_sot(self, task_type, result):
-        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': task_type, 'result': result})
+        response = requests.post(f"{self.sot_url}/update", json={'task_type': task_type, 'result': result})
         if response.status_code != 200:
             logging.error(f"Failed to update SOT for {task_type}: {response.text}")
-        else:
-            logging.info(f"Updated SOT for {task_type}")
 
     def update_adam_state(self, task_type, adam_m_url, adam_v_url):
         response = requests.post(f"{self.sot_url}/update_adam", json={'task_type': task_type, 'adam_m': adam_m_url, 'adam_v': adam_v_url})
@@ -155,10 +219,8 @@ if __name__ == "__main__":
     rpc_url = "http://localhost:8545"
     private_key = os.environ['PRIVATE_KEY']
     sot_url = os.environ['SOT_URL']
-    subnet_addresses_json = os.environ['SUBNET_ADDRESSES_JSON']
-
-    with open(subnet_addresses_json, 'r') as f:
-        subnet_addresses = json.load(f)
+    with open(os.environ['SUBNET_ADDRESSES_JSON'], 'r') as file:
+        subnet_addresses = json.load(file)
 
     master = Master(rpc_url, private_key, sot_url, subnet_addresses)
     master.main()
