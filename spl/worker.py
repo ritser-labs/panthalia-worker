@@ -16,7 +16,6 @@ from ipfs import upload_to_ipfs  # Assuming a function to upload files to IPFS o
 from typing import Optional
 from io import BytesIO
 import time
-
 import os
 
 logging.basicConfig(level=logging.DEBUG)
@@ -61,14 +60,18 @@ web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 worker_account = web3.eth.account.from_key(args.private_key)
 worker_address = worker_account.address
 
+# Load contract ABIs from the abis folder
+def load_abi(contract_name):
+    with open(f"abis/{contract_name}.json", 'r') as file:
+        return json.load(file)['abi']
+
+subnet_manager_abi = load_abi('SubnetManager')
+pool_abi = load_abi('Pool')
+
 # Smart contract details
 contract_address = args.subnet_address
-contract_abi = json.loads('YourContractABI')  # Replace with your contract's ABI
-pool_address = args.pool_address
-pool_abi = json.loads('YourPoolABI')  # Replace with your pool contract's ABI
-
-contract = web3.eth.contract(address=contract_address, abi=contract_abi)
-pool_contract = web3.eth.contract(address=pool_address, abi=pool_abi)
+contract = web3.eth.contract(address=contract_address, abi=subnet_manager_abi)
+pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
 
 # Initialize model and embedding layer in memory
 model_initialized = False
