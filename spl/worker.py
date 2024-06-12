@@ -118,7 +118,7 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     loss.backward()
     save_to_disk(logits.grad, logits_grad_file)
 
-def apply_adam(layer_idx, grads, learning_rate, beta1, beta2, epsilon, t):
+def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     if layer_idx == -1:
         state_dict_file = "data/layer_fc.pt"
         m_file = "data/adam_m_fc.pt"
@@ -145,13 +145,18 @@ def apply_adam(layer_idx, grads, learning_rate, beta1, beta2, epsilon, t):
         v = [torch.zeros_like(param) for param in state_dict.values()]
 
     for i, param in enumerate(state_dict.values()):
-        m[i] = beta1 * m[i] + (1 - beta1) * grads[i]
-        v[i] = beta2 * v[i] + (1 - beta2) * (grads[i] ** 2)
+        if param.requires_grad:
+            # AdamW weight decay
+            param.data -= learning_rate * weight_decay * param.data
 
-        m_hat = m[i] / (1 - beta1 ** t)
-        v_hat = v[i] / (1 - beta2 ** t)
+            # AdamW updates
+            m[i] = beta1 * m[i] + (1 - beta1) * grads[i]
+            v[i] = beta2 * v[i] + (1 - beta2) * (grads[i] ** 2)
 
-        param.data -= learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
+            m_hat = m[i] / (1 - beta1 ** t)
+            v_hat = v[i] / (1 - beta2 ** t)
+
+            param.data -= learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
 
     save_layer_state_dict(state_dict, state_dict_file)
     save_to_disk(m, m_file)
@@ -159,7 +164,7 @@ def apply_adam(layer_idx, grads, learning_rate, beta1, beta2, epsilon, t):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", type=str, required=True, choices=["embed", "forward", "backward", "final_logits", "final_logits_backward", "embed_backward", "loss", "apply_adam"])
+    parser.add_argument("--task", type=str, required=True, choices=["embed", "forward", "backward", "final_logits", "final_logits_backward", "embed_backward", "loss", "apply_adamw"])
     parser.add_argument("--layer_idx", type=int, required=False)
     parser.add_argument("--inputs", type=str, required=False)
     parser.add_argument("--error", type=str, required=False)
@@ -177,6 +182,7 @@ if __name__ == "__main__":
     parser.add_argument("--beta1", type=float, required=False)
     parser.add_argument("--beta2", type=float, required=False)
     parser.add_argument("--epsilon", type=float, required=False)
+    parser.add_argument("--weight_decay", type=float, required=False)
     parser.add_argument("--t", type=int, required=False)
     args = parser.parse_args()
 
@@ -194,6 +200,6 @@ if __name__ == "__main__":
         embed_backward_task(args.error, args.batch, args.embedding_file, args.error_output_file)
     elif args.task == "loss":
         loss_task(args.logits, args.targets, args.loss_file, args.logits_grad_file)
-    elif args.task == "apply_adam":
+    elif args.task == "apply_adamw":
         grads = load_from_disk(args.grads)
-        apply_adam(args.layer_idx, grads, args.learning_rate, args.beta1, args.beta2, args.epsilon, args.t)
+        apply_adamw(args.layer_idx, grads, args.learning_rate, args.beta1, args.beta2, args.epsilon, args.weight_decay, args.t)
