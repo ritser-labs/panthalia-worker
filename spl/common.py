@@ -18,13 +18,15 @@ model_args = ModelArgs(
     max_seq_len=2048
 )
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def save_to_disk(data, filename):
     torch.save(data, filename)
     print(f"Saved to {filename}")
 
 def load_from_disk(filename):
     if os.path.exists(filename):
-        data = torch.load(filename)
+        data = torch.load(filename, map_location=device)
         print(f"Loaded from {filename}")
         return data
     else:

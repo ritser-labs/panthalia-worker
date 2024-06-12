@@ -2,7 +2,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from common import save_to_disk, load_from_disk, load_layer_state_dict, save_layer_state_dict, model_args, tokenizer
+from common import save_to_disk, load_from_disk, load_layer_state_dict, save_layer_state_dict, model_args, tokenizer, device
 from tokenizer import Tokenizer
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, RMSNorm, precompute_freqs_cis
 import logging
@@ -28,7 +28,7 @@ def embed_task(batch_file, embedding_file, inputs_file):
 
     logging.info(f"Batch for embedding (token IDs): {batch}")
 
-    embedding = VocabParallelEmbedding(vocab_size, model_args.dim)
+    embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
     embedding.load_state_dict(load_layer_state_dict(embedding_file))
 
     inputs = embedding(batch)
@@ -36,10 +36,10 @@ def embed_task(batch_file, embedding_file, inputs_file):
     logging.info(f"Embedded inputs: {inputs}")
 
     # Save embeddings along with the computation graph
-    save_to_disk((inputs, batch, embedding), inputs_file)
+    save_to_disk(inputs, inputs_file)
 
 def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, outputs_file, mask_file):
-    inputs, batch, embedding = load_from_disk(inputs_file)
+    inputs = load_from_disk(inputs_file)
     if torch.isnan(inputs).any() or torch.isinf(inputs).any():
         raise ValueError(f"NaNs or Infs detected in inputs for layer {layer_idx}")
 
@@ -68,6 +68,9 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, output
 def backward_task(layer_idx, error_file, state_dict_file, error_output_file, outputs_file):
     error, _ = load_from_disk(error_file)
     
+    if error is None:
+        raise ValueError(f"Error tensor loaded from {error_file} is None")
+
     # Load outputs, inputs, and layer from the forward pass
     outputs, inputs, layer = load_from_disk(outputs_file)
 
@@ -78,7 +81,13 @@ def backward_task(layer_idx, error_file, state_dict_file, error_output_file, out
     if error.shape != outputs.shape:
         raise ValueError(f"Error tensor shape {error.shape} does not match outputs shape {outputs.shape}")
 
+    inputs.requires_grad = True  # Ensure inputs require gradients
+
+    outputs.retain_grad()  # Ensure that gradients for outputs are retained
     outputs.backward(error, retain_graph=True)  # Backward pass on outputs
+
+    if inputs.grad is None:
+        raise ValueError(f"Gradient for inputs is None after backward pass for layer {layer_idx}")
 
     # Get the gradients for the layer parameters
     grads = [param.grad for param in layer.parameters() if param.grad is not None]
@@ -89,7 +98,7 @@ def backward_task(layer_idx, error_file, state_dict_file, error_output_file, out
 
 
 def final_logits_task(inputs_file, state_dict_file, logits_file):
-    inputs, _, norm = load_from_disk(inputs_file)
+    inputs = load_from_disk(inputs_file)
     state_dict = load_layer_state_dict(state_dict_file)
 
     if state_dict is None:
@@ -120,10 +129,6 @@ def final_logits_backward_task(error_file, logits_file, error_output_file):
 
     logits_grad = logits.grad  # Get the gradients with respect to logits
     logging.debug(f"Gradients for logits: {logits_grad.shape}")
-
-    # Reshape logits_grad to match the expected shape for transformer layers
-    batch_size, seq_len, vocab_size = logits_grad.shape
-    model_dim = model_args.dim
 
     # Compute the gradients with respect to the transformer layer outputs
     # Sum over the vocabulary dimension to get the error tensor for the transformer layers
@@ -249,6 +254,7 @@ if __name__ == "__main__":
     parser.add_argument("--inputs", type=str, required=False)
     parser.add_argument("--error", type=str, required=False)
     parser.add_argument("--batch", type=str, required=False)
+    parser.add_argument("--outputs", type=str, required=False)
     parser.add_argument("--state_dict", type=str, required=False)
     parser.add_argument("--logits", type=str, required=False)
     parser.add_argument("--targets", type=str, required=False)
@@ -272,9 +278,9 @@ if __name__ == "__main__":
     initialize_model_parallel(model_parallel_size_=1)
 
     if args.task == "embed":
-        embed_task(args.batch, args.embedding_file, args.inputs)
+        embed_task(args.batch, args.embedding_file, args.outputs)
     elif args.task == "forward":
-        forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.logits_file, args.mask)
+        forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.outputs, args.mask)
     elif args.task == "backward":
         backward_task(args.layer_idx, args.error, args.state_dict, args.error_output_file, args.inputs)
     elif args.task == "final_logits":
