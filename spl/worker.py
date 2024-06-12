@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from common import save_to_disk, load_from_disk, load_layer_state_dict, save_layer_state_dict, model_args, tokenizer
 from tokenizer import Tokenizer
-from model import Transformer
+from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, RMSNorm, precompute_freqs_cis
 import logging
 import os
 import torch.distributed as dist
@@ -18,94 +18,102 @@ def initialize_distributed_environment():
 
 def embed_task(batch_file, embedding_file, inputs_file):
     batch = load_from_disk(batch_file)
+    vocab_size = tokenizer.get_vocab_size()
     
-    embedding = nn.Embedding(tokenizer.get_vocab_size(), model_args.dim)
+    embedding = VocabParallelEmbedding(vocab_size, model_args.dim)
     embedding.load_state_dict(load_layer_state_dict(embedding_file))
     
     inputs = embedding(batch)
     save_to_disk(inputs, inputs_file)
 
-def forward_task(layer_idx, inputs_file, state_dict_file, logits_file):
-    initialize_distributed_environment()
-    initialize_model_parallel(model_parallel_size_=1)
-
+def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits_file):
     inputs = load_from_disk(inputs_file)
     state_dict = load_layer_state_dict(state_dict_file)
+    freqs_cis = load_from_disk(freqs_cis_file)
     
-    transformer = Transformer(model_args)
-    transformer.layers[layer_idx].load_state_dict(state_dict)
+    layer = TransformerBlock(layer_idx, model_args)
+    layer.load_state_dict(state_dict)
     
-    outputs = transformer.layers[layer_idx](inputs)
+    start_pos = 0  # Adjust as necessary
+    seqlen = inputs.shape[1]
+    freqs_cis = freqs_cis[start_pos: start_pos + seqlen]
+    
+    outputs = layer(inputs, start_pos, freqs_cis, None)
     save_to_disk(outputs, logits_file)
 
 def backward_task(layer_idx, error_file, inputs_file, state_dict_file, error_output_file):
-    initialize_distributed_environment()
-    initialize_model_parallel(model_parallel_size_=1)
-
     error = load_from_disk(error_file)
     state_dict = load_layer_state_dict(state_dict_file)
     
-    transformer = Transformer(model_args)
-    transformer.layers[layer_idx].load_state_dict(state_dict)
+    layer = TransformerBlock(layer_idx, model_args)
+    layer.load_state_dict(state_dict)
     
+    # Forward pass
     inputs = load_from_disk(inputs_file)
     inputs.requires_grad = True
-    outputs = transformer.layers[layer_idx](inputs)
+    start_pos = 0  # Adjust as necessary
+    freqs_cis = precompute_freqs_cis(model_args.dim // model_args.n_heads, model_args.max_seq_len * 2, model_args.rope_theta)
+    freqs_cis = freqs_cis[start_pos: start_pos + inputs.shape[1]]
+    outputs = layer(inputs, start_pos, freqs_cis, None)
     
+    # Reshape error to match the output shape
     error = error.view(outputs.shape)
     
+    # Backward pass
     outputs.backward(error)
     
-    grads = [param.grad for param in transformer.layers[layer_idx].parameters()]
+    grads = [param.grad for param in layer.parameters()]
     save_to_disk((inputs.grad, grads), error_output_file)
 
 def final_logits_task(inputs_file, state_dict_file, logits_file):
-    initialize_distributed_environment()
-    initialize_model_parallel(model_parallel_size_=1)
-
     inputs = load_from_disk(inputs_file)
     state_dict = load_layer_state_dict(state_dict_file)
     
-    transformer = Transformer(model_args)
-    transformer.output.load_state_dict(state_dict)
+    if state_dict is None:
+        raise ValueError("Failed to load state dict for the output layer")
+
+    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False)
+    output_layer.load_state_dict(state_dict)
     
-    logits = transformer.output(inputs)
+    logits = output_layer(inputs)
     save_to_disk(logits, logits_file)
 
 def final_logits_backward_task(error_file, inputs_file, state_dict_file, error_output_file):
-    initialize_distributed_environment()
-    initialize_model_parallel(model_parallel_size_=1)
-
     error = load_from_disk(error_file)
     state_dict = load_layer_state_dict(state_dict_file)
     
-    transformer = Transformer(model_args)
-    transformer.output.load_state_dict(state_dict)
+    if state_dict is None:
+        raise ValueError("Failed to load state dict for the output layer")
+
+    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False)
+    output_layer.load_state_dict(state_dict)
     
+    # Forward pass
     inputs = load_from_disk(inputs_file)
     inputs.requires_grad = True
-    logits = transformer.output(inputs)
+    logits = output_layer(inputs)
     
+    # Backward pass
     logits.backward(error)
     
-    grads = [param.grad for param in transformer.output.parameters()]
+    grads = [param.grad for param in output_layer.parameters()]
     save_to_disk((inputs.grad, grads), error_output_file)
 
 def embed_backward_task(error_file, batch_file, embedding_file, error_output_file):
-    initialize_distributed_environment()
-    initialize_model_parallel(model_parallel_size_=1)
-
     error = load_from_disk(error_file)
+    vocab_size = tokenizer.get_vocab_size()
     
-    embedding = nn.Embedding(tokenizer.get_vocab_size(), model_args.dim)
+    embedding = VocabParallelEmbedding(vocab_size, model_args.dim)
     embedding.load_state_dict(load_layer_state_dict(embedding_file))
     
     batch = load_from_disk(batch_file)
     embeddings = embedding(batch)
     embeddings.retain_grad()  # Ensure gradients are retained
     
-    error = error.view(embeddings.shape)
+    # Reshape error to match the embeddings
+    error = error.view(embeddings.shape)  # Ensure the gradient tensor matches the output tensor shape
     
+    # Backward pass
     embeddings.backward(error)
     
     grads = [param.grad for param in embedding.parameters()]
@@ -125,9 +133,6 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     save_to_disk(logits.grad, logits_grad_file)
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
-    initialize_distributed_environment()
-    initialize_model_parallel(model_parallel_size_=1)
-
     if layer_idx == -1:
         state_dict_file = "data/output.pt"
         m_file = "data/adam_m_output.pt"
@@ -155,11 +160,14 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
     for i, param in enumerate(state_dict.values()):
         if param.requires_grad:
+            # Zero gradients
             if param.grad is not None:
                 param.grad = torch.zeros_like(param.data)
 
+            # AdamW weight decay
             param.data -= learning_rate * weight_decay * param.data
 
+            # AdamW updates
             m[i] = beta1 * m[i] + (1 - beta1) * grads[i]
             v[i] = beta2 * v[i] + (1 - beta2) * (grads[i] ** 2)
 
@@ -171,6 +179,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     save_layer_state_dict(state_dict, state_dict_file)
     save_to_disk(m, m_file)
     save_to_disk(v, v_file)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -194,12 +203,15 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon", type=float, required=False)
     parser.add_argument("--weight_decay", type=float, required=False)
     parser.add_argument("--t", type=int, required=False)
+    parser.add_argument("--freqs_cis", type=str, required=False)
     args = parser.parse_args()
+    initialize_distributed_environment()
+    initialize_model_parallel(model_parallel_size_=1)
 
     if args.task == "embed":
         embed_task(args.batch, args.embedding_file, args.inputs)
     elif args.task == "forward":
-        forward_task(args.layer_idx, args.inputs, args.state_dict, args.logits_file)
+        forward_task(args.layer_idx, args.inputs, args.state_dict, args.freqs_cis, args.logits_file)
     elif args.task == "backward":
         backward_task(args.layer_idx, args.error, args.inputs, args.state_dict, args.error_output_file)
     elif args.task == "final_logits":
@@ -213,3 +225,5 @@ if __name__ == "__main__":
     elif args.task == "apply_adamw":
         grads = load_from_disk(args.grads)
         apply_adamw(args.layer_idx, grads, args.learning_rate, args.beta1, args.beta2, args.epsilon, args.weight_decay, args.t)
+
+    dist.destroy_process_group()
