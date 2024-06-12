@@ -1,6 +1,7 @@
-def upload_file(data):
+import torch
+
+def upload_file(data, url):
     # Placeholder: implement secure upload to your decentralized store
-    url = "path/to/secure/storage"
     torch.save(data, url)
     return url
 
