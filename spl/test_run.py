@@ -15,6 +15,7 @@ def parse_args():
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='local_storage', help="Directory for local storage of files")
     parser.add_argument('--forge_script', type=str, default='script/Deploy.s.sol', help="Path to the Forge deploy script")
+    parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     return parser.parse_args()
 
 args = parse_args()
@@ -54,13 +55,10 @@ worker_processes = []
 print("Starting worker processes...")
 
 # Start worker.py for each subnet
-base_port = 12356  # Starting port for distributed environment
-
-for idx, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
+for task_type, subnet_address in subnet_addresses.items():
     base_task_type = task_type.split('_')[0]  # Use only the base task type
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
-    os.environ['MASTER_PORT'] = str(base_port + idx)  # Assign unique port
     command = [
         'python', 'worker.py',
         '--task_type', base_task_type,
@@ -71,7 +69,7 @@ for idx, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
         '--pool_address', pool_address,
         '--group', str(args.group),
         '--local_storage_dir', args.local_storage_dir,
-        '--layer_idx', str(idx)  # Pass the layer index
+        '--backend', args.backend
     ]
     worker_processes.append(subprocess.Popen(command))
 
