@@ -19,7 +19,7 @@ def parse_args():
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     return parser.parse_args()
 
-def wait_for_sot(sot_url, timeout=600):
+def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
     """Wait for the SOT service to be available."""
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -28,8 +28,8 @@ def wait_for_sot(sot_url, timeout=600):
             if response.status_code == 200:
                 print("SOT service is available.")
                 return True
-        except requests.ConnectionError:
-            print("Waiting for SOT service to be available...")
+        except requests.ConnectionError as e:
+            print(f"Waiting for SOT service to be available... {e}")
         time.sleep(2)
     return False
 
@@ -71,6 +71,7 @@ print("Starting SOT service...")
 
 # Start the SOT service
 sot_process = subprocess.Popen(['python', 'sot.py'])
+print(f"SOT service started with PID {sot_process.pid}")
 
 # Wait for the SOT service to be available
 if not wait_for_sot(args.sot_url):
@@ -106,6 +107,7 @@ for task_type, subnet_address in subnet_addresses.items():
         '--backend', args.backend
     ]
     worker_processes.append(subprocess.Popen(command))
+    print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
 
 # Print workers started stage
 print("Worker processes started.")
@@ -125,6 +127,7 @@ master_command = [
     '--subnet_addresses', args.subnet_addresses
 ]
 master_process = subprocess.Popen(master_command)
+print(f"Started master process with command: {' '.join(master_command)}")
 
 # Print master started stage
 print("Master process started.")

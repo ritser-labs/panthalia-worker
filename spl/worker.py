@@ -10,7 +10,7 @@ from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
-from common import model_args, tokenizer, device
+from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional
 from io import BytesIO
@@ -65,10 +65,6 @@ worker_account = web3.eth.account.from_key(args.private_key)
 worker_address = worker_account.address
 
 # Load contract ABIs from the abis folder
-def load_abi(contract_name):
-    with open(f"abis/{contract_name}.sol/{contract_name}.json", 'r') as file:
-        return json.load(file)['abi']
-
 subnet_manager_abi = load_abi('SubnetManager')
 pool_abi = load_abi('Pool')
 
@@ -96,7 +92,7 @@ def initialize_model_and_embedding():
     global model_initialized, embedding_initialized, freqs_cis, mask
 
     if not model_initialized:
-        initialize_distributed_environment()
+        initialize_distributed_environment(args.backend)
         initialize_model_parallel(model_parallel_size_=1)
         model_initialized = True
     
@@ -120,12 +116,6 @@ def initialize_model_and_embedding():
 def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
         logging.error(f"NaNs detected in {name}")
-
-def initialize_distributed_environment():
-    os.environ['MASTER_ADDR'] = os.getenv('MASTER_ADDR', 'localhost')
-    os.environ['MASTER_PORT'] = os.getenv('MASTER_PORT', str(12356 + os.getpid() % 10000))
-    if not dist.is_initialized():
-        dist.init_process_group(backend=args.backend)
 
 def download_file(url):
     response = requests.get(url)

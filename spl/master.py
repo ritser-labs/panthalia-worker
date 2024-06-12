@@ -6,6 +6,7 @@ import os
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
+from common import load_contracts
 
 logging.basicConfig(level=logging.INFO)
 
@@ -16,40 +17,7 @@ class Master:
         self.account = self.web3.eth.account.from_key(private_key)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
-        self.abis = {}
-        self.contracts = {}
-        self.error_selectors = {}
-        self.load_contracts()
-
-    def load_contracts(self):
-        abi_dir = 'abis'
-
-        for root, _, files in os.walk(abi_dir):
-            for file in files:
-                if file.endswith('.json'):
-                    with open(os.path.join(root, file), 'r') as abi_file:
-                        abi = json.load(abi_file).get('abi', [])
-                        contract_name = os.path.splitext(file)[0]
-                        self.abis[contract_name] = abi
-                        logging.info(f"Loaded ABI for {contract_name}")
-                        self.extract_error_selectors(abi)
-
-        for task, address in self.subnet_addresses.items():
-            if 'SubnetManager' in self.abis:
-                self.contracts[task] = self.web3.eth.contract(address=address, abi=self.abis['SubnetManager'])
-                logging.info(f"Loaded contract for {task} with address {address}")
-            else:
-                logging.error(f"ABI for SubnetManager not found")
-
-    def extract_error_selectors(self, abi):
-        for item in abi:
-            if item.get('type') == 'error':
-                name = item['name']
-                inputs = item['inputs']
-                selector = self.web3.keccak(text=f"{name}({','.join([input['type'] for input in inputs])})")[:4].hex()
-                selector = selector.lower()  # Ensure consistent case for matching
-                self.error_selectors[selector] = item
-                logging.info(f"Extracted error selector {selector} for {name}")
+        self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, subnet_addresses)
 
     def approve_token(self, token_address, spender_address, amount):
         token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
@@ -299,3 +267,4 @@ if __name__ == "__main__":
 
     master = Master(rpc_url, private_key, sot_url, subnet_addresses)
     master.main()
+

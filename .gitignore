@@ -5,6 +5,7 @@ __pycache__/
 
 pipeline/storage
 spl/data/*.pt
+spl/data/state/*
 spl/data/batch.json
 spl/out.txt
 spl/abis/*
