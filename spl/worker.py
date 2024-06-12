@@ -10,7 +10,8 @@ from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
-from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file
+from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, decode_custom_error, load_error_selectors
+from web3.exceptions import ContractCustomError
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional
 from io import BytesIO
@@ -59,6 +60,9 @@ web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 # Set the worker's Ethereum account
 worker_account = web3.eth.account.from_key(args.private_key)
 worker_address = worker_account.address
+
+# Load error selectors
+error_selectors = load_error_selectors(web3)
 
 # Load contract ABIs from the abis folder
 subnet_manager_abi = load_abi('SubnetManager')
@@ -212,12 +216,15 @@ def get_tensors_for_task(task_type, layer_idx=None):
 def deposit_stake():
     global stake_deposited
     if not stake_deposited:
-        tx = pool_contract.functions.depositStake(
-            subnet_id,
-            args.group
-        ).transact({'from': worker_address})
-        web3.eth.wait_for_transaction_receipt(tx)
-        stake_deposited = True
+        try:
+            tx = pool_contract.functions.depositStake(
+                subnet_id,
+                args.group
+            ).transact({'from': worker_address})
+            web3.eth.wait_for_transaction_receipt(tx)
+            stake_deposited = True
+        except ContractCustomError as e:
+            handle_contract_custom_error(web3, error_selectors, e)
 
 def handle_event(event):
     task_id = event['args']['taskId']
@@ -227,7 +234,11 @@ def handle_event(event):
     if solver.lower() != worker_address.lower():
         return
 
-    task = contract.functions.getTask(task_id).call()
+    try:
+        task = contract.functions.getTask(task_id).call()
+    except ContractCustomError as e:
+        handle_contract_custom_error(web3, error_selectors, e)
+
     task_params_bytes = task[6]  # Assuming task.params is the 7th item in the Task struct
     task_params = json.loads(task_params_bytes.decode('utf-8'))
 
@@ -288,7 +299,10 @@ def submit_solution(task_id, result_url, last_block):
         'result_url': result_url,
         'last_block': last_block
     }
-    contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')).transact({'from': worker_address})
+    try:
+        contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')).transact({'from': worker_address})
+    except ContractCustomError as e:
+        handle_contract_custom_error(web3, error_selectors, e)
 
 def upload_tensors_and_grads(error_output, grads, layer_idx):
     error_output_url = upload_tensor(error_output)
@@ -526,16 +540,19 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 def check_and_finalize_verifications():
     current_time = int(time.time())
     for task_id in list(processed_tasks):
-        task = contract.functions.getTask(task_id).call()
-        task_status = task[0]  # Assuming task.status is the first item in the Task struct
-        time_status_changed = task[3]  # Assuming task.timeStatusChanged is the fourth item in the Task struct
-        max_dispute_time = contract.functions.maxDisputeTime().call()
+        try:
+            task = contract.functions.getTask(task_id).call()
+            task_status = task[0]  # Assuming task.status is the first item in the Task struct
+            time_status_changed = task[3]  # Assuming task.timeStatusChanged is the fourth item in the Task struct
+            max_dispute_time = contract.functions.maxDisputeTime().call()
 
-        if task_status == 2 and (current_time - time_status_changed) >= max_dispute_time:  # Status 2 means SolutionSubmitted
-            if contract.functions.canVerificationBeFinalized(task_id).call():
-                tx = contract.functions.finalizeVerification(task_id).transact({'from': worker_address})
-                web3.eth.wait_for_transaction_receipt(tx)
-                processed_tasks.remove(task_id)
+            if task_status == 2 and (current_time - time_status_changed) >= max_dispute_time:  # Status 2 means SolutionSubmitted
+                if contract.functions.canVerificationBeFinalized(task_id).call():
+                    tx = contract.functions.finalizeVerification(task_id).transact({'from': worker_address})
+                    web3.eth.wait_for_transaction_receipt(tx)
+                    processed_tasks.remove(task_id)
+        except ContractCustomError as e:
+            handle_contract_custom_error(web3, error_selectors, e)
 
 def main():
     initialize_model_and_embedding()

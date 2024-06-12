@@ -6,7 +6,7 @@ import os
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts
+from common import load_contracts, handle_contract_custom_error
 
 logging.basicConfig(level=logging.INFO)
 
@@ -106,41 +106,9 @@ class Master:
             logging.info(f"Task submitted successfully. Task ID: {task_id}")
             return task_id
         except ContractCustomError as e:
-            logging.error(f"Custom error encountered: {e.data}")
-            logging.error(f"Raw error data: {e.data}")
-            try:
-                error_bytes = bytes.fromhex(e.data[2:])
-                logging.error(f"Error bytes: {error_bytes}")
-                logging.error(f"Error bytes as integers: {list(error_bytes)}")
-                decoded_message = self.decode_custom_error(error_bytes)
-                logging.error(f"Decoded error message: {decoded_message}")
-            except Exception as decode_err:
-                logging.error(f"Failed to decode error data: {e.data}. Error: {decode_err}")
-            raise
+            handle_contract_custom_error(self.web3, self.error_selectors, e)
         except Exception as e:
             logging.error(f"Error submitting task: {e}")
-            raise
-
-    def decode_custom_error(self, error_bytes):
-        try:
-            # Extract selector
-            selector = '0x' + error_bytes[:4].hex().lower()  # Ensure consistent case for matching and add '0x' prefix
-            data = error_bytes[4:]
-
-            logging.info(f"Selector: {selector}, Data: {data.hex()}")
-            logging.info(f"Error Selectors: {self.error_selectors.keys()}")
-
-            if selector in self.error_selectors:
-                error_info = self.error_selectors[selector]
-                error_name = error_info['name']
-                inputs = error_info['inputs']
-                decoded_params = self.web3.codec.decode([input['type'] for input in inputs], data)
-                param_str = ', '.join(f"{input['name']}: {value}" for input, value in zip(inputs, decoded_params))
-                return f"Error {error_name}: {param_str}"
-
-            return f"Unknown error with selector {selector} and data {data.hex()}"
-        except Exception as e:
-            logging.error(f"Error decoding message chunk: {e}")
             raise
 
     def get_task_result(self, task_type, task_id):
