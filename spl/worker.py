@@ -15,11 +15,10 @@ def run_layer_step(layer, x, is_forward=True, next_error=None, optimizer=None, s
             if x is None:
                 x = next_error  # Use the next_error as the input for backward pass
             print(f"Shape of x: {x.shape}")  # Debug: Check shape of x
-            # Reshape x to match the expected input shape of LayerNorm
             x = x.view(-1, layer.norm1.normalized_shape[0])
             logits = layer(x)
             print(f"Shape of logits: {logits.shape}")  # Debug: Check shape of logits
-            logits = logits.view(-1, logits.size(-1))
+            logits = logits.view(-1, logits.size(-1))  # Flatten logits for loss calculation
             print(f"Shape of reshaped logits: {logits.shape}")  # Debug: Check shape of reshaped logits
             print(f"Shape of next_error: {next_error.shape}")  # Debug: Check shape of next_error
             loss = loss_fn(logits, next_error.view(-1), ignore_index=pad_id)
@@ -28,6 +27,8 @@ def run_layer_step(layer, x, is_forward=True, next_error=None, optimizer=None, s
         scaler.update()
         grads = [param.grad for param in layer.parameters()]
         return loss.item(), grads
+
+
 
 
 def embed_task(batch_file):
@@ -106,6 +107,8 @@ def backward_task(layer_idx, error_file):
     if error is None:
         raise ValueError(f"Failed to load error from {error_file}")
     error = error.to(device)
+    if len(error.shape) == 2:
+        error = error.unsqueeze(0) 
     optimizer = torch.optim.Adam(layer.parameters(), lr=1e-4)
     scaler = torch.cuda.amp.GradScaler()
     tokenizer = Tokenizer(encoding_name='cl100k_base')
@@ -115,6 +118,7 @@ def backward_task(layer_idx, error_file):
     print(f"Saving error and grads for layer {layer_idx}")
     save_to_disk((error.cpu(), grads), f"data/error_layer_{layer_idx}.pt")
     save_layer_state_dict(layer.state_dict(), f"data/layer_{layer_idx}.pt")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
