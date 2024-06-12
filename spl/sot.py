@@ -1,9 +1,10 @@
 import os
 import json
 import logging
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 import torch
-from common import model_args
+from common import model_args, tokenizer
+from datasets import load_dataset
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -40,9 +41,9 @@ for i in range(model_args.n_layers):
             initial_state[layer] = torch.randn(model_args.max_seq_len, model_args.dim)
             torch.save(initial_state[layer], state_file_path)
 
-@app.route('/', methods=['GET'])
-def root():
-    return jsonify({'status': 'ok'}), 200
+logging.info("Loading Wikipedia dataset...")
+dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
+dataset_iter = iter(dataset)
 
 @app.route('/latest_model_params', methods=['GET'])
 def get_latest_model_params():
@@ -64,69 +65,92 @@ def publish_result():
 
     return jsonify({'status': 'success'})
 
-@app.route('/upload_gradient', methods=['POST'])
-def upload_gradient():
-    logging.info("Accessing /upload_gradient endpoint")
+@app.route('/stream_gradients', methods=['POST'])
+def stream_gradients():
+    logging.info("Accessing /stream_gradients endpoint")
+    data = request.json
+    task_id = data['task_id']
+    gradients = data['gradients']
+
+    os.makedirs(os.path.join(data_dir, 'gradients'), exist_ok=True)
+    with open(os.path.join(data_dir, f'gradients/{task_id}.json'), 'w') as file:
+        json.dump(gradients, file)
+
+    return jsonify({'status': 'success'})
+
+@app.route('/get_batch', methods=['GET'])
+def get_batch():
+    logging.info("Accessing /get_batch endpoint")
+    batch_size = 2
+    max_seq_len = 512
+
+    batch = []
+    for _ in range(batch_size):
+        try:
+            example = next(dataset_iter)
+            tokens = tokenizer(example['text'], max_length=max_seq_len, padding='max_length', truncation=True, return_tensors='pt')
+            batch.append(tokens['input_ids'][0].tolist())
+        except StopIteration:
+            break
+
+    if not batch:
+        return jsonify({"error": "No more data available"}), 404
+
+    batch_url = os.path.join(data_dir, 'batch.json')
+    with open(batch_url, 'w') as file:
+        json.dump(batch, file)
+
+    return jsonify({'batch_url': batch_url})
+
+@app.route('/get_targets', methods=['GET'])
+def get_targets():
+    logging.info("Accessing /get_targets endpoint")
+    with open(os.path.join(data_dir, 'targets.json'), 'r') as file:
+        targets = json.load(file)
+    return jsonify(targets)
+
+@app.route('/update_state', methods=['POST'])
+def update_state():
+    logging.info("Accessing /update_state endpoint")
     data = request.json
     task_type = data['task_type']
-    gradients = data['gradients']
-    block_number = data['block_number']
+    result = torch.tensor(data['result'])
 
-    gradient_file_path = os.path.join(data_dir, f'gradients/{task_type}.json')
-    os.makedirs(os.path.dirname(gradient_file_path), exist_ok=True)
+    os.makedirs(os.path.join(data_dir, 'state'), exist_ok=True)
+    torch.save(result, os.path.join(data_dir, f'state/{task_type}.pt'))
 
-    gradient_data = {
-        'block_number': block_number,
-        'gradients': gradients
-    }
+    return jsonify({'status': 'success'})
 
-    with open(gradient_file_path, 'w') as file:
-        json.dump(gradient_data, file)
+@app.route('/update_adam', methods=['POST'])
+def update_adam():
+    logging.info("Accessing /update_adam endpoint")
+    data = request.json
+    task_type = data['task_type']
+    adam_m = torch.tensor(data['adam_m'])
+    adam_v = torch.tensor(data['adam_v'])
+
+    os.makedirs(os.path.join(data_dir, 'adam_m'), exist_ok=True)
+    os.makedirs(os.path.join(data_dir, 'adam_v'), exist_ok=True)
+    torch.save(adam_m, os.path.join(data_dir, f'adam_m/{task_type}.pt'))
+    torch.save(adam_v, os.path.join(data_dir, f'adam_v/{task_type}.pt'))
 
     return jsonify({'status': 'success'})
 
 @app.route('/latest_state', methods=['GET'])
 def latest_state():
     logging.info("Accessing /latest_state endpoint")
-    task_type = request.args.get('task_type')
-    state_file_path = os.path.join(state_dir, f'{task_type}.pt')
-
-    if os.path.exists(state_file_path):
-        state = torch.load(state_file_path)
-        state_dict = {
-            'state': state.tolist()
-        }
-        return jsonify(state_dict)
-    else:
-        return jsonify({'error': 'State not found'}), 404
-
-@app.route('/stream_gradients', methods=['GET'])
-def stream_gradients():
-    logging.info("Accessing /stream_gradients endpoint")
-    gradient_files = os.listdir(os.path.join(data_dir, 'gradients'))
-
-    def generate():
-        for gradient_file in gradient_files:
-            with open(os.path.join(data_dir, f'gradients/{gradient_file}'), 'r') as file:
-                gradients = json.load(file)
-                yield f"{json.dumps(gradients)}\n"
-
-    return Response(generate(), content_type='application/json')
-
-@app.route('/stream_specific_tensors', methods=['POST'])
-def stream_specific_tensors():
-    logging.info("Accessing /stream_specific_tensors endpoint")
-    data = request.json
-    tensors = data['tensors']
-
-    def generate():
-        for tensor_name in tensors:
-            tensor_file_path = os.path.join(state_dir, f'{tensor_name}.pt')
-            if os.path.exists(tensor_file_path):
-                tensor = torch.load(tensor_file_path)
-                yield f"{json.dumps({'tensor_name': tensor_name, 'tensor': tensor.tolist()})}\n"
-
-    return Response(generate(), content_type='application/json')
+    state_files = os.listdir(os.path.join(data_dir, 'state'))
+    latest_state = {}
+    for state_file in state_files:
+        state_data = torch.load(os.path.join(data_dir, f'state/{state_file}'))
+        task_type = state_file.split('.')[0]
+        if isinstance(state_data, torch.Tensor):
+            latest_state[task_type] = state_data.tolist()  # Convert tensor to list for JSON serialization
+        elif isinstance(state_data, dict):
+            latest_state[task_type] = {k: v.tolist() if isinstance(v, torch.Tensor) else v for k, v in state_data.items()}  # Convert nested tensors to lists
+        else:
+            logging.error(f"Unsupported data type in state file: {state_file}")
+    return jsonify(latest_state)
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")

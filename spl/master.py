@@ -22,7 +22,6 @@ class Master:
         if not self.contracts:
             raise ValueError("SubnetManager contracts not found. Please check the subnet_addresses configuration.")
 
-        # Adjust logging level based on detailed_logs flag
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
@@ -52,21 +51,17 @@ class Master:
             encoded_params = json.dumps(params).encode('utf-8')
             logging.info(f"Encoded params: {encoded_params}")
 
-            # Validate the presence of submitTaskRequest in ABI
             if not hasattr(self.contracts[task_type].functions, 'submitTaskRequest'):
                 raise ValueError(f"'submitTaskRequest' method not found in contract for task type {task_type}")
 
-            # Use a placeholder task ID for fee calculation if necessary
             placeholder_task_id = 0
             fee = self.contracts[task_type].functions.calculateFee(placeholder_task_id).call()
 
-            # Perform token approval using the 'SubnetManager' contract instance
             subnet_manager_contract = self.contracts[task_type]
             token_address = subnet_manager_contract.functions.token().call()
             spender_address = self.contracts[task_type].address
             self.approve_token(token_address, spender_address, fee)
 
-            # Prepare the transaction
             nonce = self.web3.eth.get_transaction_count(self.account.address)
             gas_price = self.web3.eth.gas_price
             transaction = self.contracts[task_type].functions.submitTaskRequest(encoded_params).build_transaction({
@@ -76,7 +71,6 @@ class Master:
                 'nonce': nonce
             })
 
-            # Sign the transaction
             signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
             tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
             receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
@@ -84,7 +78,6 @@ class Master:
 
             if receipt['status'] == 0:
                 try:
-                    # Try to retrieve the revert reason
                     tx = self.web3.eth.get_transaction(receipt['transactionHash'])
                     error_message = self.web3.eth.call({
                         'to': tx['to'],
@@ -95,7 +88,6 @@ class Master:
                     logging.error(f"Error retrieving transaction details: {e}")
                 raise ValueError(f"Transaction failed: {receipt}")
 
-            # Process receipt to get task ID
             logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
             logging.info(f"Event logs: {logs}")
 
@@ -113,42 +105,35 @@ class Master:
 
     def get_task_result(self, task_type, task_id):
         task = self.contracts[task_type].functions.getTask(task_id).call()
-        if task[0] == 4:  # Assuming TaskStatus.SolutionSubmitted
-            return json.loads(task[6].decode('utf-8'))  # Assuming task.postedSolution
+        if task[0] == 4:
+            return json.loads(task[6].decode('utf-8'))
         return None
 
     def main(self):
         model_params = self.get_latest_model_params()
 
-        # Forward pass for embedding
         embed_result = self.handle_embed_forward(model_params)
         layer_inputs_url = embed_result['result_url']
         self.update_sot('embed', embed_result)
 
-        # Forward pass for each transformer layer
         for layer_idx in range(model_params['n_layers']):
             layer_inputs_url = self.handle_layer_forward(layer_idx, layer_inputs_url, model_params)
             self.update_sot(f'forward_layer_{layer_idx}', layer_inputs_url)
 
-        # Final logits forward pass
         final_logits_result = self.handle_final_logits_forward(layer_inputs_url)
         self.update_sot('final_logits', final_logits_result)
 
-        # Loss computation
         loss_result = self.handle_loss_computation(final_logits_result['result_url'])
         self.update_sot('loss', loss_result)
 
-        # Backward pass for each transformer layer
         error_url = loss_result['result_url']
         for layer_idx in reversed(range(model_params['n_layers'])):
             error_url = self.handle_layer_backward(layer_idx, error_url, model_params)
             self.update_sot(f'backward_layer_{layer_idx}', error_url)
 
-        # Backward pass for final logits
         final_logits_backward_result = self.handle_final_logits_backward(error_url, final_logits_result['result_url'], model_params)
         self.update_sot('final_logits_backward', final_logits_backward_result)
 
-        # Backward pass for embedding
         embed_backward_result = self.handle_embed_backward(error_url, embed_result['batch_url'])
         self.update_sot('embed_backward', embed_backward_result)
 
@@ -214,7 +199,7 @@ class Master:
             time.sleep(1)
 
     def update_sot(self, task_type, result):
-        response = requests.post(f"{self.sot_url}/update", json={'task_type': task_type, 'result': result})
+        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': task_type, 'result': result})
         if response.status_code != 200:
             logging.error(f"Failed to update SOT for {task_type}: {response.text}")
 
