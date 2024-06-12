@@ -5,6 +5,7 @@ from model import ModelArgs
 import json
 import logging
 import torch.distributed as dist
+import time
 
 # Define the new tokenizer and model arguments
 tokenizer = Tokenizer('cl100k_base')
@@ -65,24 +66,31 @@ def load_contracts(web3, subnet_addresses):
     contracts = {}
     error_selectors = {}
 
-    for root, _, files in os.walk(abi_dir):
-        for file in files:
-            if file.endswith('.json'):
-                with open(os.path.join(root, file), 'r') as abi_file:
-                    abi = json.load(abi_file).get('abi', [])
-                    contract_name = os.path.splitext(file)[0]
-                    abis[contract_name] = abi
-                    logging.info(f"Loaded ABI for {contract_name}")
-                    extract_error_selectors(abi, web3, error_selectors)
-
     for task, address in subnet_addresses.items():
-        if 'SubnetManager' in abis:
-            contracts[task] = web3.eth.contract(address=address, abi=abis['SubnetManager'])
-            logging.info(f"Loaded contract for {task} with address {address}")
+        contract_path = os.path.join(abi_dir, f"{task}.sol", f"{task}.json")
+        if os.path.exists(contract_path):
+            with open(contract_path, 'r') as abi_file:
+                abi = json.load(abi_file).get('abi', [])
+                abis[task] = abi
+                logging.info(f"Loaded ABI for {task}")
+                extract_error_selectors(abi, web3, error_selectors)
+                contracts[task] = web3.eth.contract(address=address, abi=abi)
+                logging.info(f"Loaded contract for {task} with address {address}")
         else:
-            logging.error(f"ABI for SubnetManager not found")
+            logging.error(f"ABI for {task} not found at {contract_path}")
 
     return abis, contracts, error_selectors
+
+def load_abi(name):
+    abi_dir = 'abis'
+    contract_path = os.path.join(abi_dir, f"{name}.sol", f"{name}.json")
+    with open(contract_path, 'r') as abi_file:
+        return json.load(abi_file).get('abi', [])
+
+def upload_tensor(tensor, local_storage_dir):
+    local_file_path = os.path.join(local_storage_dir, f'{int(time.time())}.pt')
+    torch.save(tensor, local_file_path)
+    return f'file://{local_file_path}'
 
 def initialize_distributed_environment(backend, master_addr='localhost', master_port=None):
     if master_port is None:
