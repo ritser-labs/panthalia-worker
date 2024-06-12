@@ -67,19 +67,20 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, output
 
 def backward_task(layer_idx, error_file, state_dict_file, error_output_file, outputs_file):
     error, _ = load_from_disk(error_file)
+    
+    # Check if error is None
+    if error is None:
+        raise ValueError(f"Failed to load error tensor from {error_file}")
 
     # Load outputs, inputs, and layer from the forward pass
     outputs, inputs, layer = load_from_disk(outputs_file)
 
-    # Debugging shape information
     logging.info(f"Error tensor shape: {error.shape}")
     logging.info(f"Outputs tensor shape: {outputs.shape}")
 
     # Ensure the error tensor matches the outputs shape
     if error.shape != outputs.shape:
         raise ValueError(f"Error tensor shape {error.shape} does not match outputs shape {outputs.shape}")
-
-    error = error.view(outputs.shape)  # Ensure the gradient tensor matches the output tensor shape
 
     outputs.backward(error, retain_graph=True)  # Backward pass on outputs
 
@@ -117,8 +118,6 @@ def final_logits_backward_task(error_file, logits_file, error_output_file):
     # Ensure the error tensor matches the logits shape
     if error.shape != logits.shape:
         raise ValueError(f"Error tensor shape {error.shape} does not match logits shape {logits.shape}")
-
-    error = error.view(logits.shape)  # Ensure the gradient tensor matches the output tensor shape
 
     # Perform the backward pass on the loaded logits
     logits.backward(error, retain_graph=True)  # Backward pass on logits
@@ -176,9 +175,10 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     check_for_nans(logits.grad, "logits gradients")
     logging.info(f"Logits gradients for loss: {logits.grad.shape}")
 
-    # Reshape logits_grad to match original logits shape
+    # Reshape logits_grad to match the original logits shape
     logits_grad = logits.grad.view(batch_size, seq_len, vocab_size)  # Shape: [batch_size, seq_len, vocab_size]
 
+    # Save logits_grad to be used as the error for the final layer's backward pass
     save_to_disk((logits_grad, inputs, output_layer), logits_grad_file)
 
 
