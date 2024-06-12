@@ -1,5 +1,6 @@
 import torch
 import os
+from tokenizer import Tokenizer
 
 class ModelArgs:
     def __init__(self, vocab_size, dim, n_layers, n_heads, ffn_dim_multiplier):
@@ -9,9 +10,11 @@ class ModelArgs:
         self.n_heads = n_heads
         self.ffn_dim_multiplier = ffn_dim_multiplier
 
+tokenizer = Tokenizer(encoding_name='cl100k_base')
+
 # Define global model_args
 model_args = ModelArgs(
-    vocab_size=100256,  # Example value, update as needed
+    vocab_size=tokenizer.get_vocab_size(),  # Example value, update as needed
     dim=512,
     n_layers=6,
     n_heads=8,
