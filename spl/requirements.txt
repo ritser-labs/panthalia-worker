@@ -4,3 +4,4 @@ tiktoken==0.4.0
 fair
 blobfile
 eth-abi
+web3
