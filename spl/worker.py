@@ -14,13 +14,7 @@ def run_layer_step(layer, x, is_forward=True, next_error=None, optimizer=None, s
         optimizer.zero_grad()
         with torch.cuda.amp.autocast():
             if logits is None:
-                if x is None:
-                    x = next_error  # Use the next_error as the input for backward pass
-                print(f"Shape of x before view: {x.shape}")  # Debug: Check shape of x before view
-                x = x.view(-1, layer.norm1.normalized_shape[0])
-                print(f"Shape of x after view: {x.shape}")  # Debug: Check shape of x after view
-                logits = layer(x)
-                print(f"Shape of logits: {logits.shape}")  # Debug: Check shape of logits
+                raise ValueError("logits must be provided for backward step")
             logits = logits.view(-1, logits.size(-1))  # Flatten logits for loss calculation
             print(f"Shape of reshaped logits: {logits.shape}")  # Debug: Check shape of reshaped logits
             
