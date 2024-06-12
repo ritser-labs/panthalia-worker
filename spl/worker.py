@@ -16,7 +16,6 @@ def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
         logging.error(f"NaNs detected in {name}")
 
-
 def initialize_distributed_environment():
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12356'
@@ -65,36 +64,14 @@ def backward_task(layer_idx, error_file, inputs_file, state_dict_file, error_out
     layer = TransformerBlock(layer_idx, model_args)
     layer.load_state_dict(state_dict)
     
-    # Use precomputed forward activations
     inputs = load_from_disk(inputs_file)
     inputs.requires_grad = True
-    # Backward pass
+    
     error = error.view(inputs.shape)  # Ensure the gradient tensor matches the output tensor shape
     inputs.backward(error)
     
     grads = [param.grad for param in layer.parameters()]
     save_to_disk((inputs.grad, grads), error_output_file)
-
-def rmsnorm_backward_task(inputs_file, error_file, normed_error_file):
-    inputs = load_from_disk(inputs_file)
-    inputs.requires_grad = True
-    
-    error = load_from_disk(error_file)
-    
-    norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-    
-    # Forward pass
-    normed_inputs = norm(inputs)
-    
-    # Ensure error has the same shape as normed_inputs
-    error = error.view_as(normed_inputs)
-    
-    # Backward pass
-    normed_inputs.backward(error)
-    
-    # Save the gradients
-    save_to_disk(inputs.grad, normed_error_file)
-
 
 def final_logits_task(inputs_file, state_dict_file, logits_file):
     inputs = load_from_disk(inputs_file)
@@ -120,12 +97,10 @@ def final_logits_backward_task(error_file, inputs_file, state_dict_file, error_o
     output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False)
     output_layer.load_state_dict(state_dict)
     
-    # Forward pass
     inputs = load_from_disk(inputs_file)
     inputs.requires_grad = True
     logits = output_layer(inputs)
     
-    # Backward pass
     logits.backward(error)
     
     grads = [param.grad for param in output_layer.parameters()]
@@ -140,12 +115,10 @@ def embed_backward_task(error_file, batch_file, embedding_file, error_output_fil
     
     batch = load_from_disk(batch_file)
     embeddings = embedding(batch)
-    embeddings.retain_grad()  # Ensure gradients are retained
+    embeddings.retain_grad()
     
-    # Reshape error to match the embeddings
     error = error.view(embeddings.shape)  # Ensure the gradient tensor matches the output tensor shape
     
-    # Backward pass
     embeddings.backward(error)
     
     grads = [param.grad for param in embedding.parameters()]
@@ -165,9 +138,8 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     check_for_nans(logits.grad, "logits gradients")
     save_to_disk(logits.grad, logits_grad_file)
 
-
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
-    max_grad_norm = 1.0  # Adjust as necessary
+    max_grad_norm = 1.0
 
     if layer_idx == -1:
         state_dict_file = "data/output.pt"
@@ -196,14 +168,11 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
     for i, param in enumerate(state_dict.values()):
         if param.requires_grad:
-            # Zero gradients
             if param.grad is not None:
-                param.grad = torch.zeros_like(param.data)
+                param.grad.zero_()
 
-            # AdamW weight decay
             param.data -= learning_rate * weight_decay * param.data
 
-            # AdamW updates
             m[i] = beta1 * m[i] + (1 - beta1) * grads[i]
             v[i] = beta2 * v[i] + (1 - beta2) * (grads[i] ** 2)
 
@@ -212,20 +181,17 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
             param.data -= learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
 
-            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(param, max_grad_norm)
 
     save_layer_state_dict(state_dict, state_dict_file)
     save_to_disk(m, m_file)
     save_to_disk(v, v_file)
 
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, required=True, choices=[
         "embed", "forward", "backward", "final_logits", "final_logits_backward", 
-        "embed_backward", "loss", "apply_adamw", "rmsnorm_backward"
+        "embed_backward", "loss", "apply_adamw"
     ])
     parser.add_argument("--layer_idx", type=int, required=False)
     parser.add_argument("--inputs", type=str, required=False)
@@ -248,7 +214,6 @@ if __name__ == "__main__":
     parser.add_argument("--t", type=int, required=False)
     parser.add_argument("--freqs_cis", type=str, required=False)
     parser.add_argument("--mask", type=str, required=False)
-    parser.add_argument("--normed_error_file", type=str, required=False)
     args = parser.parse_args()
 
     initialize_distributed_environment()
@@ -271,7 +236,5 @@ if __name__ == "__main__":
     elif args.task == "apply_adamw":
         grads = load_from_disk(args.grads)
         apply_adamw(args.layer_idx, grads, args.learning_rate, args.beta1, args.beta2, args.epsilon, args.weight_decay, args.t)
-    elif args.task == "rmsnorm_backward":
-        rmsnorm_backward_task(args.inputs, args.error, args.normed_error_file)
 
     dist.destroy_process_group()
