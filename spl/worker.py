@@ -66,11 +66,18 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, output
     save_to_disk((outputs, inputs, layer), outputs_file)
 
 def backward_task(layer_idx, error_file, state_dict_file, error_output_file, outputs_file):
-    error = load_from_disk(error_file)
-    
+    error, _ = load_from_disk(error_file)
+
     # Load outputs, inputs, and layer from the forward pass
     outputs, inputs, layer = load_from_disk(outputs_file)
-    inputs.requires_grad = True  # Ensure the inputs tensor requires gradients
+
+    # Debugging shape information
+    logging.info(f"Error tensor shape: {error.shape}")
+    logging.info(f"Outputs tensor shape: {outputs.shape}")
+
+    # Ensure the error tensor matches the outputs shape
+    if error.shape != outputs.shape:
+        raise ValueError(f"Error tensor shape {error.shape} does not match outputs shape {outputs.shape}")
 
     error = error.view(outputs.shape)  # Ensure the gradient tensor matches the output tensor shape
 
@@ -81,6 +88,8 @@ def backward_task(layer_idx, error_file, state_dict_file, error_output_file, out
     logging.debug(f"Gradients for layer {layer_idx}: {grads}")
 
     save_to_disk((inputs.grad, grads), error_output_file)
+
+
 
 def final_logits_task(inputs_file, state_dict_file, logits_file):
     inputs, _, norm = load_from_disk(inputs_file)
@@ -105,13 +114,17 @@ def final_logits_backward_task(error_file, logits_file, error_output_file):
     # Load logits, inputs, and output_layer from the forward pass
     logits, inputs, output_layer = load_from_disk(logits_file)
 
+    # Ensure the error tensor matches the logits shape
+    if error.shape != logits.shape:
+        raise ValueError(f"Error tensor shape {error.shape} does not match logits shape {logits.shape}")
+
     error = error.view(logits.shape)  # Ensure the gradient tensor matches the output tensor shape
 
     # Perform the backward pass on the loaded logits
     logits.backward(error, retain_graph=True)  # Backward pass on logits
 
     logits_grad = logits.grad  # Get the gradients with respect to logits
-    logging.debug(f"Gradients for logits: {logits_grad}")
+    logging.debug(f"Gradients for logits: {logits_grad.shape}")
     
     # Get the gradients for the output layer parameters
     grads = [param.grad for param in output_layer.parameters() if param.grad is not None]
@@ -119,8 +132,9 @@ def final_logits_backward_task(error_file, logits_file, error_output_file):
 
     save_to_disk((logits_grad, grads), error_output_file)
 
+
 def embed_backward_task(error_file, inputs_file, error_output_file):
-    error = load_from_disk(error_file)
+    error, _ = load_from_disk(error_file)
     logging.info(f"Error tensor shape: {error.shape}")
 
     # Load embeddings, batch, and embedding module from the forward pass
@@ -142,20 +156,25 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     logits, inputs, output_layer = load_from_disk(logits_file)
     targets = load_from_disk(targets_file)
 
-    logging.info(f"Logits for loss: {logits}")
-    logging.info(f"Targets for loss: {targets}")
+    logging.info(f"Logits for loss: {logits.shape}")
+    logging.info(f"Targets for loss: {targets.shape}")
 
     pad_id = tokenizer.pad_id
 
-    loss = F.cross_entropy(logits, targets.view(-1), ignore_index=pad_id)
+    # Ensure logits are in the shape [batch_size * seq_len, vocab_size] for cross-entropy
+    logits = logits.view(-1, logits.size(-1))  # Shape: [batch_size * seq_len, vocab_size]
+    targets = targets.view(-1)  # Shape: [batch_size * seq_len]
+
+    loss = F.cross_entropy(logits, targets, ignore_index=pad_id)
     save_to_disk(loss.item(), loss_file)
 
     logits.retain_grad()
     loss.backward(retain_graph=True)  # Retain graph for backward pass
     check_for_nans(logits.grad, "logits gradients")
-    logging.info(f"Logits gradients for loss: {logits.grad}")
+    logging.info(f"Logits gradients for loss: {logits.grad.shape}")
 
     save_to_disk((logits.grad, inputs, output_layer), logits_grad_file)
+
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     max_grad_norm = 1.0
