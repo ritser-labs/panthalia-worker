@@ -35,9 +35,11 @@ def embed_task(batch_file, embedding_file, inputs_file):
     check_for_nans(inputs, "embedding outputs")
     logging.info(f"Embedded inputs: {inputs}")
 
-    save_to_disk(inputs, inputs_file)
+    # Save embeddings along with the computation graph
+    save_to_disk((inputs, batch, embedding), inputs_file)
 
-def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits_file, mask_file):
+
+def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, outputs_file, mask_file):
     inputs = load_from_disk(inputs_file)
     if torch.isnan(inputs).any() or torch.isinf(inputs).any():
         raise ValueError(f"NaNs or Infs detected in inputs for layer {layer_idx}")
@@ -61,24 +63,26 @@ def forward_task(layer_idx, inputs_file, state_dict_file, freqs_cis_file, logits
     check_for_nans(outputs, f"layer {layer_idx} outputs")
     logging.info(f"Outputs after layer {layer_idx}: {outputs}")
 
-    save_to_disk(outputs, logits_file)
+    # Save outputs, inputs, and layer to disk
+    save_to_disk((outputs, inputs, layer), outputs_file)
 
-def backward_task(layer_idx, error_file, state_dict_file, error_output_file, mask_file, inputs_file):
-    error, _ = load_from_disk(error_file)
-    state_dict = load_layer_state_dict(state_dict_file)
-    inputs = load_from_disk(inputs_file)
+def backward_task(layer_idx, error_file, state_dict_file, error_output_file, outputs_file):
+    error = load_from_disk(error_file)
     
-    layer = TransformerBlock(layer_idx, model_args)
-    layer.load_state_dict(state_dict)
-    
-    inputs.requires_grad = True
-    
-    error = error.view(inputs.shape)  # Ensure the gradient tensor matches the output tensor shape
-    inputs.backward(error)
-    
-    grads = [param.grad for param in layer.parameters()]
-    logging.info(f"Gradients for layer {layer_idx}: {grads}")
+    # Load outputs, inputs, and layer from the forward pass
+    outputs, inputs, layer = load_from_disk(outputs_file)
+    inputs.requires_grad = True  # Ensure the inputs tensor requires gradients
+
+    error = error.view(outputs.shape)  # Ensure the gradient tensor matches the output tensor shape
+
+    outputs.backward(error, retain_graph=True)  # Backward pass on outputs
+
+    # Get the gradients for the layer parameters
+    grads = [param.grad for param in layer.parameters() if param.grad is not None]
+    logging.debug(f"Gradients for layer {layer_idx}: {grads}")
+
     save_to_disk((inputs.grad, grads), error_output_file)
+
 
 def final_logits_task(inputs_file, state_dict_file, logits_file):
     inputs = load_from_disk(inputs_file)
@@ -94,63 +98,54 @@ def final_logits_task(inputs_file, state_dict_file, logits_file):
     check_for_nans(logits, "final logits")
     logging.info(f"Final logits: {logits}")
 
-    save_to_disk(logits, logits_file)
+    # Save logits along with the graph
+    save_to_disk((logits, inputs, output_layer), logits_file)
 
-def final_logits_backward_task(error_file, state_dict_file, error_output_file, inputs_file, logits_file):
+def final_logits_backward_task(error_file, logits_file, error_output_file):
     error = load_from_disk(error_file)
-    state_dict = load_layer_state_dict(state_dict_file)
-
-    if state_dict is None:
-        raise ValueError("Failed to load state dict for the output layer")
-
-    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False)
-    output_layer.load_state_dict(state_dict)
     
-    inputs = load_from_disk(inputs_file)
+    # Load logits, inputs, and output_layer from the forward pass
+    logits, inputs, output_layer = load_from_disk(logits_file)
     inputs.requires_grad = True  # Ensure the inputs tensor requires gradients
-    logits = load_from_disk(logits_file)
-    logits.requires_grad = True  # Ensure the logits tensor requires gradients
-    
+
     error = error.view(logits.shape)  # Ensure the gradient tensor matches the output tensor shape
-    logits.backward(error)  # Backward pass on logits
-    
+
+    # Perform the backward pass on the loaded logits
+    logits.backward(error, retain_graph=True)  # Backward pass on logits
+
     logits_grad = logits.grad  # Get the gradients with respect to logits
     logging.debug(f"Gradients for logits: {logits_grad}")
     
     # Get the gradients for the output layer parameters
-    grads = [param.grad for param in output_layer.parameters()]
+    grads = [param.grad for param in output_layer.parameters() if param.grad is not None]
     logging.debug(f"Gradients for final logits layer parameters: {grads}")
 
     save_to_disk((logits_grad, grads), error_output_file)
 
 
-def embed_backward_task(error_file, batch_file, embedding_file, error_output_file):
+
+def embed_backward_task(error_file, inputs_file, error_output_file):
     error = load_from_disk(error_file)
     logging.info(f"Error tensor shape: {error.shape}")
 
-    vocab_size = tokenizer.get_vocab_size()
-    
-    embedding = VocabParallelEmbedding(vocab_size, model_args.dim)
-    embedding.load_state_dict(load_layer_state_dict(embedding_file))
-    
-    batch = load_from_disk(batch_file)
-    logging.info(f"Batch tensor shape: {batch.shape}")
-
-    embeddings = load_from_disk(embedding_file)
-    embeddings.retain_grad()
-    logging.info(f"Embeddings tensor shape: {embeddings.shape}")
+    # Load embeddings, batch, and embedding module from the forward pass
+    embeddings, batch, embedding = load_from_disk(inputs_file)
+    embeddings.requires_grad = True  # Ensure the embeddings tensor requires gradients
 
     error = error.view(embeddings.shape)  # Ensure the gradient tensor matches the output tensor shape
     logging.info(f"Reshaped error tensor shape: {error.shape}")
-    
-    embeddings.backward(error)
-    
-    grads = [param.grad for param in embedding.parameters()]
+
+    embeddings.backward(error, retain_graph=True)
+
+    # Get the gradients for the embedding layer parameters
+    grads = [param.grad for param in embedding.parameters() if param.grad is not None]
     logging.info(f"Gradients for embedding: {grads}")
+
     save_to_disk(grads, error_output_file)
 
+
 def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
-    logits = load_from_disk(logits_file)
+    logits, inputs, output_layer = load_from_disk(logits_file)
     targets = load_from_disk(targets_file)
 
     logging.info(f"Logits for loss: {logits}")
@@ -162,11 +157,11 @@ def loss_task(logits_file, targets_file, loss_file, logits_grad_file):
     save_to_disk(loss.item(), loss_file)
 
     logits.retain_grad()
-    loss.backward()
+    loss.backward(retain_graph=True)  # Retain graph for backward pass
     check_for_nans(logits.grad, "logits gradients")
     logging.info(f"Logits gradients for loss: {logits.grad}")
 
-    save_to_disk(logits.grad, logits_grad_file)
+    save_to_disk((logits.grad, inputs, output_layer), logits_grad_file)
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     max_grad_norm = 1.0
