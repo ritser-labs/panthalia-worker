@@ -4,6 +4,7 @@ import os
 import time
 import argparse
 import requests
+import threading
 from common import model_args
 
 def parse_args():
@@ -33,6 +34,12 @@ def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
             print(f"Waiting for SOT service to be available... {e}")
         time.sleep(2)
     return False
+
+def read_logs(process):
+    for line in process.stdout:
+        print(line.decode(), end='')
+    for line in process.stderr:
+        print(line.decode(), end='')
 
 args = parse_args()
 
@@ -72,15 +79,15 @@ print("Starting SOT service...")
 
 # Start the SOT service
 sot_process = subprocess.Popen(['python', 'sot.py'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+sot_log_thread = threading.Thread(target=read_logs, args=(sot_process,))
+sot_log_thread.start()
 print(f"SOT service started with PID {sot_process.pid}")
 
 # Wait for the SOT service to be available
 if not wait_for_sot(args.sot_url):
     print("Error: SOT service did not become available within the timeout period.")
-    sot_stdout, sot_stderr = sot_process.communicate()
-    print(f"SOT stdout: {sot_stdout.decode()}")
-    print(f"SOT stderr: {sot_stderr.decode()}")
     sot_process.terminate()
+    sot_log_thread.join()
     exit(1)
 
 # Print worker initialization stage
@@ -151,6 +158,7 @@ for p in worker_processes:
 
 # Terminate the SOT process
 sot_process.terminate()
+sot_log_thread.join()
 
 # Print final stage
 print("Test run completed.")

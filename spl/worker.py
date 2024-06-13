@@ -123,47 +123,62 @@ def upload_tensor(tensor):
     torch.save(tensor, local_file_path)
     return f'file://{local_file_path}'
 
+def stream_gradients(task_id, gradients, block_number=0):
+    data = {
+        'task_id': task_id,
+        'gradients': gradients,
+        'block_number': block_number
+    }
+    response = requests.post(f"{args.sot_url}/stream_gradients", json=data)
+    if response.status_code != 200:
+        logging.error(f"Failed to stream gradients: {response.text}")
+    else:
+        logging.info(f"Streamed gradients successfully for task {task_id}")
+
 def apply_gradient_updates():
     global tensors, adam_m, adam_v, last_gradient_update
 
-    response = requests.post(f"{args.sot_url}/stream_gradients", json={}, stream=True)
-    for line in response.iter_lines():
-        if line and not gradient_update_paused:
-            try:
-                update = json.loads(line)
-            except json.JSONDecodeError as e:
-                logging.error(f"Failed to decode JSON: {e}")
-                continue
+    try:
+        response = requests.post(f"{args.sot_url}/stream_gradients", json={'dummy': 'data'}, stream=True)
+        for line in response.iter_lines():
+            if line and not gradient_update_paused:
+                try:
+                    update = json.loads(line)
+                except json.JSONDecodeError as e:
+                    logging.error(f"Failed to decode JSON: {e}")
+                    continue
 
-            block_number = update.get('block_number', 0)  # Default to 0 if not present
-            if block_number is None:
-                logging.error(f"Missing block_number in gradient update: {update}")
-                continue
+                block_number = update.get('block_number', 0)  # Default to 0 if not present
+                if block_number is None:
+                    logging.error(f"Missing block_number in gradient update: {update}")
+                    continue
 
-            for tensor_name, sparse_update in update.get('gradients', {}).items():
-                values = torch.tensor(sparse_update['values'], device=device)
-                indices = torch.tensor(sparse_update['indices'], device=device)
-                shape = sparse_update['shape']
+                for tensor_name, sparse_update in update.get('gradients', {}).items():
+                    values = torch.tensor(sparse_update['values'], device=device)
+                    indices = torch.tensor(sparse_update['indices'], device=device)
+                    shape = sparse_update['shape']
 
-                tensor = tensors[tensor_name]
-                if tensor is None:
-                    tensor = torch.zeros(shape, device=device)
-                    tensors[tensor_name] = tensor
+                    tensor = tensors[tensor_name]
+                    if tensor is None:
+                        tensor = torch.zeros(shape, device=device)
+                        tensors[tensor_name] = tensor
 
-                grad_update = torch.sparse_coo_tensor(indices, values, shape, device=device).to_dense()
-                tensor.add_(grad_update)
-                
-                last_gradient_update[tensor_name] = block_number
+                    grad_update = torch.sparse_coo_tensor(indices, values, shape, device=device).to_dense()
+                    tensor.add_(grad_update)
+                    
+                    last_gradient_update[tensor_name] = block_number
 
-                if tensor_name in adam_m:
-                    m = adam_m[tensor_name]
-                    v = adam_v[tensor_name]
-                    if m is None:
-                        m = torch.zeros_like(tensor, device=device)
-                        adam_m[tensor_name] = m
-                    if v is None:
-                        v = torch.zeros_like(tensor, device=device)
-                        adam_v[tensor_name] = v
+                    if tensor_name in adam_m:
+                        m = adam_m[tensor_name]
+                        v = adam_v[tensor_name]
+                        if m is None:
+                            m = torch.zeros_like(tensor, device=device)
+                            adam_m[tensor_name] = m
+                        if v is None:
+                            v = torch.zeros_like(tensor, device=device)
+                            adam_v[tensor_name] = v
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request exception in apply_gradient_updates: {e}")
 
 def pause_gradient_updates():
     global gradient_update_paused
@@ -176,16 +191,26 @@ def resume_gradient_updates():
 
 def sync_tensors_to_latest_state():
     while True:
-        response = requests.get(f"{args.sot_url}/latest_state")
-        latest_state = response.json()
-        need_update = False
-        for tensor_name, state in latest_state.items():
-            if tensor_name not in tensors or last_gradient_update[tensor_name] < state.get('block_number', -1):
-                need_update = True
+        try:
+            response = requests.get(f"{args.sot_url}/latest_state")
+            if response.status_code != 200:
+                logging.error(f"Failed to fetch latest state: {response.status_code}")
+                time.sleep(1)
+                continue
+            latest_state = response.json()
+            need_update = False
+            for tensor_name, state in latest_state.items():
+                if tensor_name not in tensors or last_gradient_update[tensor_name] < state.get('block_number', -1):
+                    need_update = True
+                    break
+            if not need_update:
                 break
-        if not need_update:
-            break
-        apply_gradient_updates()
+            apply_gradient_updates()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Request exception in sync_tensors_to_latest_state: {e}")
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON decode error in sync_tensors_to_latest_state: {e}")
+        time.sleep(1)
 
 def deposit_stake():
     global stake_deposited
@@ -269,7 +294,15 @@ def upload_tensors_and_grads(error_output, grads, layer_idx):
     adam_m_sparse, adam_v_sparse = extract_sparse_adam_params(grads, layer_idx)
     adam_m_url = upload_tensor(adam_m_sparse)
     adam_v_url = upload_tensor(adam_v_sparse)
-    return json.dumps({'error_output_url': error_output_url, 'grads_url': grads_url, 'adam_m_url': adam_m_url, 'adam_v_url': adam_v_url})
+    block_number = web3.eth.blockNumber  # Fetch the current block number
+    return {
+        'error_output_url': error_output_url,
+        'grads_url': grads_url,
+        'adam_m_url': adam_m_url,
+        'adam_v_url': adam_v_url,
+        'block_number': block_number
+    }
+
 
 def extract_sparse_adam_params(grads, layer_idx):
     indices, values_m, values_v = [], [], []

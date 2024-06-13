@@ -7,7 +7,10 @@ from common import model_args, tokenizer
 from datasets import load_dataset
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
+    logging.FileHandler("sot.log"),
+    logging.StreamHandler()
+])
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -48,9 +51,13 @@ dataset_iter = iter(dataset)
 @app.route('/latest_model_params', methods=['GET'])
 def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
-    with open(os.path.join(data_dir, 'latest_model_params.json'), 'r') as file:
-        model_params = json.load(file)
-    return jsonify(model_params)
+    try:
+        with open(os.path.join(data_dir, 'latest_model_params.json'), 'r') as file:
+            model_params = json.load(file)
+        return jsonify(model_params)
+    except Exception as e:
+        logging.error(f"Error accessing /latest_model_params: {e}", exc_info=True)
+        return jsonify({'error': 'Could not load model parameters'}), 500
 
 @app.route('/publish_result', methods=['POST'])
 def publish_result():
@@ -60,20 +67,24 @@ def publish_result():
     result = data.get('result')
 
     if not task_id or not result:
+        logging.error("Missing task_id or result in /publish_result request")
         return jsonify({'error': 'Missing task_id or result'}), 400
 
-    os.makedirs(os.path.join(data_dir, 'task_results'), exist_ok=True)
-    with open(os.path.join(data_dir, f'task_results/{task_id}.json'), 'w') as file:
-        json.dump(result, file)
-
-    return jsonify({'status': 'success'})
+    try:
+        os.makedirs(os.path.join(data_dir, 'task_results'), exist_ok=True)
+        with open(os.path.join(data_dir, f'task_results/{task_id}.json'), 'w') as file:
+            json.dump(result, file)
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        logging.error(f"Error in /publish_result: {e}", exc_info=True)
+        return jsonify({'error': 'Could not publish result'}), 500
 
 @app.route('/stream_gradients', methods=['POST'])
 def stream_gradients():
     logging.info("Accessing /stream_gradients endpoint")
     data = request.json
     if not data:
-        logging.error("Empty request data")
+        logging.error("Empty request data in /stream_gradients")
         return jsonify({'error': 'Empty request data'}), 400
 
     task_id = data.get('task_id')
@@ -81,18 +92,21 @@ def stream_gradients():
     block_number = data.get('block_number', 0)
 
     if not task_id or not gradients:
-        logging.error(f"Missing task_id or gradients in request data: {data}")
+        logging.error("Missing task_id or gradients in /stream_gradients request")
         return jsonify({'error': 'Missing task_id or gradients'}), 400
 
-    os.makedirs(os.path.join(data_dir, 'gradients'), exist_ok=True)
-    gradient_data = {
-        'gradients': gradients,
-        'block_number': block_number
-    }
-    with open(os.path.join(data_dir, f'gradients/{task_id}.json'), 'w') as file:
-        json.dump(gradient_data, file)
-
-    return jsonify({'status': 'success'})
+    try:
+        os.makedirs(os.path.join(data_dir, 'gradients'), exist_ok=True)
+        gradient_data = {
+            'gradients': gradients,
+            'block_number': block_number
+        }
+        with open(os.path.join(data_dir, f'gradients/{task_id}.json'), 'w') as file:
+            json.dump(gradient_data, file)
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        logging.error(f"Error in /stream_gradients: {e}", exc_info=True)
+        return jsonify({'error': 'Could not stream gradients'}), 500
 
 @app.route('/get_batch', methods=['GET'])
 def get_batch():
@@ -110,20 +124,28 @@ def get_batch():
             break
 
     if not batch:
+        logging.error("No more data available in /get_batch")
         return jsonify({"error": "No more data available"}), 404
 
-    batch_url = os.path.join(data_dir, 'batch.json')
-    with open(batch_url, 'w') as file:
-        json.dump(batch, file)
-
-    return jsonify({'batch_url': batch_url})
+    try:
+        batch_url = os.path.join(data_dir, 'batch.json')
+        with open(batch_url, 'w') as file:
+            json.dump(batch, file)
+        return jsonify({'batch_url': batch_url})
+    except Exception as e:
+        logging.error(f"Error in /get_batch: {e}", exc_info=True)
+        return jsonify({'error': 'Could not get batch'}), 500
 
 @app.route('/get_targets', methods=['GET'])
 def get_targets():
     logging.info("Accessing /get_targets endpoint")
-    with open(os.path.join(data_dir, 'targets.json'), 'r') as file:
-        targets = json.load(file)
-    return jsonify(targets)
+    try:
+        with open(os.path.join(data_dir, 'targets.json'), 'r') as file:
+            targets = json.load(file)
+        return jsonify(targets)
+    except Exception as e:
+        logging.error(f"Error in /get_targets: {e}", exc_info=True)
+        return jsonify({'error': 'Could not get targets'}), 500
 
 @app.route('/update_state', methods=['POST'])
 def update_state():
@@ -131,15 +153,32 @@ def update_state():
     data = request.json
     task_type = data.get('task_type')
     result = data.get('result')
+    block_number = data.get('block_number', 0)
 
     if not task_type or result is None:
-        logging.error(f"Missing task_type or result in request data: {data}")
+        logging.error("Missing task_type or result in /update_state request")
         return jsonify({'error': 'Missing task_type or result'}), 400
 
-    os.makedirs(os.path.join(data_dir, 'state'), exist_ok=True)
-    torch.save(torch.tensor(result), os.path.join(data_dir, f'state/{task_type}.pt'))
+    try:
+        os.makedirs(os.path.join(data_dir, 'state'), exist_ok=True)
+        state_data = {
+            'state': result,  # Assuming result is a list or tensor that can be serialized
+            'block_number': block_number
+        }
+        # Save state data as JSON if it's a list, otherwise save it as a PT file
+        state_file_path = os.path.join(data_dir, f'state/{task_type}')
+        if isinstance(result, list):
+            state_file_path += '.json'
+            with open(state_file_path, 'w') as file:
+                json.dump(state_data, file)
+        else:
+            state_file_path += '.pt'
+            torch.save(state_data, state_file_path)
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        logging.error(f"Error in /update_state: {e}", exc_info=True)
+        return jsonify({'error': 'Could not update state'}), 500
 
-    return jsonify({'status': 'success'})
 
 @app.route('/update_adam', methods=['POST'])
 def update_adam():
@@ -150,31 +189,62 @@ def update_adam():
     adam_v = data.get('adam_v')
 
     if not task_type or adam_m is None or adam_v is None:
-        logging.error(f"Missing task_type, adam_m, or adam_v in request data: {data}")
+        logging.error("Missing task_type, adam_m, or adam_v in /update_adam request")
         return jsonify({'error': 'Missing task_type, adam_m, or adam_v'}), 400
 
-    os.makedirs(os.path.join(data_dir, 'adam_m'), exist_ok=True)
-    os.makedirs(os.path.join(data_dir, 'adam_v'), exist_ok=True)
-    torch.save(torch.tensor(adam_m), os.path.join(data_dir, f'adam_m/{task_type}.pt'))
-    torch.save(torch.tensor(adam_v), os.path.join(data_dir, f'adam_v/{task_type}.pt'))
-
-    return jsonify({'status': 'success'})
+    try:
+        os.makedirs(os.path.join(data_dir, 'adam_m'), exist_ok=True)
+        os.makedirs(os.path.join(data_dir, 'adam_v'), exist_ok=True)
+        torch.save(torch.tensor(adam_m), os.path.join(data_dir, f'adam_m/{task_type}.pt'))
+        torch.save(torch.tensor(adam_v), os.path.join(data_dir, f'adam_v/{task_type}.pt'))
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        logging.error(f"Error in /update_adam: {e}", exc_info=True)
+        return jsonify({'error': 'Could not update Adam state'}), 500
 
 @app.route('/latest_state', methods=['GET'])
 def latest_state():
     logging.info("Accessing /latest_state endpoint")
-    state_files = os.listdir(os.path.join(data_dir, 'state'))
-    latest_state = {}
-    for state_file in state_files:
-        state_data = torch.load(os.path.join(data_dir, f'state/{state_file}'))
-        task_type = state_file.split('.')[0]
-        if isinstance(state_data, torch.Tensor):
-            latest_state[task_type] = state_data.tolist()  # Convert tensor to list for JSON serialization
-        elif isinstance(state_data, dict):
-            latest_state[task_type] = {k: v.tolist() if isinstance(v, torch.Tensor) else v for k, v in state_data.items()}  # Convert nested tensors to lists
-        else:
-            logging.error(f"Unsupported data type in state file: {state_file}")
-    return jsonify(latest_state)
+    try:
+        state_files = os.listdir(os.path.join(data_dir, 'state'))
+        latest_state = {}
+        for state_file in state_files:
+            state_file_path = os.path.join(data_dir, 'state', state_file)
+            try:
+                if state_file.endswith('.pt'):
+                    state_data = torch.load(state_file_path)
+                    task_type = state_file.split('.')[0]
+                    logging.debug(f"Loaded state data type for {state_file}: {type(state_data)}")
+                    logging.debug(f"Loaded state data content for {state_file}: {state_data}")
+                    if isinstance(state_data, torch.Tensor):
+                        latest_state[task_type] = {
+                            'block_number': 0,  # Default block number for tensors
+                            'state': state_data.tolist()  # Convert tensor to list for JSON serialization
+                        }
+                    elif isinstance(state_data, dict) and 'state' in state_data and 'block_number' in state_data:
+                        latest_state[task_type] = {
+                            'block_number': state_data['block_number'],
+                            'state': state_data['state']  # Assume state is already a list
+                        }
+                    else:
+                        logging.error(f"Unsupported data type in state file: {state_file}")
+                elif state_file.endswith('.json'):
+                    with open(state_file_path, 'r') as file:
+                        state_data = json.load(file)
+                        task_type = state_file.split('.')[0]
+                        if isinstance(state_data, dict) and 'state' in state_data and 'block_number' in state_data:
+                            latest_state[task_type] = {
+                                'block_number': state_data['block_number'],
+                                'state': state_data['state']  # Assume state is already a list
+                            }
+                        else:
+                            logging.error(f"Unsupported data type in state file: {state_file}")
+            except Exception as e:
+                logging.error(f"Error loading state file {state_file_path}: {e}", exc_info=True)
+        return jsonify(latest_state)
+    except Exception as e:
+        logging.error(f"Error in /latest_state: {e}", exc_info=True)
+        return jsonify({'error': 'Could not retrieve latest state'}), 500
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")

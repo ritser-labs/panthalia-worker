@@ -9,3 +9,4 @@ spl/data/state/*
 spl/data/batch.json
 spl/out.txt
 spl/abis/*
+spl/sot.log
