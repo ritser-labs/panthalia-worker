@@ -83,6 +83,8 @@ def publish_result():
 def stream_gradients():
     logging.info("Accessing /stream_gradients endpoint")
     data = request.json
+    logging.debug(f"Received data: {data}")
+
     if not data:
         logging.error("Empty request data in /stream_gradients")
         return jsonify({'error': 'Empty request data'}), 400
@@ -162,23 +164,15 @@ def update_state():
     try:
         os.makedirs(os.path.join(data_dir, 'state'), exist_ok=True)
         state_data = {
-            'state': result,  # Assuming result is a list or tensor that can be serialized
+            'state': result,
             'block_number': block_number
         }
-        # Save state data as JSON if it's a list, otherwise save it as a PT file
-        state_file_path = os.path.join(data_dir, f'state/{task_type}')
-        if isinstance(result, list):
-            state_file_path += '.json'
-            with open(state_file_path, 'w') as file:
-                json.dump(state_data, file)
-        else:
-            state_file_path += '.pt'
-            torch.save(state_data, state_file_path)
+        state_file_path = os.path.join(data_dir, f'state/{task_type}.pt')
+        torch.save(state_data, state_file_path)
         return jsonify({'status': 'success'})
     except Exception as e:
         logging.error(f"Error in /update_state: {e}", exc_info=True)
         return jsonify({'error': 'Could not update state'}), 500
-
 
 @app.route('/update_adam', methods=['POST'])
 def update_adam():
@@ -211,34 +205,22 @@ def latest_state():
         for state_file in state_files:
             state_file_path = os.path.join(data_dir, 'state', state_file)
             try:
-                if state_file.endswith('.pt'):
-                    state_data = torch.load(state_file_path)
-                    task_type = state_file.split('.')[0]
-                    logging.debug(f"Loaded state data type for {state_file}: {type(state_data)}")
-                    logging.debug(f"Loaded state data content for {state_file}: {state_data}")
-                    if isinstance(state_data, torch.Tensor):
-                        latest_state[task_type] = {
-                            'block_number': 0,  # Default block number for tensors
-                            'state': state_data.tolist()  # Convert tensor to list for JSON serialization
-                        }
-                    elif isinstance(state_data, dict) and 'state' in state_data and 'block_number' in state_data:
-                        latest_state[task_type] = {
-                            'block_number': state_data['block_number'],
-                            'state': state_data['state']  # Assume state is already a list
-                        }
-                    else:
-                        logging.error(f"Unsupported data type in state file: {state_file}")
-                elif state_file.endswith('.json'):
-                    with open(state_file_path, 'r') as file:
-                        state_data = json.load(file)
-                        task_type = state_file.split('.')[0]
-                        if isinstance(state_data, dict) and 'state' in state_data and 'block_number' in state_data:
-                            latest_state[task_type] = {
-                                'block_number': state_data['block_number'],
-                                'state': state_data['state']  # Assume state is already a list
-                            }
-                        else:
-                            logging.error(f"Unsupported data type in state file: {state_file}")
+                state_data = torch.load(state_file_path)
+                task_type = state_file.split('.')[0]
+                logging.debug(f"Loaded state data type for {state_file}: {type(state_data)}")
+
+                if isinstance(state_data, dict):
+                    latest_state[task_type] = {
+                        'block_number': state_data['block_number'],
+                        'state': state_data['state']
+                    }
+                elif isinstance(state_data, torch.Tensor):
+                    latest_state[task_type] = {
+                        'block_number': 0,  # Default block number for tensors
+                        'state': state_data.tolist()  # Convert tensor to list for JSON serialization
+                    }
+                else:
+                    logging.error(f"Unsupported data type in state file: {state_file}")
             except Exception as e:
                 logging.error(f"Error loading state file {state_file_path}: {e}", exc_info=True)
         return jsonify(latest_state)

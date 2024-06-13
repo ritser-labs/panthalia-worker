@@ -129,6 +129,7 @@ def stream_gradients(task_id, gradients, block_number=0):
         'gradients': gradients,
         'block_number': block_number
     }
+    logging.debug(f"Sending data to /stream_gradients: {data}")
     response = requests.post(f"{args.sot_url}/stream_gradients", json=data)
     if response.status_code != 200:
         logging.error(f"Failed to stream gradients: {response.text}")

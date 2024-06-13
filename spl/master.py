@@ -206,6 +206,8 @@ class Master:
         response = requests.post(f"{self.sot_url}/update_state", json={'task_type': task_type, 'result': result})
         if response.status_code != 200:
             logging.error(f"Failed to update SOT for {task_type}: {response.text}")
+        else:
+            logging.info(f"Updated SOT for {task_type} with result: {result}")
 
     def update_adam_state(self, task_type, adam_m_url, adam_v_url):
         response = requests.post(f"{self.sot_url}/update_adam", json={'task_type': task_type, 'adam_m': adam_m_url, 'adam_v': adam_v_url})
