@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import threading
 from flask import Flask, request, jsonify
 import torch
 from common import model_args, tokenizer
@@ -11,10 +12,6 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(mes
     logging.FileHandler("sot.log"),
     logging.StreamHandler()
 ])
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({'status': 'healthy'}), 200
 
 # Ensure the data directory exists
 data_dir = 'data'
@@ -47,6 +44,45 @@ for i in range(model_args.n_layers):
 logging.info("Loading Wikipedia dataset...")
 dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
 dataset_iter = iter(dataset)
+
+# Global variable to store pre-loaded batch
+preloaded_batch = None
+batch_lock = threading.Lock()
+
+def preload_batch():
+    global preloaded_batch, dataset_iter
+    batch_size = 2
+    max_seq_len = 512
+    batch = []
+
+    for _ in range(batch_size):
+        try:
+            example = next(dataset_iter)
+            tokens = tokenizer.encode(
+                example['text'], 
+                bos=False, 
+                eos=False, 
+                allowed_special=set(), 
+                disallowed_special=(), 
+            )
+            # Ensure the length is max_seq_len by padding if necessary
+            if len(tokens) < max_seq_len:
+                tokens += [tokenizer.pad_id] * (max_seq_len - len(tokens))
+            elif len(tokens) > max_seq_len:
+                tokens = tokens[:max_seq_len]
+            batch.append(tokens)
+        except StopIteration:
+            break
+
+    if batch:
+        preloaded_batch = batch
+
+# Pre-load the first batch
+preload_batch()
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy'}), 200
 
 @app.route('/latest_model_params', methods=['GET'])
 def get_latest_model_params():
@@ -113,42 +149,28 @@ def stream_gradients():
 @app.route('/get_batch', methods=['GET'])
 def get_batch():
     logging.info("Accessing /get_batch endpoint")
-    batch_size = 2
-    max_seq_len = 512
+    global preloaded_batch
 
-    batch = []
-    for _ in range(batch_size):
-        try:
-            example = next(dataset_iter)
-            tokens = tokenizer.encode(
-                example['text'], 
-                bos=False, 
-                eos=False, 
-                allowed_special=set(), 
-                disallowed_special=(), 
-            )
-            # Ensure the length is max_seq_len by padding if necessary
-            if len(tokens) < max_seq_len:
-                tokens += [tokenizer.pad_id] * (max_seq_len - len(tokens))
-            elif len(tokens) > max_seq_len:
-                tokens = tokens[:max_seq_len]
-            batch.append(tokens)
-        except StopIteration:
-            break
+    with batch_lock:
+        if preloaded_batch is None:
+            logging.error("No preloaded batch available")
+            return jsonify({"error": "No preloaded batch available"}), 404
 
-    if not batch:
-        logging.error("No more data available in /get_batch")
-        return jsonify({"error": "No more data available"}), 404
+        batch = preloaded_batch
+        preloaded_batch = None  # Clear the current batch to load the next one
 
     try:
         batch_url = os.path.join(data_dir, 'batch.json')
         with open(batch_url, 'w') as file:
             json.dump(batch, file)
+        
+        # Pre-load the next batch in a separate thread
+        threading.Thread(target=preload_batch).start()
+
         return jsonify({'batch_url': batch_url})
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
         return jsonify({'error': 'Could not get batch'}), 500
-
 
 @app.route('/get_targets', methods=['GET'])
 def get_targets():

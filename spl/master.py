@@ -86,7 +86,7 @@ class Master:
                     logging.error(f"Error message: {error_message}")
                 except (TransactionNotFound, ValueError) as e:
                     logging.error(f"Error retrieving transaction details: {e}")
-                raise ValueError(f"Transaction failed: {receipt}")
+                raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
 
             logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
             logging.info(f"Event logs: {logs}")
@@ -96,11 +96,42 @@ class Master:
 
             task_id = logs[0]['args']['taskId']
             logging.info(f"Task submitted successfully. Task ID: {task_id}")
+
+            # Call select_solver function
+            self.select_solver(task_type, task_id)
+
             return task_id
         except ContractCustomError as e:
             handle_contract_custom_error(self.web3, self.error_selectors, e)
         except Exception as e:
             logging.error(f"Error submitting task: {e}")
+            raise
+
+    def select_solver(self, task_type, task_id):
+        try:
+            if task_type not in self.contracts:
+                raise ValueError(f"No contract loaded for task type {task_type}")
+
+            logging.info(f"Selecting solver for task ID: {task_id}")
+
+            nonce = self.web3.eth.get_transaction_count(self.account.address)
+            gas_price = self.web3.eth.gas_price
+            transaction = self.contracts[task_type].functions.selectSolver(task_id).build_transaction({
+                'chainId': self.web3.eth.chain_id,
+                'gas': 1000000,
+                'gasPrice': gas_price,
+                'nonce': nonce
+            })
+
+            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
+            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
+            logging.info(f"Select solver transaction receipt: {receipt}")
+
+            if receipt['status'] == 0:
+                raise ValueError(f"Select solver transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+        except Exception as e:
+            logging.error(f"Error selecting solver: {e}")
             raise
 
     def get_task_result(self, task_type, task_id):
