@@ -77,15 +77,7 @@ class Master:
             logging.info(f"Transaction receipt: {receipt}")
 
             if receipt['status'] == 0:
-                try:
-                    tx = self.web3.eth.get_transaction(receipt['transactionHash'])
-                    error_message = self.web3.eth.call({
-                        'to': tx['to'],
-                        'data': tx['input']
-                    }, receipt['blockNumber'])
-                    logging.error(f"Error message: {error_message}")
-                except (TransactionNotFound, ValueError) as e:
-                    logging.error(f"Error retrieving transaction details: {e}")
+                self.log_transaction_failure(receipt)
                 raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
 
             logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
@@ -129,10 +121,23 @@ class Master:
             logging.info(f"Select solver transaction receipt: {receipt}")
 
             if receipt['status'] == 0:
+                self.log_transaction_failure(receipt)
                 raise ValueError(f"Select solver transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
         except Exception as e:
             logging.error(f"Error selecting solver: {e}")
             raise
+
+    def log_transaction_failure(self, receipt):
+        try:
+            tx = self.web3.eth.get_transaction(receipt['transactionHash'])
+            error_message = self.web3.eth.call({
+                'to': tx['to'],
+                'data': tx['input']
+            }, receipt['blockNumber'])
+            decoded_error_message = self.web3.codec.decode_abi(['string'], error_message)
+            logging.error(f"Transaction failed with error message: {decoded_error_message}")
+        except (TransactionNotFound, ValueError) as e:
+            logging.error(f"Error retrieving transaction details: {e}")
 
     def get_task_result(self, task_type, task_id):
         try:
