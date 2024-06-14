@@ -140,7 +140,7 @@ def apply_gradient_updates():
     global tensors, adam_m, adam_v, last_gradient_update
 
     try:
-        response = requests.post(f"{args.sot_url}/stream_gradients", json={'dummy': 'data'}, stream=True)
+        response = requests.get(f"{args.sot_url}/latest_state", stream=True)
         for line in response.iter_lines():
             if line and not gradient_update_paused:
                 try:
@@ -303,7 +303,6 @@ def upload_tensors_and_grads(error_output, grads, layer_idx):
         'adam_v_url': adam_v_url,
         'block_number': block_number
     }
-
 
 def extract_sparse_adam_params(grads, layer_idx):
     indices, values_m, values_v = [], [], []

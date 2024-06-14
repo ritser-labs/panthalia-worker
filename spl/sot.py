@@ -167,8 +167,9 @@ def update_state():
             'state': result,
             'block_number': block_number
         }
-        state_file_path = os.path.join(data_dir, f'state/{task_type}.pt')
-        torch.save(state_data, state_file_path)
+        state_file_path = os.path.join(data_dir, f'state/{task_type}.json')
+        with open(state_file_path, 'w') as file:
+            json.dump(state_data, file)
         return jsonify({'status': 'success'})
     except Exception as e:
         logging.error(f"Error in /update_state: {e}", exc_info=True)
@@ -205,7 +206,11 @@ def latest_state():
         for state_file in state_files:
             state_file_path = os.path.join(data_dir, 'state', state_file)
             try:
-                state_data = torch.load(state_file_path)
+                if state_file.endswith('.json'):
+                    with open(state_file_path, 'r') as file:
+                        state_data = json.load(file)
+                else:
+                    state_data = torch.load(state_file_path)
                 task_type = state_file.split('.')[0]
                 logging.debug(f"Loaded state data type for {state_file}: {type(state_data)}")
 
