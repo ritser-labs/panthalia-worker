@@ -120,8 +120,19 @@ def get_batch():
     for _ in range(batch_size):
         try:
             example = next(dataset_iter)
-            tokens = tokenizer(example['text'], max_length=max_seq_len, padding='max_length', truncation=True, return_tensors='pt')
-            batch.append(tokens['input_ids'][0].tolist())
+            tokens = tokenizer.encode(
+                example['text'], 
+                bos=False, 
+                eos=False, 
+                allowed_special=set(), 
+                disallowed_special=(), 
+            )
+            # Ensure the length is max_seq_len by padding if necessary
+            if len(tokens) < max_seq_len:
+                tokens += [tokenizer.pad_id] * (max_seq_len - len(tokens))
+            elif len(tokens) > max_seq_len:
+                tokens = tokens[:max_seq_len]
+            batch.append(tokens)
         except StopIteration:
             break
 
@@ -137,6 +148,7 @@ def get_batch():
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
         return jsonify({'error': 'Could not get batch'}), 500
+
 
 @app.route('/get_targets', methods=['GET'])
 def get_targets():
