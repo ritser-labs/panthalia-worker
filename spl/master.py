@@ -2,7 +2,6 @@ import json
 import logging
 import time
 import requests
-import os
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
@@ -21,6 +20,18 @@ class Master:
 
         if not self.contracts:
             raise ValueError("SubnetManager contracts not found. Please check the subnet_addresses configuration.")
+
+        self.pool_address = None
+        for contract in self.contracts.values():
+            if hasattr(contract.functions, 'pool'):
+                self.pool_address = contract.functions.pool().call()
+                break
+        if not self.pool_address:
+            raise ValueError("Pool contract address not found in any of the SubnetManager contracts.")
+
+        self.pool = self.web3.eth.contract(address=self.pool_address, abi=self.abis['IPool'])
+        self.vrf_coordinator_address = self.pool.functions.vrfCoordinator().call()
+        self.vrf_coordinator = self.web3.eth.contract(address=self.vrf_coordinator_address, abi=self.abis['VRFCoordinatorV2Interface'])
 
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -89,6 +100,16 @@ class Master:
             task_id = logs[0]['args']['taskId']
             logging.info(f"Task submitted successfully. Task ID: {task_id}")
 
+            # Call submitSelectionReq and wait for UNLOCKED_MIN_PERIOD
+            selection_id = self.submit_selection_req()
+            logging.info(f"Selection ID: {selection_id}")
+
+            # Retrieve vrfRequestId from Pool contract
+            vrf_request_id = self.pool.functions.vrfRequestId().call()
+
+            # Call fulfillRandomWords function
+            self.fulfill_random_words(vrf_request_id)
+
             # Call select_solver function
             self.select_solver(task_type, task_id)
 
@@ -97,6 +118,63 @@ class Master:
             handle_contract_custom_error(self.web3, self.error_selectors, e)
         except Exception as e:
             logging.error(f"Error submitting task: {e}")
+            raise
+
+    def submit_selection_req(self):
+        try:
+            nonce = self.web3.eth.get_transaction_count(self.account.address)
+            gas_price = self.web3.eth.gas_price
+            transaction = self.pool.functions.submitSelectionReq().build_transaction({
+                'chainId': self.web3.eth.chain_id,
+                'gas': 500000,
+                'gasPrice': gas_price,
+                'nonce': nonce
+            })
+
+            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
+            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
+            logging.info(f"submitSelectionReq transaction receipt: {receipt}")
+
+            if receipt['status'] == 0:
+                self.log_transaction_failure(receipt)
+                raise ValueError(f"submitSelectionReq transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+
+            # Wait for UNLOCKED_MIN_PERIOD
+            unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
+            time.sleep(unlocked_min_period)
+
+            logs = self.pool.events.SelectionRequested().process_receipt(receipt)
+            if not logs:
+                raise ValueError("No SelectionRequested event found in the receipt")
+
+            selection_id = logs[0]['args']['selectionId']
+            return selection_id
+        except Exception as e:
+            logging.error(f"Error submitting selection request: {e}")
+            raise
+
+    def fulfill_random_words(self, vrf_request_id):
+        try:
+            nonce = self.web3.eth.get_transaction_count(self.account.address)
+            gas_price = self.web3.eth.gas_price
+            transaction = self.vrf_coordinator.functions.fulfillRandomWords(vrf_request_id).build_transaction({
+                'chainId': self.web3.eth.chain_id,
+                'gas': 500000,
+                'gasPrice': gas_price,
+                'nonce': nonce
+            })
+
+            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
+            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
+            logging.info(f"fulfillRandomWords transaction receipt: {receipt}")
+
+            if receipt['status'] == 0:
+                self.log_transaction_failure(receipt)
+                raise ValueError(f"fulfillRandomWords transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+        except Exception as e:
+            logging.error(f"Error fulfilling random words: {e}")
             raise
 
     def select_solver(self, task_type, task_id):
