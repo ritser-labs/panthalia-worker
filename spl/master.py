@@ -140,9 +140,15 @@ class Master:
                 self.log_transaction_failure(receipt)
                 raise ValueError(f"submitSelectionReq transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
 
-            # Wait for UNLOCKED_MIN_PERIOD
+            # Calculate remaining time for UNLOCKED_MIN_PERIOD
             unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
-            time.sleep(unlocked_min_period)
+            last_state_change_time = self.pool.functions.lastStateChangeTime().call()
+            current_time = time.time()
+            remaining_time = (last_state_change_time + unlocked_min_period) - current_time
+
+            if remaining_time > 0:
+                logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
+                time.sleep(remaining_time)
 
             logs = self.pool.events.SelectionRequested().process_receipt(receipt)
             if not logs:
