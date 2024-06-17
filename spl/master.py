@@ -29,9 +29,9 @@ class Master:
         if not self.pool_address:
             raise ValueError("Pool contract address not found in any of the SubnetManager contracts.")
 
-        self.pool = self.web3.eth.contract(address=self.pool_address, abi=self.abis['IPool'])
+        self.pool = self.web3.eth.contract(address=self.pool_address, abi=self.abis['Pool'])
         self.vrf_coordinator_address = self.pool.functions.vrfCoordinator().call()
-        self.vrf_coordinator = self.web3.eth.contract(address=self.vrf_coordinator_address, abi=self.abis['VRFCoordinatorV2Interface'])
+        self.vrf_coordinator = self.web3.eth.contract(address=self.vrf_coordinator_address, abi=self.abis['MockVRFCoordinator'])
 
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
