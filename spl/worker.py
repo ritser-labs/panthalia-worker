@@ -16,6 +16,7 @@ from typing import Optional
 from io import BytesIO
 import time
 import os
+import socket
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):
@@ -544,9 +545,27 @@ def check_and_finalize_verifications():
                 web3.eth.wait_for_transaction_receipt(tx)
                 processed_tasks.remove(task_id)
 
+def report_sync_status(status):
+    try:
+        hostname = socket.gethostname()
+        url = f"http://localhost:5002/report_sync?worker_id={hostname}&status={status}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            logging.info(f"Reported sync status: {status}")
+        else:
+            logging.error(f"Failed to report sync status: {response.status_code}")
+    except requests.RequestException as e:
+        logging.error(f"Exception while reporting sync status: {e}")
+
 def main():
     initialize_model_and_embedding()
     event_filter = contract.events.SolverSelected.create_filter(fromBlock='latest')
+
+    # Synchronize tensors to the latest state and report status
+    logging.info("Starting tensor synchronization...")
+    sync_tensors_to_latest_state()
+    report_sync_status('synced')
+
     while True:
         apply_gradient_updates()
         sync_tensors_to_latest_state()

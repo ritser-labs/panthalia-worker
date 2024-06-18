@@ -5,6 +5,7 @@ import time
 import argparse
 import requests
 import threading
+from flask import Flask, request, jsonify
 from common import model_args
 
 def parse_args():
@@ -20,6 +21,29 @@ def parse_args():
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
     return parser.parse_args()
+
+args = parse_args()
+
+sync_status = {}
+app = Flask(__name__)
+
+@app.route('/report_sync', methods=['GET'])
+def report_sync():
+    worker_id = request.args.get('worker_id')
+    status = request.args.get('status')
+    if worker_id and status:
+        sync_status[worker_id] = status
+        return jsonify({'status': 'success'})
+    else:
+        return jsonify({'status': 'error', 'message': 'Missing worker_id or status'}), 400
+
+def wait_for_workers_sync(total_workers, timeout=1200):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if len(sync_status) == total_workers and all(status == 'synced' for status in sync_status.values()):
+            return True
+        time.sleep(2)
+    return False
 
 def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
     """Wait for the SOT service to be available."""
@@ -41,124 +65,134 @@ def read_logs(process):
     for line in process.stderr:
         print(line.decode(), end='')
 
-args = parse_args()
+if __name__ == "__main__":
+    # Start Flask server in a separate thread
+    flask_thread = threading.Thread(target=lambda: app.run(port=5002))
+    flask_thread.start()
 
-# Print initial stage
-print("Starting deployment...")
+    # Print initial stage
+    print("Starting deployment...")
 
-# Set environment variables for deployment
-os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
-os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
-os.environ['LAYERS'] = str(model_args.n_layers)
-os.environ['SOT_URL'] = args.sot_url
+    # Set environment variables for deployment
+    os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
+    os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
+    os.environ['LAYERS'] = str(model_args.n_layers)
+    os.environ['SOT_URL'] = args.sot_url
 
-# Run Deploy.s.sol script from the correct path
-deploy_command = [
-    'forge', 'script', os.path.basename(args.forge_script),
-    '--broadcast', '--rpc-url', args.rpc_url,
-    '--private-key', args.private_key, '-vv'
-]
-subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
+    # Run Deploy.s.sol script from the correct path
+    deploy_command = [
+        'forge', 'script', os.path.basename(args.forge_script),
+        '--broadcast', '--rpc-url', args.rpc_url,
+        '--private-key', args.private_key, '-vv'
+    ]
+    subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
 
-# Print deployment stage completion
-print("Deployment completed successfully.")
+    # Print deployment stage completion
+    print("Deployment completed successfully.")
 
-# Load subnet addresses and deployment config
-with open(args.subnet_addresses, 'r') as file:
-    subnet_addresses = json.load(file)
+    # Load subnet addresses and deployment config
+    with open(args.subnet_addresses, 'r') as file:
+        subnet_addresses = json.load(file)
 
-with open(args.deployment_config, 'r') as file:
-    deployment_config = json.load(file)
+    with open(args.deployment_config, 'r') as file:
+        deployment_config = json.load(file)
 
-pool_address = deployment_config['pool']
+    pool_address = deployment_config['pool']
 
-worker_processes = []
+    worker_processes = []
 
-# Print SOT service initialization stage
-print("Starting SOT service...")
+    # Print SOT service initialization stage
+    print("Starting SOT service...")
 
-# Start the SOT service
-sot_process = subprocess.Popen(['python', 'sot.py'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-sot_log_thread = threading.Thread(target=read_logs, args=(sot_process,))
-sot_log_thread.start()
-print(f"SOT service started with PID {sot_process.pid}")
+    # Start the SOT service
+    sot_process = subprocess.Popen(['python', 'sot.py'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    sot_log_thread = threading.Thread(target=read_logs, args=(sot_process,))
+    sot_log_thread.start()
+    print(f"SOT service started with PID {sot_process.pid}")
 
-# Wait for the SOT service to be available
-if not wait_for_sot(args.sot_url):
-    print("Error: SOT service did not become available within the timeout period.")
+    # Wait for the SOT service to be available
+    if not wait_for_sot(args.sot_url):
+        print("Error: SOT service did not become available within the timeout period.")
+        sot_process.terminate()
+        sot_log_thread.join()
+        exit(1)
+
+    # Print worker initialization stage
+    print("Starting worker processes...")
+
+    # Start worker.py for each subnet
+    for index, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
+        # Determine base_task_type correctly
+        if 'forward_layer' in task_type:
+            base_task_type = 'forward'
+        elif 'backward_layer' in task_type:
+            base_task_type = 'backward'
+        else:
+            base_task_type = task_type  # Use the full task type as is
+
+        os.environ['RANK'] = '0'
+        os.environ['WORLD_SIZE'] = '1'
+        command = [
+            'python', 'worker.py',
+            '--task_type', base_task_type,
+            '--subnet_address', subnet_address,
+            '--private_key', args.private_key,
+            '--rpc_url', args.rpc_url,
+            '--sot_url', args.sot_url,
+            '--pool_address', pool_address,
+            '--group', str(args.group),
+            '--local_storage_dir', args.local_storage_dir,
+            '--backend', args.backend,
+        ]
+        if args.detailed_logs or index == 0:
+            worker_processes.append(subprocess.Popen(command))
+        else:
+            worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
+
+    # Wait for all workers to sync
+    print("Waiting for all worker processes to sync...")
+    if wait_for_workers_sync(len(worker_processes)):
+        print("All worker processes synced.")
+    else:
+        print("Error: Not all worker processes synced within the timeout period.")
+        for p in worker_processes:
+            p.terminate()
+            p.wait()
+        sot_process.terminate()
+        sot_log_thread.join()
+        exit(1)
+
+    # Print master initialization stage
+    print("Starting master process...")
+
+    # Start master.py
+    master_command = [
+        'python', 'master.py',
+        '--rpc_url', args.rpc_url,
+        '--private_key', args.private_key,
+        '--sot_url', args.sot_url,
+        '--subnet_addresses', args.subnet_addresses,
+    ]
+    if args.detailed_logs:
+        master_command.append('--detailed_logs')
+    master_process = subprocess.Popen(master_command)
+    print(f"Started master process with command: {' '.join(master_command)}")
+
+    # Print master started stage
+    print("Master process started.")
+
+    # Wait for the master process to complete
+    master_process.wait()
+
+    # Terminate all worker processes
+    for p in worker_processes:
+        p.terminate()
+        p.wait()
+
+    # Terminate the SOT process
     sot_process.terminate()
     sot_log_thread.join()
-    exit(1)
 
-# Print worker initialization stage
-print("Starting worker processes...")
-
-# Start worker.py for each subnet
-for index, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
-    # Determine base_task_type correctly
-    if 'forward_layer' in task_type:
-        base_task_type = 'forward'
-    elif 'backward_layer' in task_type:
-        base_task_type = 'backward'
-    else:
-        base_task_type = task_type  # Use the full task type as is
-
-    os.environ['RANK'] = '0'
-    os.environ['WORLD_SIZE'] = '1'
-    command = [
-        'python', 'worker.py',
-        '--task_type', base_task_type,
-        '--subnet_address', subnet_address,
-        '--private_key', args.private_key,
-        '--rpc_url', args.rpc_url,
-        '--sot_url', args.sot_url,
-        '--pool_address', pool_address,
-        '--group', str(args.group),
-        '--local_storage_dir', args.local_storage_dir,
-        '--backend', args.backend,
-    ]
-    if args.detailed_logs or index == 0:
-        worker_processes.append(subprocess.Popen(command))
-    else:
-        worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-    print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
-
-# Print workers started stage
-print("Worker processes started.")
-
-# Give workers some time to initialize
-time.sleep(10)
-
-# Print master initialization stage
-print("Starting master process...")
-
-# Start master.py
-master_command = [
-    'python', 'master.py',
-    '--rpc_url', args.rpc_url,
-    '--private_key', args.private_key,
-    '--sot_url', args.sot_url,
-    '--subnet_addresses', args.subnet_addresses,
-]
-if args.detailed_logs:
-    master_command.append('--detailed_logs')
-master_process = subprocess.Popen(master_command)
-print(f"Started master process with command: {' '.join(master_command)}")
-
-# Print master started stage
-print("Master process started.")
-
-# Wait for the master process to complete
-master_process.wait()
-
-# Terminate all worker processes
-for p in worker_processes:
-    p.terminate()
-    p.wait()
-
-# Terminate the SOT process
-sot_process.terminate()
-sot_log_thread.join()
-
-# Print final stage
-print("Test run completed.")
+    # Print final stage
+    print("Test run completed.")
