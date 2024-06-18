@@ -194,20 +194,18 @@ def resume_gradient_updates():
 def sync_tensors_to_latest_state():
     while True:
         try:
-            response = requests.get(f"{args.sot_url}/latest_state")
-            if response.status_code != 200:
-                logging.error(f"Failed to fetch latest state: {response.status_code}")
-                time.sleep(1)
-                continue
-            latest_state = response.json()
-            need_update = False
-            for tensor_name, state in latest_state.items():
-                if tensor_name not in tensors or last_gradient_update[tensor_name] < state.get('block_number', -1):
-                    need_update = True
-                    break
-            if not need_update:
-                break
-            apply_gradient_updates()
+            response = requests.get(f"{args.sot_url}/latest_state", stream=True)
+            for line in response.iter_lines():
+                if line:
+                    latest_state = json.loads(line)
+                    need_update = False
+                    for tensor_name, state in latest_state.items():
+                        if tensor_name not in tensors or last_gradient_update[tensor_name] < state.get('block_number', -1):
+                            need_update = True
+                            break
+                    if not need_update:
+                        break
+                    apply_gradient_updates()
         except requests.exceptions.RequestException as e:
             logging.error(f"Request exception in sync_tensors_to_latest_state: {e}")
         except json.JSONDecodeError as e:

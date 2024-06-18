@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import threading
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
@@ -234,38 +234,40 @@ def update_adam():
 @app.route('/latest_state', methods=['GET'])
 def latest_state():
     logging.info("Accessing /latest_state endpoint")
-    try:
-        state_files = os.listdir(os.path.join(data_dir, 'state'))
-        latest_state = {}
-        for state_file in state_files:
-            state_file_path = os.path.join(data_dir, 'state', state_file)
-            try:
-                if state_file.endswith('.json'):
-                    with open(state_file_path, 'r') as file:
-                        state_data = json.load(file)
-                else:
-                    state_data = torch.load(state_file_path)
-                task_type = state_file.split('.')[0]
-                logging.debug(f"Loaded state data type for {state_file}: {type(state_data)}")
+    def generate():
+        try:
+            state_files = os.listdir(os.path.join(data_dir, 'state'))
+            latest_state = {}
+            for state_file in state_files:
+                state_file_path = os.path.join(data_dir, 'state', state_file)
+                try:
+                    if state_file.endswith('.json'):
+                        with open(state_file_path, 'r') as file:
+                            state_data = json.load(file)
+                    else:
+                        state_data = torch.load(state_file_path)
+                    task_type = state_file.split('.')[0]
+                    logging.debug(f"Loaded state data type for {state_file}: {type(state_data)}")
 
-                if isinstance(state_data, dict):
-                    latest_state[task_type] = {
-                        'block_number': state_data['block_number'],
-                        'state': state_data['state']
-                    }
-                elif isinstance(state_data, torch.Tensor):
-                    latest_state[task_type] = {
-                        'block_number': 0,  # Default block number for tensors
-                        'state': state_data.tolist()  # Convert tensor to list for JSON serialization
-                    }
-                else:
-                    logging.error(f"Unsupported data type in state file: {state_file}")
-            except Exception as e:
-                logging.error(f"Error loading state file {state_file_path}: {e}", exc_info=True)
-        return jsonify(latest_state)
-    except Exception as e:
-        logging.error(f"Error in /latest_state: {e}", exc_info=True)
-        return jsonify({'error': 'Could not retrieve latest state'}), 500
+                    if isinstance(state_data, dict):
+                        latest_state[task_type] = {
+                            'block_number': state_data['block_number'],
+                            'state': state_data['state']
+                        }
+                    elif isinstance(state_data, torch.Tensor):
+                        latest_state[task_type] = {
+                            'block_number': 0,  # Default block number for tensors
+                            'state': state_data.tolist()  # Convert tensor to list for JSON serialization
+                        }
+                    else:
+                        logging.error(f"Unsupported data type in state file: {state_file}")
+                except Exception as e:
+                    logging.error(f"Error loading state file {state_file_path}: {e}", exc_info=True)
+            yield json.dumps(latest_state)
+        except Exception as e:
+            logging.error(f"Error in /latest_state: {e}", exc_info=True)
+            yield json.dumps({'error': 'Could not retrieve latest state'})
+    return Response(stream_with_context(generate()), content_type='application/json')
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")

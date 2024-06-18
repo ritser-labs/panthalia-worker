@@ -317,9 +317,15 @@ class Master:
 
     def wait_for_result(self, task_type, task_id):
         while True:
-            result = self.get_task_result(task_type, task_id)
-            if result:
-                return result
+            try:
+                response = requests.get(f"{self.sot_url}/latest_state", stream=True)
+                for line in response.iter_lines():
+                    if line:
+                        result = json.loads(line)
+                        if result.get('task_type') == task_type and result.get('task_id') == task_id:
+                            return result
+            except Exception as e:
+                logging.error(f"Error waiting for result: {e}")
             time.sleep(1)
 
     def update_sot(self, task_type, result):
