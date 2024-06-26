@@ -29,21 +29,13 @@ app = Flask(__name__)
 
 @app.route('/report_sync', methods=['GET'])
 def report_sync():
-    worker_id = request.args.get('worker_id')
+    task_type = request.args.get('task_type')
+    subnet_id = request.args.get('subnet_id')
     status = request.args.get('status')
-    if worker_id and status:
-        sync_status[worker_id] = status
+    if task_type and subnet_id and status:
         return jsonify({'status': 'success'})
     else:
-        return jsonify({'status': 'error', 'message': 'Missing worker_id or status'}), 400
-
-def wait_for_workers_sync(total_workers, timeout=1200):
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        if len(sync_status) == total_workers and all(status == 'synced' for status in sync_status.values()):
-            return True
-        time.sleep(2)
-    return False
+        return jsonify({'status': 'error', 'message': 'Missing argument'}), 400
 
 def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
     """Wait for the SOT service to be available."""
@@ -149,19 +141,6 @@ if __name__ == "__main__":
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
-
-    # Wait for all workers to sync
-    print("Waiting for all worker processes to sync...")
-    if wait_for_workers_sync(len(worker_processes)):
-        print("All worker processes synced.")
-    else:
-        print("Error: Not all worker processes synced within the timeout period.")
-        for p in worker_processes:
-            p.terminate()
-            p.wait()
-        sot_process.terminate()
-        sot_log_thread.join()
-        exit(1)
 
     # Print master initialization stage
     print("Starting master process...")

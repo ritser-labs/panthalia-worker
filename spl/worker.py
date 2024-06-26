@@ -76,6 +76,8 @@ contract_address = args.subnet_address
 contract = web3.eth.contract(address=contract_address, abi=subnet_manager_abi)
 pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
 
+subnet_id = contract.functions.subnetId().call()
+
 model_initialized = False
 embedding_initialized = False
 tensors = defaultdict(lambda: None)
@@ -151,7 +153,7 @@ def deposit_stake():
     global stake_deposited
     if not stake_deposited:
         tx = pool_contract.functions.depositStake(
-            args.subnet_address,
+            subnet_id,
             args.group
         ).transact({'from': worker_address})
         web3.eth.wait_for_transaction_receipt(tx)
@@ -480,8 +482,7 @@ def check_and_finalize_verifications():
 
 def report_sync_status(status):
     try:
-        hostname = socket.gethostname()
-        url = f"http://localhost:5002/report_sync?worker_id={hostname}&status={status}"
+        url = f"http://localhost:5002/report_sync?task_type={args.task_type}&subnet_id={subnet_id}&status={status}"
         response = requests.get(url)
         if response.status_code == 200:
             logging.info(f"Reported sync status: {status}")
