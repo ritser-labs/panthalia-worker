@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify, Response, stream_with_context
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
+from flask import send_file
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
@@ -258,6 +259,21 @@ def stream_gradients():
     except Exception as e:
         logging.error(f"Error in /stream_gradients: {e}", exc_info=True)
         return jsonify({'error': 'Could not stream gradients'}), 500
+
+@app.route('/tensor_size', methods=['GET'])
+def get_tensor_size():
+    logging.info("Accessing /tensor_size endpoint")
+    tensor_name = request.args.get('tensor_name')
+    if not tensor_name:
+        return jsonify({'error': 'Missing tensor_name parameter'}), 400
+
+    state_file_path = os.path.join(data_dir, f'state/{tensor_name}.pt')
+    if not os.path.exists(state_file_path):
+        return jsonify({'error': 'Tensor not found'}), 404
+
+    tensor = torch.load(state_file_path)
+    size = tensor.numel()
+    return jsonify({'size': size})
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")

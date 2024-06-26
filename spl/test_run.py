@@ -30,9 +30,8 @@ app = Flask(__name__)
 @app.route('/report_sync', methods=['GET'])
 def report_sync():
     task_type = request.args.get('task_type')
-    subnet_id = request.args.get('subnet_id')
     status = request.args.get('status')
-    if task_type and subnet_id and status:
+    if task_type and status:
         return jsonify({'status': 'success'})
     else:
         return jsonify({'status': 'error', 'message': 'Missing argument'}), 400

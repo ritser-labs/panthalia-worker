@@ -17,6 +17,7 @@ from io import BytesIO
 import time
 import os
 import socket
+import tqdm
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):
@@ -147,7 +148,6 @@ def resume_gradient_updates():
     global gradient_update_paused
     gradient_update_paused = False
     apply_gradient_updates()
-
 
 def deposit_stake():
     global stake_deposited
@@ -482,7 +482,10 @@ def check_and_finalize_verifications():
 
 def report_sync_status(status):
     try:
-        url = f"http://localhost:5002/report_sync?task_type={args.task_type}&subnet_id={subnet_id}&status={status}"
+        if "layer_idx" not in args:
+            url = f"http://localhost:5002/report_sync?task_type={args.task_type}&status={status}"
+        else:
+            url = f"http://localhost:5002/report_sync?task_type={args.task_type}&layer_idx={args.layer_idx}&status={status}"
         response = requests.get(url)
         if response.status_code == 200:
             logging.info(f"Reported sync status: {status}")
@@ -514,7 +517,14 @@ def sync_tensors_to_latest_state(task_type):
 def apply_gradient_updates(outdated_tensors):
     try:
         for tensor_name in outdated_tensors:
+            # Fetch tensor size
+            size_response = requests.get(f"{args.sot_url}/tensor_size", params={'tensor_name': tensor_name})
+            size_data = size_response.json()
+            tensor_size = size_data.get('size')
+
             response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_names': tensor_name}, stream=True)
+            pbar = tqdm.tqdm(total=tensor_size, desc=f"Syncing {tensor_name}", unit='elements')
+            
             for line in response.iter_lines():
                 if line:
                     update = json.loads(line)
@@ -529,7 +539,9 @@ def apply_gradient_updates(outdated_tensors):
                             tensors[tensor_name] = tensor
                         grad_update = torch.sparse_coo_tensor(indices, values, shape, device=device).to_dense()
                         tensor.add_(grad_update)
+                        pbar.update(values.numel())
                         last_gradient_update[tensor_name] = update[tensor_name]['block_number']
+            pbar.close()
     except requests.exceptions.RequestException as e:
         logging.error(f"Request exception while updating gradients: {e}")
 
@@ -562,7 +574,6 @@ def main():
             handle_event(event)
         check_and_finalize_verifications()
         time.sleep(10)
-
 
 if __name__ == "__main__":
     main()
