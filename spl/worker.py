@@ -137,51 +137,6 @@ def stream_gradients(task_id, gradients, block_number=0):
     else:
         logging.info(f"Streamed gradients successfully for task {task_id}")
 
-def apply_gradient_updates():
-    global tensors, adam_m, adam_v, last_gradient_update
-
-    try:
-        response = requests.get(f"{args.sot_url}/latest_state", stream=True)
-        for line in response.iter_lines():
-            if line and not gradient_update_paused:
-                try:
-                    update = json.loads(line)
-                except json.JSONDecodeError as e:
-                    logging.error(f"Failed to decode JSON: {e}")
-                    continue
-
-                block_number = update.get('block_number', 0)  # Default to 0 if not present
-                if block_number is None:
-                    logging.error(f"Missing block_number in gradient update: {update}")
-                    continue
-
-                for tensor_name, sparse_update in update.get('gradients', {}).items():
-                    values = torch.tensor(sparse_update['values'], device=device)
-                    indices = torch.tensor(sparse_update['indices'], device=device)
-                    shape = sparse_update['shape']
-
-                    tensor = tensors[tensor_name]
-                    if tensor is None:
-                        tensor = torch.zeros(shape, device=device)
-                        tensors[tensor_name] = tensor
-
-                    grad_update = torch.sparse_coo_tensor(indices, values, shape, device=device).to_dense()
-                    tensor.add_(grad_update)
-                    
-                    last_gradient_update[tensor_name] = block_number
-
-                    if tensor_name in adam_m:
-                        m = adam_m[tensor_name]
-                        v = adam_v[tensor_name]
-                        if m is None:
-                            m = torch.zeros_like(tensor, device=device)
-                            adam_m[tensor_name] = m
-                        if v is None:
-                            v = torch.zeros_like(tensor, device=device)
-                            adam_v[tensor_name] = v
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Request exception in apply_gradient_updates: {e}")
-
 def pause_gradient_updates():
     global gradient_update_paused
     gradient_update_paused = True
@@ -191,26 +146,6 @@ def resume_gradient_updates():
     gradient_update_paused = False
     apply_gradient_updates()
 
-def sync_tensors_to_latest_state():
-    while True:
-        try:
-            response = requests.get(f"{args.sot_url}/latest_state", stream=True)
-            for line in response.iter_lines():
-                if line:
-                    latest_state = json.loads(line)
-                    need_update = False
-                    for tensor_name, state in latest_state.items():
-                        if tensor_name not in tensors or last_gradient_update[tensor_name] < state.get('block_number', -1):
-                            need_update = True
-                            break
-                    if not need_update:
-                        break
-                    apply_gradient_updates()
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Request exception in sync_tensors_to_latest_state: {e}")
-        except json.JSONDecodeError as e:
-            logging.error(f"JSON decode error in sync_tensors_to_latest_state: {e}")
-        time.sleep(1)
 
 def deposit_stake():
     global stake_deposited
@@ -555,23 +490,78 @@ def report_sync_status(status):
     except requests.RequestException as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
+def sync_tensors_to_latest_state(task_type):
+    relevant_tensors = get_relevant_tensors_for_task(task_type)
+    outdated_tensors = []
+    try:
+        response = requests.get(f"{args.sot_url}/latest_state", stream=True)
+        for line in response.iter_lines():
+            if line:
+                latest_state = json.loads(line)
+                for tensor_name in relevant_tensors:
+                    current_block_number = last_gradient_update.get(tensor_name, -1)
+                    latest_block_number = latest_state.get(tensor_name, {}).get('block_number', 0)
+                    if current_block_number < latest_block_number:
+                        outdated_tensors.append(tensor_name)
+                break  # Stop after receiving the latest state once
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request exception in sync_tensors_to_latest_state: {e}")
+
+    if outdated_tensors:
+        apply_gradient_updates(outdated_tensors)  # Update only outdated tensors
+
+def apply_gradient_updates(outdated_tensors):
+    try:
+        for tensor_name in outdated_tensors:
+            response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_names': tensor_name}, stream=True)
+            for line in response.iter_lines():
+                if line:
+                    update = json.loads(line)
+                    if tensor_name in update:
+                        sparse_update = update[tensor_name]['state']
+                        values = torch.tensor(sparse_update['values'], device=device)
+                        indices = torch.tensor(sparse_update['indices'], device=device)
+                        shape = sparse_update['shape']
+                        tensor = tensors.get(tensor_name)
+                        if tensor is None:
+                            tensor = torch.zeros(shape, device=device)
+                            tensors[tensor_name] = tensor
+                        grad_update = torch.sparse_coo_tensor(indices, values, shape, device=device).to_dense()
+                        tensor.add_(grad_update)
+                        last_gradient_update[tensor_name] = update[tensor_name]['block_number']
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request exception while updating gradients: {e}")
+
+def get_relevant_tensors_for_task(task_type):
+    if task_type.startswith('forward_layer') or task_type.startswith('backward_layer'):
+        layer_idx = int(task_type.split('_')[-1])
+        return [f'layer_{layer_idx}_weights', f'layer_{layer_idx}_adam_m', f'layer_{layer_idx}_adam_v']
+    elif task_type in ['embed', 'embed_backward']:
+        return ['embedding_weights', 'embedding_adam_m', 'embedding_adam_v']
+    elif task_type in ['final_logits', 'final_logits_backward']:
+        return ['final_logits_weights', 'final_logits_adam_m', 'final_logits_adam_v']
+    elif task_type == 'loss':
+        return ['logits']
+    return []
+
 def main():
     initialize_model_and_embedding()
     event_filter = contract.events.SolverSelected.create_filter(fromBlock='latest')
 
     # Synchronize tensors to the latest state and report status
     logging.info("Starting tensor synchronization...")
-    sync_tensors_to_latest_state()
+    sync_tensors_to_latest_state(args.task_type)
     report_sync_status('synced')
 
     while True:
-        apply_gradient_updates()
-        sync_tensors_to_latest_state()
+        apply_gradient_updates(args.task_type)
+        sync_tensors_to_latest_state(args.task_type)
         deposit_stake()
         for event in event_filter.get_new_entries():
             handle_event(event)
         check_and_finalize_verifications()
         time.sleep(10)
+
 
 if __name__ == "__main__":
     main()

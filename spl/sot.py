@@ -115,37 +115,6 @@ def publish_result():
         logging.error(f"Error in /publish_result: {e}", exc_info=True)
         return jsonify({'error': 'Could not publish result'}), 500
 
-@app.route('/stream_gradients', methods=['POST'])
-def stream_gradients():
-    logging.info("Accessing /stream_gradients endpoint")
-    data = request.json
-    logging.debug(f"Received data: {data}")
-
-    if not data:
-        logging.error("Empty request data in /stream_gradients")
-        return jsonify({'error': 'Empty request data'}), 400
-
-    task_id = data.get('task_id')
-    gradients = data.get('gradients')
-    block_number = data.get('block_number', 0)
-
-    if not task_id or not gradients:
-        logging.error("Missing task_id or gradients in /stream_gradients request")
-        return jsonify({'error': 'Missing task_id or gradients'}), 400
-
-    try:
-        os.makedirs(os.path.join(data_dir, 'gradients'), exist_ok=True)
-        gradient_data = {
-            'gradients': gradients,
-            'block_number': block_number
-        }
-        with open(os.path.join(data_dir, f'gradients/{task_id}.json'), 'w') as file:
-            json.dump(gradient_data, file)
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        logging.error(f"Error in /stream_gradients: {e}", exc_info=True)
-        return jsonify({'error': 'Could not stream gradients'}), 500
-
 @app.route('/get_batch', methods=['GET'])
 def get_batch():
     logging.info("Accessing /get_batch endpoint")
@@ -234,33 +203,23 @@ def update_adam():
 @app.route('/latest_state', methods=['GET'])
 def latest_state():
     logging.info("Accessing /latest_state endpoint")
+    tensor_names = request.args.get('tensor_names')
+    if tensor_names:
+        tensor_names = tensor_names.split(',')  # Assuming tensor_names are passed as a comma-separated string
+
     def generate():
         try:
             state_files = os.listdir(os.path.join(data_dir, 'state'))
             latest_state = {}
             for state_file in state_files:
+                task_type = state_file.split('.')[0]
+                if tensor_names and task_type not in tensor_names:
+                    continue  # Skip tensors not in the requested list
                 state_file_path = os.path.join(data_dir, 'state', state_file)
                 try:
-                    if state_file.endswith('.json'):
-                        with open(state_file_path, 'r') as file:
-                            state_data = json.load(file)
-                    else:
-                        state_data = torch.load(state_file_path)
-                    task_type = state_file.split('.')[0]
-                    logging.debug(f"Loaded state data type for {state_file}: {type(state_data)}")
-
-                    if isinstance(state_data, dict):
-                        latest_state[task_type] = {
-                            'block_number': state_data['block_number'],
-                            'state': state_data['state']
-                        }
-                    elif isinstance(state_data, torch.Tensor):
-                        latest_state[task_type] = {
-                            'block_number': 0,  # Default block number for tensors
-                            'state': state_data.tolist()  # Convert tensor to list for JSON serialization
-                        }
-                    else:
-                        logging.error(f"Unsupported data type in state file: {state_file}")
+                    with open(state_file_path, 'r') as file:
+                        state_data = json.load(file)
+                        latest_state[task_type] = state_data
                 except Exception as e:
                     logging.error(f"Error loading state file {state_file_path}: {e}", exc_info=True)
             yield json.dumps(latest_state)
@@ -268,6 +227,37 @@ def latest_state():
             logging.error(f"Error in /latest_state: {e}", exc_info=True)
             yield json.dumps({'error': 'Could not retrieve latest state'})
     return Response(stream_with_context(generate()), content_type='application/json')
+
+@app.route('/stream_gradients', methods=['POST'])
+def stream_gradients():
+    logging.info("Accessing /stream_gradients endpoint")
+    data = request.json
+    logging.debug(f"Received data: {data}")
+
+    if not data:
+        logging.error("Empty request data in /stream_gradients")
+        return jsonify({'error': 'Empty request data'}), 400
+
+    task_id = data.get('task_id')
+    gradients = data.get('gradients')
+    block_number = data.get('block_number', 0)
+
+    if not task_id or not gradients:
+        logging.error("Missing task_id or gradients in /stream_gradients request")
+        return jsonify({'error': 'Missing task_id or gradients'}), 400
+
+    try:
+        os.makedirs(os.path.join(data_dir, 'gradients'), exist_ok=True)
+        gradient_data = {
+            'gradients': gradients,
+            'block_number': block_number
+        }
+        with open(os.path.join(data_dir, f'gradients/{task_id}.json'), 'w') as file:
+            json.dump(gradient_data, file)
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        logging.error(f"Error in /stream_gradients: {e}", exc_info=True)
+        return jsonify({'error': 'Could not stream gradients'}), 500
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")
