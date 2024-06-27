@@ -9,6 +9,7 @@ from datasets import load_dataset
 from flask import send_file
 
 app = Flask(__name__)
+sync_status = {}
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
     logging.FileHandler("sot.log"),
     logging.StreamHandler()
@@ -274,6 +275,25 @@ def get_tensor_size():
     tensor = torch.load(state_file_path)
     size = tensor.numel()
     return jsonify({'size': size})
+
+@app.route('/report_stake', methods=['POST'])
+def report_stake():
+    data = request.json
+    worker_address = data.get('worker_address')
+    if worker_address:
+        sync_status[worker_address] = 'staked'
+        return jsonify({'status': 'success'})
+    else:
+        return jsonify({'status': 'error', 'message': 'Missing worker_address'}), 400
+
+@app.route('/check_stake', methods=['GET'])
+def check_stake():
+    total_workers = int(request.args.get('total_workers', 0))
+    staked_workers = len(sync_status)
+    if staked_workers >= total_workers:
+        return jsonify({'status': 'all_staked'})
+    else:
+        return jsonify({'status': 'waiting', 'staked_workers': staked_workers, 'total_workers': total_workers})
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")

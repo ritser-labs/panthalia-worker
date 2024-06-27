@@ -159,6 +159,19 @@ def deposit_stake():
         web3.eth.wait_for_transaction_receipt(tx)
         stake_deposited = True
 
+        # Report staking status
+        report_stake_status()
+
+def report_stake_status():
+    try:
+        response = requests.post(f"{args.sot_url}/report_stake", json={'worker_address': worker_address})
+        if response.status_code == 200:
+            logging.info(f"Reported staking status for worker {worker_address}")
+        else:
+            logging.error(f"Failed to report staking status for worker {worker_address}: {response.text}")
+    except requests.RequestException as e:
+        logging.error(f"Exception while reporting staking status for worker {worker_address}: {e}")
+
 def handle_event(event):
     task_id = event['args']['taskId']
     solver = event['args']['solver']

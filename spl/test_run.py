@@ -32,6 +32,7 @@ def report_sync():
     task_type = request.args.get('task_type')
     status = request.args.get('status')
     if task_type and status:
+        sync_status[task_type] = status
         return jsonify({'status': 'success'})
     else:
         return jsonify({'status': 'error', 'message': 'Missing argument'}), 400
@@ -55,6 +56,17 @@ def read_logs(process):
         print(line.decode(), end='')
     for line in process.stderr:
         print(line.decode(), end='')
+
+def wait_for_workers_to_sync(worker_count, timeout=600):
+    """Wait for all workers to sync their deposit stake."""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if len(sync_status) >= worker_count and all(status == 'synced' for status in sync_status.values()):
+            print("All workers have synced.")
+            return True
+        time.sleep(2)
+    print("Timeout waiting for workers to sync.")
+    return False
 
 if __name__ == "__main__":
     # Start Flask server in a separate thread
@@ -111,6 +123,9 @@ if __name__ == "__main__":
     # Print worker initialization stage
     print("Starting worker processes...")
 
+    # Calculate the number of workers
+    worker_count = len(subnet_addresses)
+
     # Start worker.py for each subnet
     for index, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
         # Determine base_task_type correctly
@@ -140,6 +155,16 @@ if __name__ == "__main__":
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
+
+    # Wait for all workers to sync
+    if not wait_for_workers_to_sync(worker_count):
+        print("Error: Not all workers synced within the timeout period.")
+        for p in worker_processes:
+            p.terminate()
+            p.wait()
+        sot_process.terminate()
+        sot_log_thread.join()
+        exit(1)
 
     # Print master initialization stage
     print("Starting master process...")
