@@ -7,10 +7,11 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from dataclasses import dataclass
 from web3 import Web3
+from web3.exceptions import ContractCustomError
 from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
-from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file, transact_with_contract_function
+from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional
 from io import BytesIO
@@ -76,6 +77,11 @@ pool_abi = load_abi('Pool')
 contract_address = args.subnet_address
 contract = web3.eth.contract(address=contract_address, abi=subnet_manager_abi)
 pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
+
+token_address = contract.functions.token().call()
+token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+
+stake_amount = contract.functions.solverStakeAmount().call()
 
 subnet_id = contract.functions.subnetId().call()
 
@@ -153,15 +159,22 @@ def deposit_stake():
     global stake_deposited
     if not stake_deposited:
         try:
-            transaction_params = {'from': worker_address}
-            receipt = transact_with_contract_function(
-                web3,
-                pool_contract.functions.depositStake(subnet_id, args.group),
-                transaction_params
-            )
+            approve_tx = token_contract.functions.approve(
+                args.pool_address,
+                stake_amount
+            ).transact({'from': worker_address})
+            web3.eth.wait_for_transaction_receipt(approve_tx)
+            tx = pool_contract.functions.depositStake(
+                subnet_id,
+                args.group
+            ).transact({'from': worker_address})
+            web3.eth.wait_for_transaction_receipt(tx)
             stake_deposited = True
             # Report staking status
             report_stake_status()
+        except ContractCustomError as e:
+            error_selectors = load_error_selectors(web3)
+            handle_contract_custom_error(web3, error_selectors, e)
         except Exception as e:
             logging.error(f"Failed to deposit stake: {e}")
             raise
