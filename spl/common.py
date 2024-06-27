@@ -9,6 +9,7 @@ import time
 from io import BytesIO
 import requests
 from web3 import Web3
+import web3
 
 # Define the new tokenizer and model arguments
 tokenizer = Tokenizer('cl100k_base')
@@ -139,10 +140,14 @@ def handle_contract_custom_error(web3, error_selectors, e):
             decoded_params = web3.codec.decode([input['type'] for input in inputs], data)
             param_str = ', '.join(f"{input['name']}: {value}" for input, value in zip(inputs, decoded_params))
             logging.error(f"Contract Custom Error {error_name}: {param_str}")
+            raise ValueError(f"Contract Custom Error {error_name}: {param_str}")
         else:
             logging.error(f"Unknown error with selector {selector} and data {data.hex()}")
+            raise ValueError(f"Unknown error with selector {selector} and data {data.hex()}")
     except Exception as decode_err:
         logging.error(f"Failed to decode error data: {e.data}. Error: {decode_err}")
+        raise
+
 
 def decode_custom_error(web3, error_selectors, error_bytes):
     try:
@@ -160,4 +165,16 @@ def decode_custom_error(web3, error_selectors, error_bytes):
             return f"Unknown error with selector {selector} and data {data.hex()}"
     except Exception as e:
         logging.error(f"Error decoding message chunk: {e}")
+        raise
+
+def transact_with_contract_function(w3, contract_function, *args, **kwargs):
+    try:
+        txn_hash = contract_function.transact(*args, **kwargs)
+        return w3.eth.wait_for_transaction_receipt(txn_hash)
+    except web3.exceptions.ContractCustomError as e:
+        error_selectors = load_error_selectors(w3)
+        handle_contract_custom_error(w3, error_selectors, e)
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error during transaction: {e}")
         raise

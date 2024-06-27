@@ -10,7 +10,7 @@ from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
-from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file
+from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file, transact_with_contract_function
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional
 from io import BytesIO
@@ -152,15 +152,21 @@ def resume_gradient_updates():
 def deposit_stake():
     global stake_deposited
     if not stake_deposited:
-        tx = pool_contract.functions.depositStake(
-            subnet_id,
-            args.group
-        ).transact({'from': worker_address})
-        web3.eth.wait_for_transaction_receipt(tx)
-        stake_deposited = True
+        try:
+            receipt = transact_with_contract_function(
+                web3,
+                pool_contract.functions.depositStake,
+                subnet_id,
+                args.group,
+                {'from': worker_address}
+            )
+            stake_deposited = True
+            # Report staking status
+            report_stake_status()
+        except Exception as e:
+            logging.error(f"Failed to deposit stake: {e}")
+            raise
 
-        # Report staking status
-        report_stake_status()
 
 def report_stake_status():
     try:
