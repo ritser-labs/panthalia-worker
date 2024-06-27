@@ -167,9 +167,9 @@ def decode_custom_error(web3, error_selectors, error_bytes):
         logging.error(f"Error decoding message chunk: {e}")
         raise
 
-def transact_with_contract_function(w3, contract_function, *args, **kwargs):
+def transact_with_contract_function(w3, contract_function, transaction_params):
     try:
-        txn_hash = contract_function.transact(*args, **kwargs)
+        txn_hash = contract_function.transact(transaction_params)
         return w3.eth.wait_for_transaction_receipt(txn_hash)
     except web3.exceptions.ContractCustomError as e:
         error_selectors = load_error_selectors(w3)

@@ -153,12 +153,11 @@ def deposit_stake():
     global stake_deposited
     if not stake_deposited:
         try:
+            transaction_params = {'from': worker_address}
             receipt = transact_with_contract_function(
                 web3,
-                pool_contract.functions.depositStake,
-                subnet_id,
-                args.group,
-                {'from': worker_address}
+                pool_contract.functions.depositStake(subnet_id, args.group),
+                transaction_params
             )
             stake_deposited = True
             # Report staking status
