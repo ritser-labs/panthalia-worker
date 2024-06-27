@@ -159,17 +159,38 @@ def deposit_stake():
     global stake_deposited
     if not stake_deposited:
         try:
+            # Approve transaction
             approve_tx = token_contract.functions.approve(
                 args.pool_address,
                 stake_amount
-            ).transact({'from': worker_address})
-            web3.eth.wait_for_transaction_receipt(approve_tx)
-            tx = pool_contract.functions.depositStake(
+            ).build_transaction({
+                'chainId': web3.eth.chain_id,
+                'gas': 200000,
+                'gasPrice': web3.eth.gas_price,
+                'nonce': web3.eth.get_transaction_count(worker_address),
+            })
+
+            signed_approve_tx = web3.eth.account.sign_transaction(approve_tx, private_key=args.private_key)
+            approve_tx_hash = web3.eth.send_raw_transaction(signed_approve_tx.rawTransaction)
+            web3.eth.wait_for_transaction_receipt(approve_tx_hash)
+
+            # Deposit stake transaction
+            deposit_tx = pool_contract.functions.depositStake(
                 subnet_id,
                 args.group
-            ).transact({'from': worker_address})
-            web3.eth.wait_for_transaction_receipt(tx)
+            ).build_transaction({
+                'chainId': web3.eth.chain_id,
+                'gas': 500000,
+                'gasPrice': web3.eth.gas_price,
+                'nonce': web3.eth.get_transaction_count(worker_address),
+            })
+
+            signed_deposit_tx = web3.eth.account.sign_transaction(deposit_tx, private_key=args.private_key)
+            deposit_tx_hash = web3.eth.send_raw_transaction(signed_deposit_tx.rawTransaction)
+            web3.eth.wait_for_transaction_receipt(deposit_tx_hash)
+
             stake_deposited = True
+
             # Report staking status
             report_stake_status()
         except ContractCustomError as e:
