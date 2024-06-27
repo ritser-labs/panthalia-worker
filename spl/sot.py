@@ -168,13 +168,8 @@ def update_state():
 
     try:
         os.makedirs(os.path.join(data_dir, 'state'), exist_ok=True)
-        state_data = {
-            'state': result,
-            'block_number': block_number
-        }
-        state_file_path = os.path.join(data_dir, f'state/{task_type}.json')
-        with open(state_file_path, 'w') as file:
-            json.dump(state_data, file)
+        state_file_path = os.path.join(data_dir, f'state/{task_type}.pt')
+        torch.save(torch.tensor(result), state_file_path)
         return jsonify({'status': 'success'})
     except Exception as e:
         logging.error(f"Error in /update_state: {e}", exc_info=True)
@@ -219,13 +214,8 @@ def latest_state():
                     continue  # Skip tensors not in the requested list
                 state_file_path = os.path.join(data_dir, 'state', state_file)
                 try:
-                    if state_file_path.endswith('.pt'):
-                        state_data = torch.load(state_file_path)
-                        latest_state[task_type] = state_data.tolist()  # Convert tensor to list for JSON serialization
-                    else:
-                        with open(state_file_path, 'r') as file:
-                            state_data = json.load(file)
-                            latest_state[task_type] = state_data
+                    state_data = torch.load(state_file_path)
+                    latest_state[task_type] = state_data.tolist()  # Convert tensor to list for JSON serialization
                 except Exception as e:
                     logging.error(f"Error loading state file {state_file_path}: {e}", exc_info=True)
             yield json.dumps(latest_state)
