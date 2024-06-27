@@ -6,7 +6,9 @@ import argparse
 import requests
 import threading
 from flask import Flask, request, jsonify
-from common import model_args
+from common import model_args, load_abi
+from web3 import Web3
+from eth_account import Account
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -14,7 +16,7 @@ def parse_args():
     parser.add_argument('--deployment_config', type=str, required=True, help="Path to the deployment configuration JSON file")
     parser.add_argument('--rpc_url', type=str, default='http://localhost:8545', help="URL of the Ethereum RPC node")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
-    parser.add_argument('--private_key', type=str, required=True, help="Private key of the worker's Ethereum account")
+    parser.add_argument('--private_key', type=str, required=True, help="Private key of the deployer's Ethereum account")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='local_storage', help="Directory for local storage of files")
     parser.add_argument('--forge_script', type=str, default='script/Deploy.s.sol', help="Path to the Forge deploy script")
@@ -68,6 +70,36 @@ def wait_for_workers_to_sync(worker_count, timeout=600):
     print("Timeout waiting for workers to sync.")
     return False
 
+def generate_wallets(num_wallets):
+    wallets = []
+    for _ in range(num_wallets):
+        account = Account.create()
+        wallets.append({'private_key': account._private_key.hex(), 'address': account.address})
+    return wallets
+
+def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token):
+    for wallet in wallets:
+        tx = {
+            'to': wallet['address'],
+            'value': web3.to_wei(amount_eth, 'ether'),
+            'gas': 21000,
+            'gasPrice': web3.eth.gas_price,
+            'nonce': web3.eth.get_transaction_count(deployer_address)
+        }
+        signed_tx = web3.eth.account.sign_transaction(tx, args.private_key)
+        web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        web3.eth.wait_for_transaction_receipt(signed_tx.hash)
+        
+        tx = token_contract.functions.transfer(wallet['address'], amount_token).build_transaction({
+            'chainId': web3.eth.chain_id,
+            'gas': 100000,
+            'gasPrice': web3.eth.gas_price,
+            'nonce': web3.eth.get_transaction_count(deployer_address)
+        })
+        signed_tx = web3.eth.account.sign_transaction(tx, args.private_key)
+        web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        web3.eth.wait_for_transaction_receipt(signed_tx.hash)
+
 if __name__ == "__main__":
     # Start Flask server in a separate thread
     flask_thread = threading.Thread(target=lambda: app.run(port=5002))
@@ -102,6 +134,18 @@ if __name__ == "__main__":
 
     pool_address = deployment_config['pool']
 
+    web3 = Web3(Web3.HTTPProvider(args.rpc_url))
+    deployer_account = web3.eth.account.from_key(args.private_key)
+    deployer_address = deployer_account.address
+    pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
+    token_address = pool_contract.functions.token().call()
+    token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+
+    # Generate wallets and fund them
+    num_wallets = len(subnet_addresses)
+    wallets = generate_wallets(num_wallets)
+    fund_wallets(web3, wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+
     worker_processes = []
 
     # Print SOT service initialization stage
@@ -123,9 +167,6 @@ if __name__ == "__main__":
     # Print worker initialization stage
     print("Starting worker processes...")
 
-    # Calculate the number of workers
-    worker_count = len(subnet_addresses)
-
     # Start worker.py for each subnet
     for index, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
         # Determine base_task_type correctly
@@ -138,11 +179,15 @@ if __name__ == "__main__":
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
+
+        # Select the corresponding wallet for each worker
+        wallet = wallets[index]
+
         command = [
             'python', 'worker.py',
             '--task_type', base_task_type,
             '--subnet_address', subnet_address,
-            '--private_key', args.private_key,
+            '--private_key', wallet['private_key'],
             '--rpc_url', args.rpc_url,
             '--sot_url', args.sot_url,
             '--pool_address', pool_address,
@@ -157,7 +202,7 @@ if __name__ == "__main__":
         print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
 
     # Wait for all workers to sync
-    if not wait_for_workers_to_sync(worker_count):
+    if not wait_for_workers_to_sync(num_wallets):
         print("Error: Not all workers synced within the timeout period.")
         for p in worker_processes:
             p.terminate()
