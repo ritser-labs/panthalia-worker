@@ -19,20 +19,20 @@ if not os.path.exists(data_dir):
     os.makedirs(data_dir)
 
 logging.info("Initializing or loading initial state...")
-initial_state = {}
 state_dir = os.path.join(data_dir, 'state')
 os.makedirs(state_dir, exist_ok=True)
 
 def initialize_tensor(name, shape, random_init=True):
     file_path = os.path.join(state_dir, f'{name}.pt')
     if os.path.exists(file_path):
-        initial_state[name] = torch.load(file_path)
+        #tensor = torch.load(file_path)
+        pass
     else:
         if random_init:
-            initial_state[name] = torch.randn(*shape)
+            tensor = torch.randn(*shape)
         else:
-            initial_state[name] = torch.zeros(*shape)
-        torch.save(initial_state[name], file_path)
+            tensor = torch.zeros(*shape)
+        torch.save(tensor, file_path)
 
 initialize_tensor('embed', (model_args.max_seq_len, model_args.dim))
 initialize_tensor('embed_adam_m', (model_args.max_seq_len, model_args.dim), random_init=False)
