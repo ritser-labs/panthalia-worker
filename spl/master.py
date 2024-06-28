@@ -228,7 +228,7 @@ class Master:
             task = self.contracts[task_type].functions.getTask(task_id).call()
             if task[0] == 4:  # Assuming TaskStatus.ResolvedCorrect is 4
                 result_data = json.loads(task[6].decode('utf-8'))  # Decode the result field
-                return result_data.get('result_url')
+                return result_data
             return None
         except Exception as e:
             logging.error(f"Error getting task result for {task_type} with task ID {task_id}: {e}")
@@ -242,8 +242,9 @@ class Master:
         self.update_sot('embed', embed_result)
 
         for layer_idx in range(model_params['n_layers']):
-            layer_inputs_url = self.handle_layer_forward(layer_idx, layer_inputs_url, model_params)
-            self.update_sot(f'forward_layer_{layer_idx}', layer_inputs_url)
+            layer_result = self.handle_layer_forward(layer_idx, layer_inputs_url, model_params)
+            layer_inputs_url = layer_result['result_url']
+            self.update_sot(f'forward_layer_{layer_idx}', layer_result)
 
         final_logits_result = self.handle_final_logits_forward(layer_inputs_url)
         self.update_sot('final_logits', final_logits_result)
@@ -253,8 +254,9 @@ class Master:
 
         error_url = loss_result['result_url']
         for layer_idx in reversed(range(model_params['n_layers'])):
-            error_url = self.handle_layer_backward(layer_idx, error_url, model_params)
-            self.update_sot(f'backward_layer_{layer_idx}', error_url)
+            layer_result = self.handle_layer_backward(layer_idx, error_url, model_params)
+            error_url = layer_result['error_output_url']
+            self.update_sot(f'backward_layer_{layer_idx}', layer_result)
 
         final_logits_backward_result = self.handle_final_logits_backward(error_url, final_logits_result['result_url'], model_params)
         self.update_sot('final_logits_backward', final_logits_backward_result)
@@ -270,28 +272,29 @@ class Master:
         batch_url = self.get_batch_url()
         task_params = {'batch_url': batch_url, 'model_params': model_params}
         task_id = self.submit_task('embed', task_params)
-        result_url = self.wait_for_result('embed', task_id)
-        return {'result_url': result_url, 'batch_url': batch_url}
+        result = self.wait_for_result('embed', task_id)
+        result['batch_url'] = batch_url
+        return result
 
     def handle_layer_forward(self, layer_idx, inputs_url, model_params):
         task_type = f'forward_layer_{layer_idx}'
         task_params = {'layer_idx': layer_idx, 'inputs_url': inputs_url, 'model_params': model_params}
         task_id = self.submit_task(task_type, task_params)
-        result_url = self.wait_for_result(task_type, task_id)
-        return {'result_url': result_url}
+        result = self.wait_for_result(task_type, task_id)
+        return result
 
     def handle_final_logits_forward(self, inputs_url):
         task_params = {'inputs_url': inputs_url}
         task_id = self.submit_task('final_logits', task_params)
-        result_url = self.wait_for_result('final_logits', task_id)
-        return {'result_url': result_url}
+        result = self.wait_for_result('final_logits', task_id)
+        return result
 
     def handle_loss_computation(self, logits_url):
         targets_url = self.get_targets_url()
         task_params = {'logits_url': logits_url, 'targets_url': targets_url}
         task_id = self.submit_task('loss', task_params)
-        result_url = self.wait_for_result('loss', task_id)
-        return {'result_url': result_url}
+        result = self.wait_for_result('loss', task_id)
+        return result
 
     def handle_layer_backward(self, layer_idx, error_url, model_params):
         task_type = f'backward_layer_{layer_idx}'
@@ -299,7 +302,7 @@ class Master:
         task_id = self.submit_task(task_type, task_params)
         result = self.wait_for_result(task_type, task_id)
         self.update_adam_state(task_type, result['adam_m_url'], result['adam_v_url'])
-        return result['error_output_url']
+        return result
 
     def handle_final_logits_backward(self, error_url, inputs_url, model_params):
         task_params = {'error_url': error_url, 'inputs_url': inputs_url, 'model_params': model_params}
@@ -317,9 +320,9 @@ class Master:
 
     def wait_for_result(self, task_type, task_id):
         while True:
-            result_url = self.get_task_result(task_type, task_id)
-            if result_url:
-                return result_url
+            result = self.get_task_result(task_type, task_id)
+            if result:
+                return result
             time.sleep(5)
 
     def update_sot(self, task_type, result):
