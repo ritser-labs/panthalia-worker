@@ -585,7 +585,7 @@ def apply_gradient_updates(tensor_name):
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
-    if task_type.startswith('forward_layer') or task_type.startswith('backward_layer'):
+    if task_type.startswith('forward') or task_type.startswith('backward'):
         relevant_tensors = [
             f'layer_{args.layer_idx}',
             f'layer_{args.layer_idx}_adam_m',
