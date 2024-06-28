@@ -26,22 +26,54 @@ initial_state = {}
 state_dir = os.path.join(data_dir, 'state')
 os.makedirs(state_dir, exist_ok=True)
 
-for layer in ["embed", "final_logits", "final_logits_backward", "embed_backward"]:
-    state_file_path = os.path.join(state_dir, f'{layer}.pt')
-    if os.path.exists(state_file_path):
-        initial_state[layer] = torch.load(state_file_path)
-    else:
-        initial_state[layer] = torch.randn(model_args.max_seq_len, model_args.dim)
-        torch.save(initial_state[layer], state_file_path)
+# Initialize embedding tensors
+embed_file_path = os.path.join(state_dir, 'embed.pt')
+if os.path.exists(embed_file_path):
+    initial_state['embed'] = torch.load(embed_file_path)
+else:
+    initial_state['embed'] = torch.randn(model_args.max_seq_len, model_args.dim)
+    torch.save(initial_state['embed'], embed_file_path)
 
+for adam in ['embed_adam_m', 'embed_adam_v']:
+    adam_file_path = os.path.join(state_dir, f'{adam}.pt')
+    if os.path.exists(adam_file_path):
+        initial_state[adam] = torch.load(adam_file_path)
+    else:
+        initial_state[adam] = torch.zeros(model_args.max_seq_len, model_args.dim)
+        torch.save(initial_state[adam], adam_file_path)
+
+# Initialize layer tensors
 for i in range(model_args.n_layers):
-    for layer in [f"forward_layer_{i}", f"backward_layer_{i}"]:
-        state_file_path = os.path.join(state_dir, f'{layer}.pt')
-        if os.path.exists(state_file_path):
-            initial_state[layer] = torch.load(state_file_path)
+    layer_file_path = os.path.join(state_dir, f'layer_{i}.pt')
+    if os.path.exists(layer_file_path):
+        initial_state[f'layer_{i}'] = torch.load(layer_file_path)
+    else:
+        initial_state[f'layer_{i}'] = torch.randn(model_args.max_seq_len, model_args.dim)
+        torch.save(initial_state[f'layer_{i}'], layer_file_path)
+    
+    for adam in [f"layer_{i}_adam_m", f"layer_{i}_adam_v"]:
+        adam_file_path = os.path.join(state_dir, f'{adam}.pt')
+        if os.path.exists(adam_file_path):
+            initial_state[adam] = torch.load(adam_file_path)
         else:
-            initial_state[layer] = torch.randn(model_args.max_seq_len, model_args.dim)
-            torch.save(initial_state[layer], state_file_path)
+            initial_state[adam] = torch.zeros(model_args.max_seq_len, model_args.dim)
+            torch.save(initial_state[adam], adam_file_path)
+
+# Initialize final logits tensors
+final_logits_file_path = os.path.join(state_dir, 'final_logits.pt')
+if os.path.exists(final_logits_file_path):
+    initial_state['final_logits'] = torch.load(final_logits_file_path)
+else:
+    initial_state['final_logits'] = torch.randn(model_args.max_seq_len, model_args.dim)
+    torch.save(initial_state['final_logits'], final_logits_file_path)
+
+for adam in ['final_logits_adam_m', 'final_logits_adam_v']:
+    adam_file_path = os.path.join(state_dir, f'{adam}.pt')
+    if os.path.exists(adam_file_path):
+        initial_state[adam] = torch.load(adam_file_path)
+    else:
+        initial_state[adam] = torch.zeros(model_args.max_seq_len, model_args.dim)
+        torch.save(initial_state[adam], adam_file_path)
 
 logging.info("Loading Wikipedia dataset...")
 dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
@@ -200,25 +232,24 @@ def update_adam():
 @app.route('/latest_state', methods=['GET'])
 def latest_state():
     logging.info("Accessing /latest_state endpoint")
-    tensor_names = request.args.get('tensor_names')
-    if tensor_names:
-        tensor_names = tensor_names.split(',')  # Assuming tensor_names are passed as a comma-separated string
+    tensor_name = request.args.get('tensor_name')
+    if not tensor_name:
+        return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
     def generate():
         try:
-            state_files = os.listdir(os.path.join(data_dir, 'state'))
-            latest_state = {}
-            for state_file in state_files:
-                task_type = state_file.split('.')[0]
-                if tensor_names and task_type not in tensor_names:
-                    continue  # Skip tensors not in the requested list
-                state_file_path = os.path.join(data_dir, 'state', state_file)
-                try:
-                    state_data = torch.load(state_file_path)
-                    latest_state[task_type] = state_data.tolist()  # Convert tensor to list for JSON serialization
-                except Exception as e:
-                    logging.error(f"Error loading state file {state_file_path}: {e}", exc_info=True)
-            yield json.dumps(latest_state)
+            state_file_path = os.path.join(data_dir, 'state', f'{tensor_name}.pt')
+            if os.path.exists(state_file_path):
+                state_data = torch.load(state_file_path)
+                latest_state = {
+                    tensor_name: {
+                        'state': state_data.tolist(),  # Convert tensor to list for JSON serialization
+                        'block_number': sync_status.get(tensor_name, 0)
+                    }
+                }
+                yield json.dumps(latest_state)
+            else:
+                yield json.dumps({'error': 'Tensor not found'})
         except Exception as e:
             logging.error(f"Error in /latest_state: {e}", exc_info=True)
             yield json.dumps({'error': 'Could not retrieve latest state'})
