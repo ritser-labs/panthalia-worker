@@ -170,7 +170,7 @@ def deposit_stake():
                 'nonce': web3.eth.get_transaction_count(worker_address),
             })
 
-            signed_approve_tx = web3.eth.account.sign_transaction(approve_tx, private_key=args.private_key)
+            signed_approve_tx = worker_account.sign_transaction(approve_tx)
             approve_tx_hash = web3.eth.send_raw_transaction(signed_approve_tx.rawTransaction)
             web3.eth.wait_for_transaction_receipt(approve_tx_hash)
 
@@ -185,7 +185,7 @@ def deposit_stake():
                 'nonce': web3.eth.get_transaction_count(worker_address),
             })
 
-            signed_deposit_tx = web3.eth.account.sign_transaction(deposit_tx, private_key=args.private_key)
+            signed_deposit_tx = worker_account.sign_transaction(deposit_tx)
             deposit_tx_hash = web3.eth.send_raw_transaction(signed_deposit_tx.rawTransaction)
             web3.eth.wait_for_transaction_receipt(deposit_tx_hash)
 
