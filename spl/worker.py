@@ -597,6 +597,8 @@ def get_relevant_tensors_for_task(task_type):
         relevant_tensors = ['final_logits', 'final_logits_adam_m', 'final_logits_adam_v']
     elif task_type == 'loss':
         relevant_tensors = []
+    else:
+        raise ValueError(f"Invalid task type: {task_type}")
     return relevant_tensors
 
 def main():
