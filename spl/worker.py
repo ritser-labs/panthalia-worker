@@ -538,7 +538,7 @@ def check_and_finalize_verifications():
 
 def report_sync_status(status):
     try:
-        if hasattr(args, 'layer_idx'):
+        if hasattr(args, 'layer_idx') and args.layer_idx is not None:
             url = f"http://localhost:5002/report_sync?task_type={args.task_type}&layer_idx={args.layer_idx}&status={status}"
         else:
             url = f"http://localhost:5002/report_sync?task_type={args.task_type}&status={status}"
@@ -586,11 +586,10 @@ def apply_gradient_updates(tensor_name):
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
     if task_type.startswith('forward_layer') or task_type.startswith('backward_layer'):
-        layer_idx = int(task_type.split('_')[-1])
         relevant_tensors = [
-            f'layer_{layer_idx}',
-            f'layer_{layer_idx}_adam_m',
-            f'layer_{layer_idx}_adam_v'
+            f'layer_{args.layer_idx}',
+            f'layer_{args.layer_idx}_adam_m',
+            f'layer_{args.layer_idx}_adam_v'
         ]
     elif task_type in ['embed', 'embed_backward']:
         relevant_tensors = ['embed', 'embed_adam_m', 'embed_adam_v']
