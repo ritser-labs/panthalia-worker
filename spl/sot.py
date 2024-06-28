@@ -2,11 +2,10 @@ import os
 import json
 import logging
 import threading
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, send_file
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
-from flask import send_file
 
 app = Flask(__name__)
 sync_status = {}
@@ -15,71 +14,43 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(mes
     logging.StreamHandler()
 ])
 
-# Ensure the data directory exists
 data_dir = 'data'
 if not os.path.exists(data_dir):
     os.makedirs(data_dir)
 
-# Initialize or load initial state
 logging.info("Initializing or loading initial state...")
 initial_state = {}
 state_dir = os.path.join(data_dir, 'state')
 os.makedirs(state_dir, exist_ok=True)
 
-# Initialize embedding tensors
-embed_file_path = os.path.join(state_dir, 'embed.pt')
-if os.path.exists(embed_file_path):
-    initial_state['embed'] = torch.load(embed_file_path)
-else:
-    initial_state['embed'] = torch.randn(model_args.max_seq_len, model_args.dim)
-    torch.save(initial_state['embed'], embed_file_path)
-
-for adam in ['embed_adam_m', 'embed_adam_v']:
-    adam_file_path = os.path.join(state_dir, f'{adam}.pt')
-    if os.path.exists(adam_file_path):
-        initial_state[adam] = torch.load(adam_file_path)
+def initialize_tensor(name, shape, random_init=True):
+    file_path = os.path.join(state_dir, f'{name}.pt')
+    if os.path.exists(file_path):
+        initial_state[name] = torch.load(file_path)
     else:
-        initial_state[adam] = torch.zeros(model_args.max_seq_len, model_args.dim)
-        torch.save(initial_state[adam], adam_file_path)
-
-# Initialize layer tensors
-for i in range(model_args.n_layers):
-    layer_file_path = os.path.join(state_dir, f'layer_{i}.pt')
-    if os.path.exists(layer_file_path):
-        initial_state[f'layer_{i}'] = torch.load(layer_file_path)
-    else:
-        initial_state[f'layer_{i}'] = torch.randn(model_args.max_seq_len, model_args.dim)
-        torch.save(initial_state[f'layer_{i}'], layer_file_path)
-    
-    for adam in [f"layer_{i}_adam_m", f"layer_{i}_adam_v"]:
-        adam_file_path = os.path.join(state_dir, f'{adam}.pt')
-        if os.path.exists(adam_file_path):
-            initial_state[adam] = torch.load(adam_file_path)
+        if random_init:
+            initial_state[name] = torch.randn(*shape)
         else:
-            initial_state[adam] = torch.zeros(model_args.max_seq_len, model_args.dim)
-            torch.save(initial_state[adam], adam_file_path)
+            initial_state[name] = torch.zeros(*shape)
+        torch.save(initial_state[name], file_path)
 
-# Initialize final logits tensors
-final_logits_file_path = os.path.join(state_dir, 'final_logits.pt')
-if os.path.exists(final_logits_file_path):
-    initial_state['final_logits'] = torch.load(final_logits_file_path)
-else:
-    initial_state['final_logits'] = torch.randn(model_args.max_seq_len, model_args.dim)
-    torch.save(initial_state['final_logits'], final_logits_file_path)
+initialize_tensor('embed', (model_args.max_seq_len, model_args.dim))
+initialize_tensor('embed_adam_m', (model_args.max_seq_len, model_args.dim), random_init=False)
+initialize_tensor('embed_adam_v', (model_args.max_seq_len, model_args.dim), random_init=False)
 
-for adam in ['final_logits_adam_m', 'final_logits_adam_v']:
-    adam_file_path = os.path.join(state_dir, f'{adam}.pt')
-    if os.path.exists(adam_file_path):
-        initial_state[adam] = torch.load(adam_file_path)
-    else:
-        initial_state[adam] = torch.zeros(model_args.max_seq_len, model_args.dim)
-        torch.save(initial_state[adam], adam_file_path)
+for i in range(model_args.n_layers):
+    initialize_tensor(f'layer_{i}', (model_args.max_seq_len, model_args.dim))
+    initialize_tensor(f'layer_{i}_adam_m', (model_args.max_seq_len, model_args.dim), random_init=False)
+    initialize_tensor(f'layer_{i}_adam_v', (model_args.max_seq_len, model_args.dim), random_init=False)
+
+initialize_tensor('final_logits', (model_args.max_seq_len, model_args.dim))
+initialize_tensor('final_logits_adam_m', (model_args.max_seq_len, model_args.dim), random_init=False)
+initialize_tensor('final_logits_adam_v', (model_args.max_seq_len, model_args.dim), random_init=False)
 
 logging.info("Loading Wikipedia dataset...")
 dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
 dataset_iter = iter(dataset)
 
-# Global variable to store pre-loaded batch
 preloaded_batch = None
 batch_lock = threading.Lock()
 
@@ -99,7 +70,6 @@ def preload_batch():
                 allowed_special=set(), 
                 disallowed_special=(), 
             )
-            # Ensure the length is max_seq_len by padding if necessary
             if len(tokens) < max_seq_len:
                 tokens += [tokenizer.pad_id] * (max_seq_len - len(tokens))
             elif len(tokens) > max_seq_len:
@@ -111,7 +81,6 @@ def preload_batch():
     if batch:
         preloaded_batch = batch
 
-# Pre-load the first batch
 preload_batch()
 
 @app.route('/health', methods=['GET'])
@@ -160,14 +129,13 @@ def get_batch():
             return jsonify({"error": "No preloaded batch available"}), 404
 
         batch = preloaded_batch
-        preloaded_batch = None  # Clear the current batch to load the next one
+        preloaded_batch = None
 
     try:
         batch_url = os.path.join(data_dir, 'batch.json')
         with open(batch_url, 'w') as file:
             json.dump(batch, file)
         
-        # Pre-load the next batch in a separate thread
         threading.Thread(target=preload_batch).start()
 
         return jsonify({'batch_url': batch_url})
@@ -236,24 +204,15 @@ def latest_state():
     if not tensor_name:
         return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-    def generate():
-        try:
-            state_file_path = os.path.join(data_dir, 'state', f'{tensor_name}.pt')
-            if os.path.exists(state_file_path):
-                state_data = torch.load(state_file_path)
-                latest_state = {
-                    tensor_name: {
-                        'state': state_data.tolist(),  # Convert tensor to list for JSON serialization
-                        'block_number': sync_status.get(tensor_name, 0)
-                    }
-                }
-                yield json.dumps(latest_state)
-            else:
-                yield json.dumps({'error': 'Tensor not found'})
-        except Exception as e:
-            logging.error(f"Error in /latest_state: {e}", exc_info=True)
-            yield json.dumps({'error': 'Could not retrieve latest state'})
-    return Response(stream_with_context(generate()), content_type='application/json')
+    state_file_path = os.path.join(data_dir, 'state', f'{tensor_name}.pt')
+    if not os.path.exists(state_file_path):
+        return jsonify({'error': 'Tensor not found'}), 404
+
+    try:
+        return send_file(state_file_path, mimetype='application/octet-stream')
+    except Exception as e:
+        logging.error(f"Error in /latest_state: {e}", exc_info=True)
+        return jsonify({'error': 'Could not retrieve latest state'}), 500
 
 @app.route('/stream_gradients', methods=['POST'])
 def stream_gradients():

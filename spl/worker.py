@@ -160,7 +160,6 @@ def deposit_stake():
     global stake_deposited
     if not stake_deposited:
         try:
-            # Approve transaction
             approve_tx = token_contract.functions.approve(
                 args.pool_address,
                 stake_amount
@@ -175,7 +174,6 @@ def deposit_stake():
             approve_tx_hash = web3.eth.send_raw_transaction(signed_approve_tx.rawTransaction)
             web3.eth.wait_for_transaction_receipt(approve_tx_hash)
 
-            # Deposit stake transaction
             deposit_tx = pool_contract.functions.depositStake(
                 subnet_id,
                 args.group
@@ -192,7 +190,6 @@ def deposit_stake():
 
             stake_deposited = True
 
-            # Report staking status
             report_stake_status()
         except ContractCustomError as e:
             error_selectors = load_error_selectors(web3)
@@ -200,7 +197,6 @@ def deposit_stake():
         except Exception as e:
             logging.error(f"Failed to deposit stake: {e}")
             raise
-
 
 def report_stake_status():
     try:
@@ -290,7 +286,7 @@ def upload_tensors_and_grads(error_output, grads, layer_idx):
     adam_m_sparse, adam_v_sparse = extract_sparse_adam_params(grads, layer_idx)
     adam_m_url = upload_tensor(adam_m_sparse)
     adam_v_url = upload_tensor(adam_v_sparse)
-    block_number = web3.eth.blockNumber  # Fetch the current block number
+    block_number = web3.eth.blockNumber
     return {
         'error_output_url': error_output_url,
         'grads_url': grads_url,
@@ -552,34 +548,27 @@ def report_sync_status(status):
 
 def sync_tensors_to_latest_state(tensor_name):
     try:
-        response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name}, stream=True)
-        for line in response.iter_lines():
-            if line:
-                latest_state = json.loads(line)
-                if tensor_name in latest_state:
-                    tensor_data = latest_state[tensor_name]
-                    block_number = tensor_data.get('block_number', 0)
-                    if last_gradient_update.get(tensor_name, -1) < block_number:
-                        tensors[tensor_name] = torch.tensor(tensor_data['state'])
-                        last_gradient_update[tensor_name] = block_number
+        response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name})
+        if response.status_code == 200:
+            latest_state = torch.load(BytesIO(response.content))
+            tensors[tensor_name] = latest_state
+            last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
+        else:
+            logging.error(f"Failed to sync tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Request exception in sync_tensors_to_latest_state: {e}")
 
 def apply_gradient_updates(tensor_name):
     try:
-        response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name}, stream=True)
-        for line in response.iter_lines():
-            if line:
-                latest_state = json.loads(line)
-                if tensor_name in latest_state:
-                    tensor_data = latest_state[tensor_name]
-                    block_number = tensor_data.get('block_number', 0)
-                    if last_gradient_update.get(tensor_name, -1) < block_number:
-                        tensor = tensors.get(tensor_name, torch.zeros(tensor_data['shape'], device=device))
-                        sparse_update = torch.sparse_coo_tensor(tensor_data['indices'], tensor_data['values'], tensor_data['shape'], device=device).to_dense()
-                        tensor.add_(sparse_update)
-                        tensors[tensor_name] = tensor
-                        last_gradient_update[tensor_name] = block_number
+        response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name})
+        if response.status_code == 200:
+            latest_state = torch.load(BytesIO(response.content))
+            tensor = tensors.get(tensor_name, torch.zeros_like(latest_state))
+            tensor.add_(latest_state)
+            tensors[tensor_name] = tensor
+            last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
+        else:
+            logging.error(f"Failed to apply gradient updates: {tensor_name}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Request exception while updating gradients: {e}")
 
@@ -605,7 +594,6 @@ def main():
     initialize_model_and_embedding()
     event_filter = contract.events.SolverSelected.create_filter(fromBlock='latest')
 
-    # Synchronize tensors to the latest state and report status
     logging.info("Starting tensor synchronization...")
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
     for tensor_name in relevant_tensors:
