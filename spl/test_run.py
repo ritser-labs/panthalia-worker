@@ -33,8 +33,10 @@ app = Flask(__name__)
 def report_sync():
     task_type = request.args.get('task_type')
     status = request.args.get('status')
+    layer_idx = request.args.get('layer_idx')
+    key = f"{task_type}_{layer_idx}" if layer_idx else task_type
     if task_type and status:
-        sync_status[task_type] = status
+        sync_status[key] = status
         return jsonify({'status': 'success'})
     else:
         return jsonify({'status': 'error', 'message': 'Missing argument'}), 400
@@ -169,13 +171,16 @@ if __name__ == "__main__":
 
     # Start worker.py for each subnet
     for index, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
-        # Determine base_task_type correctly
+        # Determine base_task_type and layer_idx
         if 'forward_layer' in task_type:
             base_task_type = 'forward'
+            layer_idx = int(task_type.split('_')[-1])
         elif 'backward_layer' in task_type:
             base_task_type = 'backward'
+            layer_idx = int(task_type.split('_')[-1])
         else:
             base_task_type = task_type  # Use the full task type as is
+            layer_idx = None
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
@@ -195,6 +200,8 @@ if __name__ == "__main__":
             '--local_storage_dir', args.local_storage_dir,
             '--backend', args.backend,
         ]
+        if layer_idx is not None:
+            command.extend(['--layer_idx', str(layer_idx)])
         if args.detailed_logs or index == 0:
             worker_processes.append(subprocess.Popen(command))
         else:

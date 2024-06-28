@@ -59,6 +59,7 @@ def parse_args():
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='local_storage', help="Directory for local storage of files")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
+    parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
     return parser.parse_args()
 
 args = parse_args()
@@ -244,15 +245,16 @@ def handle_event(event):
     pause_gradient_updates()
 
     task_type = args.task_type
+    layer_idx = args.layer_idx
     if task_type == 'embed':
         embed_task(batch)
         result_url = upload_tensor(tensors['outputs'])
     elif task_type == 'forward':
-        forward_task(task_params['layer_idx'], inputs)
+        forward_task(layer_idx, inputs)
         result_url = upload_tensor(tensors['outputs'])
     elif task_type == 'backward':
-        backward_task(task_params['layer_idx'], error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], task_params['layer_idx'])
+        backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
+        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], layer_idx)
     elif task_type == 'final_logits':
         final_logits_task(inputs)
         result_url = upload_tensor(tensors['logits'])
