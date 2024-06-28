@@ -264,7 +264,7 @@ def handle_event(event):
         result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -2)
     elif task_type == 'loss':
         loss_task(logits, targets)
-        result_url = upload_tensor(tensors['loss'])
+        result_url = upload_tensor(tensors['logits_grad'])
 
     if result_url:
         last_block = last_gradient_update[task_type]
