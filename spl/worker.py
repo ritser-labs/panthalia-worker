@@ -224,19 +224,22 @@ def handle_event(event):
     task_params_bytes = task[6]
     task_params = json.loads(task_params_bytes.decode('utf-8'))
 
-    batch_file_url = task_params.get('batch_file')
-    inputs_file_url = task_params.get('inputs_file')
-    error_file_url = task_params.get('error_file')
-    targets_file_url = task_params.get('targets_file')
+    batch_url = task_params.get('batch_url')
+    inputs_url = task_params.get('inputs_url')
+    error_url = task_params.get('error_url')
+    targets_url = task_params.get('targets_url')
+    logits_url = task_params.get('logits_url')
 
-    if batch_file_url:
-        batch = download_file(batch_file_url)
-    if inputs_file_url:
-        inputs = download_file(inputs_file_url)
-    if error_file_url:
-        error = download_file(error_file_url)
-    if targets_file_url:
-        targets = download_file(targets_file_url)
+    if batch_url:
+        batch = download_file(batch_url)
+    if inputs_url:
+        inputs = download_file(inputs_url)
+    if error_url:
+        error = download_file(error_url)
+    if targets_url:
+        targets = download_file(targets_url)
+    if logits_url:
+        logits = download_file(logits_url)
 
     pause_gradient_updates()
 
@@ -260,7 +263,7 @@ def handle_event(event):
         embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
         result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -2)
     elif task_type == 'loss':
-        loss_task(targets)
+        loss_task(logits, targets)
         result_url = upload_tensor(tensors['loss'])
 
     if result_url:
@@ -448,9 +451,8 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
     tensors['error_output'] = grads
     tensors['grads'] = grads
 
-def loss_task(targets):
+def loss_task(logits, targets):
     global tensors
-    logits = tensors['logits']
     logging.info(f"Logits for loss: {logits.shape}")
     logging.info(f"Targets for loss: {targets.shape}")
 
@@ -593,7 +595,7 @@ def get_relevant_tensors_for_task(task_type):
     elif task_type in ['final_logits', 'final_logits_backward']:
         relevant_tensors = ['final_logits', 'final_logits_adam_m', 'final_logits_adam_v']
     elif task_type == 'loss':
-        relevant_tensors = ['logits']
+        relevant_tensors = []
     return relevant_tensors
 
 def main():
