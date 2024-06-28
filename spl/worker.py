@@ -536,10 +536,10 @@ def check_and_finalize_verifications():
 
 def report_sync_status(status):
     try:
-        if "layer_idx" not in args:
-            url = f"http://localhost:5002/report_sync?task_type={args.task_type}&status={status}"
-        else:
+        if hasattr(args, 'layer_idx'):
             url = f"http://localhost:5002/report_sync?task_type={args.task_type}&layer_idx={args.layer_idx}&status={status}"
+        else:
+            url = f"http://localhost:5002/report_sync?task_type={args.task_type}&status={status}"
         response = requests.get(url)
         if response.status_code == 200:
             logging.info(f"Reported sync status: {status}")
