@@ -125,6 +125,11 @@ class Master:
 
     def submit_selection_req(self):
         try:
+            # Wait until the pool state is Unlocked
+            while self.pool.functions.state().call() != 0:  # Assuming 0 represents the Unlocked state
+                logging.info("Waiting for pool state to be Unlocked...")
+                time.sleep(5)
+
             nonce = self.web3.eth.get_transaction_count(self.account.address)
             gas_price = self.web3.eth.gas_price
             transaction = self.pool.functions.submitSelectionReq().build_transaction({
