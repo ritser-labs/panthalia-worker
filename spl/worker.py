@@ -134,19 +134,6 @@ def upload_tensor(tensor):
     torch.save(tensor, local_file_path)
     return f'file://{local_file_path}'
 
-def stream_gradients(task_id, gradients, block_number=0):
-    data = {
-        'task_id': task_id,
-        'gradients': gradients,
-        'block_number': block_number
-    }
-    logging.debug(f"Sending data to /stream_gradients: {data}")
-    response = requests.post(f"{args.sot_url}/stream_gradients", json=data)
-    if response.status_code != 200:
-        logging.error(f"Failed to stream gradients: {response.text}")
-    else:
-        logging.info(f"Streamed gradients successfully for task {task_id}")
-
 def pause_gradient_updates():
     global gradient_update_paused
     gradient_update_paused = True

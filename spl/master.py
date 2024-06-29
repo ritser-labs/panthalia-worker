@@ -6,6 +6,8 @@ from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
 from common import load_contracts, handle_contract_custom_error
+from io import BytesIO
+import torch
 
 logging.basicConfig(level=logging.INFO)
 
@@ -98,7 +100,8 @@ class Master:
                 raise ValueError("No TaskRequestSubmitted event found in the receipt")
 
             task_id = logs[0]['args']['taskId']
-            logging.info(f"Task submitted successfully. Task ID: {task_id}")
+            block_number = receipt['blockNumber']
+            logging.info(f"Task submitted successfully. Task ID: {task_id}, Block number: {block_number}")
 
             # Call submitSelectionReq and wait for UNLOCKED_MIN_PERIOD
             selection_id = self.submit_selection_req()
@@ -113,7 +116,7 @@ class Master:
             # Call select_solver function
             self.select_solver(task_type, task_id)
 
-            return task_id
+            return task_id, block_number
         except ContractCustomError as e:
             handle_contract_custom_error(self.web3, self.error_selectors, e)
         except Exception as e:
@@ -238,31 +241,31 @@ class Master:
         model_params = self.get_latest_model_params()
 
         embed_result = self.handle_embed_forward(model_params)
-        layer_inputs_url = embed_result['result_url']
-        self.update_sot('embed', embed_result)
+        self.update_sot('embed', embed_result, embed_result['block_number'])
 
+        layer_inputs_url = embed_result['result_url']
         for layer_idx in range(model_params['n_layers']):
             layer_result = self.handle_layer_forward(layer_idx, layer_inputs_url, model_params)
             layer_inputs_url = layer_result['result_url']
-            self.update_sot(f'forward_layer_{layer_idx}', layer_result)
+            self.update_sot(f'forward_layer_{layer_idx}', layer_result, layer_result['block_number'])
 
         final_logits_result = self.handle_final_logits_forward(layer_inputs_url)
-        self.update_sot('final_logits', final_logits_result)
+        self.update_sot('final_logits', final_logits_result, final_logits_result['block_number'])
 
         loss_result = self.handle_loss_computation(final_logits_result['result_url'])
-        self.update_sot('loss', loss_result)
+        self.update_sot('loss', loss_result, loss_result['block_number'])
 
         error_url = loss_result['result_url']
         for layer_idx in reversed(range(model_params['n_layers'])):
             layer_result = self.handle_layer_backward(layer_idx, error_url, model_params)
             error_url = layer_result['error_output_url']
-            self.update_sot(f'backward_layer_{layer_idx}', layer_result)
+            self.update_sot(f'backward_layer_{layer_idx}', layer_result, layer_result['block_number'])
 
         final_logits_backward_result = self.handle_final_logits_backward(error_url, final_logits_result['result_url'], model_params)
-        self.update_sot('final_logits_backward', final_logits_backward_result)
+        self.update_sot('final_logits_backward', final_logits_backward_result, final_logits_backward_result['block_number'])
 
         embed_backward_result = self.handle_embed_backward(error_url, embed_result['batch_url'])
-        self.update_sot('embed_backward', embed_backward_result)
+        self.update_sot('embed_backward', embed_backward_result, embed_backward_result['block_number'])
 
     def get_latest_model_params(self):
         response = requests.get(f"{self.sot_url}/latest_model_params")
@@ -271,51 +274,58 @@ class Master:
     def handle_embed_forward(self, model_params):
         batch_url = self.get_batch_url()
         task_params = {'batch_url': batch_url, 'model_params': model_params}
-        task_id = self.submit_task('embed', task_params)
+        task_id, block_number = self.submit_task('embed', task_params)
         result = self.wait_for_result('embed', task_id)
         result['batch_url'] = batch_url
+        result['block_number'] = block_number
         return result
 
     def handle_layer_forward(self, layer_idx, inputs_url, model_params):
         task_type = f'forward_layer_{layer_idx}'
         task_params = {'layer_idx': layer_idx, 'inputs_url': inputs_url, 'model_params': model_params}
-        task_id = self.submit_task(task_type, task_params)
+        task_id, block_number = self.submit_task(task_type, task_params)
         result = self.wait_for_result(task_type, task_id)
+        result['block_number'] = block_number
         return result
 
     def handle_final_logits_forward(self, inputs_url):
         task_params = {'inputs_url': inputs_url}
-        task_id = self.submit_task('final_logits', task_params)
+        task_id, block_number = self.submit_task('final_logits', task_params)
         result = self.wait_for_result('final_logits', task_id)
+        result['block_number'] = block_number
         return result
 
     def handle_loss_computation(self, logits_url):
         targets_url = self.get_targets_url()
         task_params = {'logits_url': logits_url, 'targets_url': targets_url}
-        task_id = self.submit_task('loss', task_params)
+        task_id, block_number = self.submit_task('loss', task_params)
         result = self.wait_for_result('loss', task_id)
+        result['block_number'] = block_number
         return result
 
     def handle_layer_backward(self, layer_idx, error_url, model_params):
         task_type = f'backward_layer_{layer_idx}'
         task_params = {'layer_idx': layer_idx, 'error_url': error_url, 'model_params': model_params}
-        task_id = self.submit_task(task_type, task_params)
+        task_id, block_number = self.submit_task(task_type, task_params)
         result = self.wait_for_result(task_type, task_id)
-        self.update_adam_state(task_type, result['adam_m_url'], result['adam_v_url'])
+        result['block_number'] = block_number
+        self.update_sot_with_sparse(task_type, result, block_number)
         return result
 
     def handle_final_logits_backward(self, error_url, inputs_url, model_params):
         task_params = {'error_url': error_url, 'inputs_url': inputs_url, 'model_params': model_params}
-        task_id = self.submit_task('final_logits_backward', task_params)
+        task_id, block_number = self.submit_task('final_logits_backward', task_params)
         result = self.wait_for_result('final_logits_backward', task_id)
-        self.update_adam_state('final_logits_backward', result['adam_m_url'], result['adam_v_url'])
+        result['block_number'] = block_number
+        self.update_sot_with_sparse('final_logits_backward', result, block_number)
         return result
 
     def handle_embed_backward(self, error_url, batch_url):
         task_params = {'error_url': error_url, 'batch_url': batch_url}
-        task_id = self.submit_task('embed_backward', task_params)
+        task_id, block_number = self.submit_task('embed_backward', task_params)
         result = self.wait_for_result('embed_backward', task_id)
-        self.update_adam_state('embed_backward', result['adam_m_url'], result['adam_v_url'])
+        result['block_number'] = block_number
+        self.update_sot_with_sparse('embed_backward', result, block_number)
         return result
 
     def wait_for_result(self, task_type, task_id):
@@ -325,15 +335,19 @@ class Master:
                 return result
             time.sleep(5)
 
-    def update_sot(self, task_type, result):
-        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': task_type, 'result': result})
+    def update_sot(self, task_type, result, block_number):
+        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': task_type, 'result_url': result['result_url'], 'block_number': block_number})
         if response.status_code != 200:
             logging.error(f"Failed to update SOT for {task_type}: {response.text}")
         else:
             logging.info(f"Updated SOT for {task_type} with result: {result}")
 
-    def update_adam_state(self, task_type, adam_m_url, adam_v_url):
-        response = requests.post(f"{self.sot_url}/update_adam", json={'task_type': task_type, 'adam_m': adam_m_url, 'adam_v': adam_v_url})
+    def update_sot_with_sparse(self, task_type, result, block_number):
+        self.update_sot(task_type, result, block_number)
+        self.update_adam_state(task_type, result['adam_m_url'], result['adam_v_url'], block_number)
+
+    def update_adam_state(self, task_type, adam_m_url, adam_v_url, block_number):
+        response = requests.post(f"{self.sot_url}/update_adam", json={'task_type': task_type, 'adam_m': adam_m_url, 'adam_v': adam_v_url, 'block_number': block_number})
         if response.status_code != 200:
             logging.error(f"Failed to update Adam state for {task_type}: {response.text}")
         else:

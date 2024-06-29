@@ -1,3 +1,4 @@
+from io import BytesIO
 import os
 import json
 import logging
@@ -6,6 +7,7 @@ from flask import Flask, request, jsonify, Response, stream_with_context, send_f
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
+import requests
 
 app = Flask(__name__)
 sync_status = {}
@@ -25,7 +27,6 @@ os.makedirs(state_dir, exist_ok=True)
 def initialize_tensor(name, shape, random_init=True):
     file_path = os.path.join(state_dir, f'{name}.pt')
     if os.path.exists(file_path):
-        #tensor = torch.load(file_path)
         pass
     else:
         if random_init:
@@ -159,17 +160,30 @@ def update_state():
     logging.info("Accessing /update_state endpoint")
     data = request.json
     task_type = data.get('task_type')
-    result = data.get('result')
-    block_number = data.get('block_number', 0)
+    result_url = data.get('result_url')
+    block_number = data.get('block_number')
 
-    if not task_type or result is None:
-        logging.error("Missing task_type or result in /update_state request")
-        return jsonify({'error': 'Missing task_type or result'}), 400
+    if not task_type or not result_url or block_number is None:
+        logging.error("Missing task_type, result_url, or block_number in /update_state request")
+        return jsonify({'error': 'Missing task_type, result_url, or block_number'}), 400
 
     try:
+        response = requests.get(result_url)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to download tensor from {result_url}")
+
+        tensor_data = BytesIO(response.content)
+        tensor = torch.load(tensor_data)
+
         os.makedirs(os.path.join(data_dir, 'state'), exist_ok=True)
         state_file_path = os.path.join(data_dir, f'state/{task_type}.pt')
-        torch.save(torch.tensor(result), state_file_path)
+        torch.save(tensor, state_file_path)
+
+        # Store the block number along with the state
+        block_number_file_path = os.path.join(data_dir, f'state/{task_type}_block_number.json')
+        with open(block_number_file_path, 'w') as block_file:
+            json.dump({'block_number': block_number}, block_file)
+
         return jsonify({'status': 'success'})
     except Exception as e:
         logging.error(f"Error in /update_state: {e}", exc_info=True)
