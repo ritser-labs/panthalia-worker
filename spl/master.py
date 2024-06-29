@@ -116,6 +116,9 @@ class Master:
             # Call select_solver function
             self.select_solver(task_type, task_id)
 
+            # Call removeSolverStake function
+            self.remove_solver_stake(task_type, task_id)
+
             return task_id, block_number
         except ContractCustomError as e:
             handle_contract_custom_error(self.web3, self.error_selectors, e)
@@ -128,10 +131,7 @@ class Master:
             if self.pool.functions.state().call() != 0:
                 return self.pool.functions.currentSelectionId().call()
             # Wait until the pool state is Unlocked and the unlocked minimum period is over
-            while self.pool.functions.lastStateChangeTime().call() + self.pool.functions.UNLOCKED_MIN_PERIOD().call() >= time.time():
-                logging.info("Waiting for UNLOCKED_MIN_PERIOD to be over")
-                time.sleep(5)
-
+            self.wait_for_state_change(0)  # Unlocked state
             logging.info("Submitting selection request")
 
             nonce = self.web3.eth.get_transaction_count(self.account.address)
@@ -172,6 +172,45 @@ class Master:
             logging.error(f"Error submitting selection request: {e}")
             raise
 
+    def wait_for_state_change(self, target_state, trigger_func=None, trigger_event=None):
+        """
+        Waits for the Pool contract to change to a specified state, and optionally triggers the state change.
+        :param target_state: The target state to wait for.
+        :param trigger_func: Optional function to call to trigger the state change.
+        :param trigger_event: Optional event to check for after triggering the state change.
+        """
+        while self.pool.functions.state().call() != target_state:
+            current_state = self.pool.functions.state().call()
+            logging.info(f"Current pool state: {current_state}, target state: {target_state}")
+
+            if trigger_func and current_state != target_state:
+                logging.info(f"Triggering function to change state to {target_state}")
+                nonce = self.web3.eth.get_transaction_count(self.account.address)
+                gas_price = self.web3.eth.gas_price
+                transaction = trigger_func().build_transaction({
+                    'chainId': self.web3.eth.chain_id,
+                    'gas': 500000,
+                    'gasPrice': gas_price,
+                    'nonce': nonce
+                })
+
+                signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
+                tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
+                logging.info(f"Trigger function transaction receipt: {receipt}")
+
+                if receipt['status'] == 0:
+                    self.log_transaction_failure(receipt)
+                    raise ValueError(f"Trigger function transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+
+                if trigger_event:
+                    logs = self.pool.events.__dict__[trigger_event]().process_receipt(receipt)
+                    if not logs:
+                        raise ValueError(f"No {trigger_event} event found in the receipt")
+                    logging.info(f"Event logs: {logs}")
+
+            logging.info(f"Waiting for the pool state to change to {target_state}")
+            time.sleep(5)
 
     def fulfill_random_words(self, vrf_request_id):
         try:
@@ -203,6 +242,9 @@ class Master:
 
             logging.info(f"Selecting solver for task ID: {task_id}")
 
+            # Wait for the state to be SelectionsFinalizing
+            self.wait_for_state_change(1)  # SelectionsFinalizing state
+
             nonce = self.web3.eth.get_transaction_count(self.account.address)
             gas_price = self.web3.eth.gas_price
             transaction = self.contracts[task_type].functions.selectSolver(task_id).build_transaction({
@@ -222,6 +264,37 @@ class Master:
                 raise ValueError(f"Select solver transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
         except Exception as e:
             logging.error(f"Error selecting solver: {e}")
+            raise
+
+    def remove_solver_stake(self, task_type, task_id):
+        try:
+            if task_type not in self.contracts:
+                raise ValueError(f"No contract loaded for task type {task_type}")
+
+            logging.info(f"Removing solver stake for task ID: {task_id}")
+
+            # Wait for the state to be Unlocked
+            self.wait_for_state_change(0)  # Unlocked state
+
+            nonce = self.web3.eth.get_transaction_count(self.account.address)
+            gas_price = self.web3.eth.gas_price
+            transaction = self.contracts[task_type].functions.removeSolverStake(task_id).build_transaction({
+                'chainId': self.web3.eth.chain_id,
+                'gas': 1000000,
+                'gasPrice': gas_price,
+                'nonce': nonce
+            })
+
+            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
+            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
+            logging.info(f"Remove solver stake transaction receipt: {receipt}")
+
+            if receipt['status'] == 0:
+                self.log_transaction_failure(receipt)
+                raise ValueError(f"Remove solver stake transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+        except Exception as e:
+            logging.error(f"Error removing solver stake: {e}")
             raise
 
     def log_transaction_failure(self, receipt):
