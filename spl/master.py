@@ -125,10 +125,14 @@ class Master:
 
     def submit_selection_req(self):
         try:
+            if self.pool.functions.state().call() != 0:
+                return self.pool.functions.currentSelectionId().call()
             # Wait until the pool state is Unlocked and the unlocked minimum period is over
-            while self.pool.functions.state().call() != 0 or self.pool.functions.lastStateChangeTime().call() + self.pool.functions.UNLOCKED_MIN_PERIOD().call() >= time.time():
-                logging.info("Waiting for pool state to be Unlocked and UNLOCKED_MIN_PERIOD to be over")
+            while self.pool.functions.lastStateChangeTime().call() + self.pool.functions.UNLOCKED_MIN_PERIOD().call() >= time.time():
+                logging.info("Waiting for UNLOCKED_MIN_PERIOD to be over")
                 time.sleep(5)
+
+            logging.info("Submitting selection request")
 
             nonce = self.web3.eth.get_transaction_count(self.account.address)
             gas_price = self.web3.eth.gas_price
