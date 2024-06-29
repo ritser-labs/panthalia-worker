@@ -125,9 +125,9 @@ class Master:
 
     def submit_selection_req(self):
         try:
-            # Wait until the pool state is Unlocked
-            while self.pool.functions.state().call() != 0:  # Assuming 0 represents the Unlocked state
-                logging.info("Waiting for pool state to be Unlocked...")
+            # Wait until the pool state is Unlocked and the unlocked minimum period is over
+            while self.pool.functions.state().call() != 0 or self.pool.functions.lastStateChangeTime().call() + self.pool.functions.UNLOCKED_MIN_PERIOD().call() >= time.time():
+                logging.info("Waiting for pool state to be Unlocked and UNLOCKED_MIN_PERIOD to be over")
                 time.sleep(5)
 
             nonce = self.web3.eth.get_transaction_count(self.account.address)
@@ -167,6 +167,7 @@ class Master:
         except Exception as e:
             logging.error(f"Error submitting selection request: {e}")
             raise
+
 
     def fulfill_random_words(self, vrf_request_id):
         try:
@@ -243,32 +244,40 @@ class Master:
             return None
 
     def main(self):
+        logging.info("Starting main process")
         model_params = self.get_latest_model_params()
 
+        logging.info("Starting embed forward task")
         embed_result = self.handle_embed_forward(model_params)
         self.update_sot('embed', embed_result, embed_result['block_number'])
 
         layer_inputs_url = embed_result['result_url']
         for layer_idx in range(model_params['n_layers']):
+            logging.info(f"Starting forward task for layer {layer_idx}")
             layer_result = self.handle_layer_forward(layer_idx, layer_inputs_url, model_params)
             layer_inputs_url = layer_result['result_url']
             self.update_sot(f'forward_layer_{layer_idx}', layer_result, layer_result['block_number'])
 
+        logging.info("Starting final logits forward task")
         final_logits_result = self.handle_final_logits_forward(layer_inputs_url)
         self.update_sot('final_logits', final_logits_result, final_logits_result['block_number'])
 
+        logging.info("Starting loss computation task")
         loss_result = self.handle_loss_computation(final_logits_result['result_url'])
         self.update_sot('loss', loss_result, loss_result['block_number'])
 
         error_url = loss_result['result_url']
         for layer_idx in reversed(range(model_params['n_layers'])):
+            logging.info(f"Starting backward task for layer {layer_idx}")
             layer_result = self.handle_layer_backward(layer_idx, error_url, model_params)
             error_url = layer_result['error_output_url']
             self.update_sot(f'backward_layer_{layer_idx}', layer_result, layer_result['block_number'])
 
+        logging.info("Starting final logits backward task")
         final_logits_backward_result = self.handle_final_logits_backward(error_url, final_logits_result['result_url'], model_params)
         self.update_sot('final_logits_backward', final_logits_backward_result, final_logits_backward_result['block_number'])
 
+        logging.info("Starting embed backward task")
         embed_backward_result = self.handle_embed_backward(error_url, embed_result['batch_url'])
         self.update_sot('embed_backward', embed_backward_result, embed_backward_result['block_number'])
 
