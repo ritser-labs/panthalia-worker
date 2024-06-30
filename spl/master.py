@@ -171,46 +171,87 @@ class Master:
         except Exception as e:
             logging.error(f"Error submitting selection request: {e}")
             raise
+        
+    def trigger_lock_global_state(self):
+        unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
+        last_state_change_time = self.pool.functions.lastStateChangeTime().call()
+        current_time = time.time()
+        remaining_time = (last_state_change_time + unlocked_min_period) - current_time
 
-    def wait_for_state_change(self, target_state, trigger_func=None, trigger_event=None):
+        if remaining_time > 0:
+            logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
+            time.sleep(remaining_time)
+
+        nonce = self.web3.eth.get_transaction_count(self.account.address)
+        gas_price = self.web3.eth.gas_price
+        transaction = self.pool.functions.lockGlobalState().build_transaction({
+            'chainId': self.web3.eth.chain_id,
+            'gas': 500000,
+            'gasPrice': gas_price,
+            'nonce': nonce
+        })
+
+        signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
+        tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
+        logging.info(f"lockGlobalState transaction receipt: {receipt}")
+
+        if receipt['status'] == 0:
+            self.log_transaction_failure(receipt)
+            raise ValueError(f"lockGlobalState transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+
+    def trigger_remove_global_lock(self):
+        selections_finalizing_min_period = self.pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
+        last_state_change_time = self.pool.functions.lastStateChangeTime().call()
+        current_time = time.time()
+        remaining_time = (last_state_change_time + selections_finalizing_min_period) - current_time
+
+        if remaining_time > 0:
+            logging.info(f"Waiting for {remaining_time} seconds until SELECTIONS_FINALIZING_MIN_PERIOD is over")
+            time.sleep(remaining_time)
+
+        nonce = self.web3.eth.get_transaction_count(self.account.address)
+        gas_price = self.web3.eth.gas_price
+        transaction = self.pool.functions.removeGlobalLock().build_transaction({
+            'chainId': self.web3.eth.chain_id,
+            'gas': 500000,
+            'gasPrice': gas_price,
+            'nonce': nonce
+        })
+
+        signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
+        tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
+        logging.info(f"removeGlobalLock transaction receipt: {receipt}")
+
+        if receipt['status'] == 0:
+            self.log_transaction_failure(receipt)
+            raise ValueError(f"removeGlobalLock transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+
+    def wait_for_state_change(self, target_state):
         """
-        Waits for the Pool contract to change to a specified state, and optionally triggers the state change.
+        Waits for the Pool contract to change to a specified state and triggers state changes as needed.
         :param target_state: The target state to wait for.
-        :param trigger_func: Optional function to call to trigger the state change.
-        :param trigger_event: Optional event to check for after triggering the state change.
         """
-        while self.pool.functions.state().call() != target_state:
+        while True:
             current_state = self.pool.functions.state().call()
             logging.info(f"Current pool state: {current_state}, target state: {target_state}")
+            
+            if current_state == target_state:
+                break
 
-            if trigger_func and current_state != target_state:
-                logging.info(f"Triggering function to change state to {target_state}")
-                nonce = self.web3.eth.get_transaction_count(self.account.address)
-                gas_price = self.web3.eth.gas_price
-                transaction = trigger_func().build_transaction({
-                    'chainId': self.web3.eth.chain_id,
-                    'gas': 500000,
-                    'gasPrice': gas_price,
-                    'nonce': nonce
-                })
-
-                signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
-                tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-                logging.info(f"Trigger function transaction receipt: {receipt}")
-
-                if receipt['status'] == 0:
-                    self.log_transaction_failure(receipt)
-                    raise ValueError(f"Trigger function transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
-
-                if trigger_event:
-                    logs = self.pool.events.__dict__[trigger_event]().process_receipt(receipt)
-                    if not logs:
-                        raise ValueError(f"No {trigger_event} event found in the receipt")
-                    logging.info(f"Event logs: {logs}")
-
-            logging.info(f"Waiting for the pool state to change to {target_state}")
-            time.sleep(5)
+            if current_state == 0 and target_state == 1:  # Unlocked to Locked
+                logging.info("Triggering lockGlobalState to change state to Locked")
+                self.trigger_lock_global_state()
+            elif current_state == 1 and target_state == 2:  # Locked to SelectionsFinalizing
+                logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
+                # No action needed, wait for VRF callback
+            elif current_state == 2 and target_state == 0:  # SelectionsFinalizing to Unlocked
+                logging.info("Triggering removeGlobalLock to change state to Unlocked")
+                self.trigger_remove_global_lock()
+            else:
+                logging.info(f"Waiting for the pool state to change to {target_state}")
+                time.sleep(5)
 
     def fulfill_random_words(self, vrf_request_id):
         try:
@@ -243,7 +284,7 @@ class Master:
             logging.info(f"Selecting solver for task ID: {task_id}")
 
             # Wait for the state to be SelectionsFinalizing
-            self.wait_for_state_change(1)  # SelectionsFinalizing state
+            self.wait_for_state_change(2)  # SelectionsFinalizing state
 
             nonce = self.web3.eth.get_transaction_count(self.account.address)
             gas_price = self.web3.eth.gas_price
