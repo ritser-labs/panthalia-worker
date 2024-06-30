@@ -143,40 +143,33 @@ def resume_gradient_updates():
     gradient_update_paused = False
     apply_gradient_updates()
 
+def build_transaction(function, value=0):
+    nonce = web3.eth.get_transaction_count(worker_address)
+    gas_price = web3.eth.gas_price
+    return function.build_transaction({
+        'chainId': web3.eth.chain_id,
+        'gas': 200000,
+        'gasPrice': gas_price,
+        'nonce': nonce,
+        'value': value,
+    })
+
+def sign_and_send_transaction(tx):
+    signed_tx = worker_account.sign_transaction(tx)
+    tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+    return web3.eth.wait_for_transaction_receipt(tx_hash)
+
 def deposit_stake():
     global stake_deposited
     if not stake_deposited:
         try:
-            approve_tx = token_contract.functions.approve(
-                args.pool_address,
-                stake_amount
-            ).build_transaction({
-                'chainId': web3.eth.chain_id,
-                'gas': 200000,
-                'gasPrice': web3.eth.gas_price,
-                'nonce': web3.eth.get_transaction_count(worker_address),
-            })
+            approve_tx = build_transaction(token_contract.functions.approve(args.pool_address, stake_amount))
+            sign_and_send_transaction(approve_tx)
 
-            signed_approve_tx = worker_account.sign_transaction(approve_tx)
-            approve_tx_hash = web3.eth.send_raw_transaction(signed_approve_tx.rawTransaction)
-            web3.eth.wait_for_transaction_receipt(approve_tx_hash)
-
-            deposit_tx = pool_contract.functions.depositStake(
-                subnet_id,
-                args.group
-            ).build_transaction({
-                'chainId': web3.eth.chain_id,
-                'gas': 500000,
-                'gasPrice': web3.eth.gas_price,
-                'nonce': web3.eth.get_transaction_count(worker_address),
-            })
-
-            signed_deposit_tx = worker_account.sign_transaction(deposit_tx)
-            deposit_tx_hash = web3.eth.send_raw_transaction(signed_deposit_tx.rawTransaction)
-            web3.eth.wait_for_transaction_receipt(deposit_tx_hash)
+            deposit_tx = build_transaction(pool_contract.functions.depositStake(subnet_id, args.group))
+            sign_and_send_transaction(deposit_tx)
 
             stake_deposited = True
-
             report_stake_status()
         except ContractCustomError as e:
             error_selectors = load_error_selectors(web3)
@@ -265,7 +258,8 @@ def submit_solution(task_id, result_url, last_block):
         'result_url': result_url,
         'last_block': last_block
     }
-    contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')).transact({'from': worker_address})
+    tx = build_transaction(contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')))
+    sign_and_send_transaction(tx)
 
 def upload_tensors_and_grads(error_output, grads, layer_idx):
     error_output_url = upload_tensor(error_output)
@@ -515,8 +509,8 @@ def check_and_finalize_verifications():
 
         if task_status == 2 and (current_time - time_status_changed) >= max_dispute_time:
             if contract.functions.canVerificationBeFinalized(task_id).call():
-                tx = contract.functions.finalizeVerification(task_id).transact({'from': worker_address})
-                web3.eth.wait_for_transaction_receipt(tx)
+                tx = build_transaction(contract.functions.finalizeVerification(task_id))
+                sign_and_send_transaction(tx)
                 processed_tasks.remove(task_id)
 
 def report_sync_status(status):

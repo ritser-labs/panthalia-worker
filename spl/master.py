@@ -38,22 +38,31 @@ class Master:
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
-    def approve_token(self, token_address, spender_address, amount):
-        token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
+    def build_transaction(self, function, value=0, gas=500000):
         nonce = self.web3.eth.get_transaction_count(self.account.address)
         gas_price = self.web3.eth.gas_price
-
-        approve_txn = token_contract.functions.approve(spender_address, amount).build_transaction({
+        return function.build_transaction({
             'chainId': self.web3.eth.chain_id,
-            'gas': 100000,
+            'gas': gas,
             'gasPrice': gas_price,
-            'nonce': nonce
+            'nonce': nonce,
+            'value': value
         })
 
-        signed_approve_txn = self.web3.eth.account.sign_transaction(approve_txn, private_key=self.account._private_key)
-        tx_hash = self.web3.eth.send_raw_transaction(signed_approve_txn.rawTransaction)
+    def sign_and_send_transaction(self, tx):
+        signed_txn = self.web3.eth.account.sign_transaction(tx, private_key=self.account._private_key)
+        tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
         receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-        logging.info(f"Token approval transaction receipt: {receipt}")
+        logging.info(f"Transaction receipt: {receipt}")
+        if receipt['status'] == 0:
+            self.log_transaction_failure(receipt)
+            raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+        return receipt
+
+    def approve_token(self, token_address, spender_address, amount):
+        token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
+        tx = self.build_transaction(token_contract.functions.approve(spender_address, amount), gas=100000)
+        self.sign_and_send_transaction(tx)
 
     def submit_task(self, task_type, params):
         try:
@@ -62,40 +71,16 @@ class Master:
 
             logging.info(f"Submitting task of type {task_type} with params: {params}")
             encoded_params = json.dumps(params).encode('utf-8')
-            logging.info(f"Encoded params: {encoded_params}")
 
-            if not hasattr(self.contracts[task_type].functions, 'submitTaskRequest'):
-                raise ValueError(f"'submitTaskRequest' method not found in contract for task type {task_type}")
-
-            placeholder_task_id = 0
-            fee = self.contracts[task_type].functions.calculateFee(placeholder_task_id).call()
-
-            subnet_manager_contract = self.contracts[task_type]
-            token_address = subnet_manager_contract.functions.token().call()
+            fee = self.contracts[task_type].functions.calculateFee(0).call()
+            token_address = self.contracts[task_type].functions.token().call()
             spender_address = self.contracts[task_type].address
             self.approve_token(token_address, spender_address, fee)
 
-            nonce = self.web3.eth.get_transaction_count(self.account.address)
-            gas_price = self.web3.eth.gas_price
-            transaction = self.contracts[task_type].functions.submitTaskRequest(encoded_params).build_transaction({
-                'chainId': self.web3.eth.chain_id,
-                'gas': 1000000,
-                'gasPrice': gas_price,
-                'nonce': nonce
-            })
-
-            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
-            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-            logging.info(f"Transaction receipt: {receipt}")
-
-            if receipt['status'] == 0:
-                self.log_transaction_failure(receipt)
-                raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+            tx = self.build_transaction(self.contracts[task_type].functions.submitTaskRequest(encoded_params), gas=1000000)
+            receipt = self.sign_and_send_transaction(tx)
 
             logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
-            logging.info(f"Event logs: {logs}")
-
             if not logs:
                 raise ValueError("No TaskRequestSubmitted event found in the receipt")
 
@@ -103,20 +88,12 @@ class Master:
             block_number = receipt['blockNumber']
             logging.info(f"Task submitted successfully. Task ID: {task_id}, Block number: {block_number}")
 
-            # Call submitSelectionReq and wait for UNLOCKED_MIN_PERIOD
             selection_id = self.submit_selection_req()
             logging.info(f"Selection ID: {selection_id}")
 
-            # Retrieve vrfRequestId from Pool contract
             vrf_request_id = self.pool.functions.vrfRequestId().call()
-
-            # Call fulfillRandomWords function
             self.fulfill_random_words(vrf_request_id)
-
-            # Call select_solver function
             self.select_solver(task_type, task_id)
-
-            # Call removeSolverStake function
             self.remove_solver_stake(task_type, task_id)
 
             return task_id, block_number
@@ -130,29 +107,13 @@ class Master:
         try:
             if self.pool.functions.state().call() != 0:
                 return self.pool.functions.currentSelectionId().call()
-            # Wait until the pool state is Unlocked and the unlocked minimum period is over
-            self.wait_for_state_change(0)  # Unlocked state
+
+            self.wait_for_state_change(0)
             logging.info("Submitting selection request")
 
-            nonce = self.web3.eth.get_transaction_count(self.account.address)
-            gas_price = self.web3.eth.gas_price
-            transaction = self.pool.functions.submitSelectionReq().build_transaction({
-                'chainId': self.web3.eth.chain_id,
-                'gas': 500000,
-                'gasPrice': gas_price,
-                'nonce': nonce
-            })
+            tx = self.build_transaction(self.pool.functions.submitSelectionReq(), gas=500000)
+            receipt = self.sign_and_send_transaction(tx)
 
-            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
-            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-            logging.info(f"submitSelectionReq transaction receipt: {receipt}")
-
-            if receipt['status'] == 0:
-                self.log_transaction_failure(receipt)
-                raise ValueError(f"submitSelectionReq transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
-
-            # Calculate remaining time for UNLOCKED_MIN_PERIOD
             unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
             last_state_change_time = self.pool.functions.lastStateChangeTime().call()
             current_time = time.time()
@@ -166,12 +127,11 @@ class Master:
             if not logs:
                 raise ValueError("No SelectionRequested event found in the receipt")
 
-            selection_id = logs[0]['args']['selectionId']
-            return selection_id
+            return logs[0]['args']['selectionId']
         except Exception as e:
             logging.error(f"Error submitting selection request: {e}")
             raise
-        
+
     def trigger_lock_global_state(self):
         unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
         last_state_change_time = self.pool.functions.lastStateChangeTime().call()
@@ -182,23 +142,8 @@ class Master:
             logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
             time.sleep(remaining_time)
 
-        nonce = self.web3.eth.get_transaction_count(self.account.address)
-        gas_price = self.web3.eth.gas_price
-        transaction = self.pool.functions.lockGlobalState().build_transaction({
-            'chainId': self.web3.eth.chain_id,
-            'gas': 500000,
-            'gasPrice': gas_price,
-            'nonce': nonce
-        })
-
-        signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
-        tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-        logging.info(f"lockGlobalState transaction receipt: {receipt}")
-
-        if receipt['status'] == 0:
-            self.log_transaction_failure(receipt)
-            raise ValueError(f"lockGlobalState transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+        tx = self.build_transaction(self.pool.functions.lockGlobalState(), gas=500000)
+        self.sign_and_send_transaction(tx)
 
     def trigger_remove_global_lock(self):
         selections_finalizing_min_period = self.pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
@@ -210,29 +155,10 @@ class Master:
             logging.info(f"Waiting for {remaining_time} seconds until SELECTIONS_FINALIZING_MIN_PERIOD is over")
             time.sleep(remaining_time)
 
-        nonce = self.web3.eth.get_transaction_count(self.account.address)
-        gas_price = self.web3.eth.gas_price
-        transaction = self.pool.functions.removeGlobalLock().build_transaction({
-            'chainId': self.web3.eth.chain_id,
-            'gas': 500000,
-            'gasPrice': gas_price,
-            'nonce': nonce
-        })
-
-        signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
-        tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-        logging.info(f"removeGlobalLock transaction receipt: {receipt}")
-
-        if receipt['status'] == 0:
-            self.log_transaction_failure(receipt)
-            raise ValueError(f"removeGlobalLock transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+        tx = self.build_transaction(self.pool.functions.removeGlobalLock(), gas=500000)
+        self.sign_and_send_transaction(tx)
 
     def wait_for_state_change(self, target_state):
-        """
-        Waits for the Pool contract to change to a specified state and triggers state changes as needed.
-        :param target_state: The target state to wait for.
-        """
         while True:
             current_state = self.pool.functions.state().call()
             logging.info(f"Current pool state: {current_state}, target state: {target_state}")
@@ -240,13 +166,12 @@ class Master:
             if current_state == target_state:
                 break
 
-            if current_state == 0 and target_state == 1:  # Unlocked to Locked
+            if current_state == 0 and target_state == 1:
                 logging.info("Triggering lockGlobalState to change state to Locked")
                 self.trigger_lock_global_state()
-            elif current_state == 1 and target_state == 2:  # Locked to SelectionsFinalizing
+            elif current_state == 1 and target_state == 2:
                 logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
-                # No action needed, wait for VRF callback
-            elif current_state == 2 and target_state == 0:  # SelectionsFinalizing to Unlocked
+            elif current_state == 2 and target_state == 0:
                 logging.info("Triggering removeGlobalLock to change state to Unlocked")
                 self.trigger_remove_global_lock()
             else:
@@ -255,23 +180,8 @@ class Master:
 
     def fulfill_random_words(self, vrf_request_id):
         try:
-            nonce = self.web3.eth.get_transaction_count(self.account.address)
-            gas_price = self.web3.eth.gas_price
-            transaction = self.vrf_coordinator.functions.fulfillRandomWords(vrf_request_id).build_transaction({
-                'chainId': self.web3.eth.chain_id,
-                'gas': 500000,
-                'gasPrice': gas_price,
-                'nonce': nonce
-            })
-
-            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
-            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-            logging.info(f"fulfillRandomWords transaction receipt: {receipt}")
-
-            if receipt['status'] == 0:
-                self.log_transaction_failure(receipt)
-                raise ValueError(f"fulfillRandomWords transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+            tx = self.build_transaction(self.vrf_coordinator.functions.fulfillRandomWords(vrf_request_id), gas=500000)
+            self.sign_and_send_transaction(tx)
         except Exception as e:
             logging.error(f"Error fulfilling random words: {e}")
             raise
@@ -283,26 +193,10 @@ class Master:
 
             logging.info(f"Selecting solver for task ID: {task_id}")
 
-            # Wait for the state to be SelectionsFinalizing
-            self.wait_for_state_change(2)  # SelectionsFinalizing state
+            self.wait_for_state_change(2)
 
-            nonce = self.web3.eth.get_transaction_count(self.account.address)
-            gas_price = self.web3.eth.gas_price
-            transaction = self.contracts[task_type].functions.selectSolver(task_id).build_transaction({
-                'chainId': self.web3.eth.chain_id,
-                'gas': 1000000,
-                'gasPrice': gas_price,
-                'nonce': nonce
-            })
-
-            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
-            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-            logging.info(f"Select solver transaction receipt: {receipt}")
-
-            if receipt['status'] == 0:
-                self.log_transaction_failure(receipt)
-                raise ValueError(f"Select solver transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+            tx = self.build_transaction(self.contracts[task_type].functions.selectSolver(task_id), gas=1000000)
+            self.sign_and_send_transaction(tx)
         except Exception as e:
             logging.error(f"Error selecting solver: {e}")
             raise
@@ -314,26 +208,10 @@ class Master:
 
             logging.info(f"Removing solver stake for task ID: {task_id}")
 
-            # Wait for the state to be Unlocked
-            self.wait_for_state_change(0)  # Unlocked state
+            self.wait_for_state_change(0)
 
-            nonce = self.web3.eth.get_transaction_count(self.account.address)
-            gas_price = self.web3.eth.gas_price
-            transaction = self.contracts[task_type].functions.removeSolverStake(task_id).build_transaction({
-                'chainId': self.web3.eth.chain_id,
-                'gas': 1000000,
-                'gasPrice': gas_price,
-                'nonce': nonce
-            })
-
-            signed_txn = self.web3.eth.account.sign_transaction(transaction, private_key=self.account._private_key)
-            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-            logging.info(f"Remove solver stake transaction receipt: {receipt}")
-
-            if receipt['status'] == 0:
-                self.log_transaction_failure(receipt)
-                raise ValueError(f"Remove solver stake transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
+            tx = self.build_transaction(self.contracts[task_type].functions.removeSolverStake(task_id), gas=1000000)
+            self.sign_and_send_transaction(tx)
         except Exception as e:
             logging.error(f"Error removing solver stake: {e}")
             raise
@@ -353,9 +231,8 @@ class Master:
     def get_task_result(self, task_type, task_id):
         try:
             task = self.contracts[task_type].functions.getTask(task_id).call()
-            if task[0] == 4:  # Assuming TaskStatus.ResolvedCorrect is 4
-                result_data = json.loads(task[6].decode('utf-8'))  # Decode the result field
-                return result_data
+            if task[0] == 4:
+                return json.loads(task[6].decode('utf-8'))
             return None
         except Exception as e:
             logging.error(f"Error getting task result for {task_type} with task ID {task_id}: {e}")
