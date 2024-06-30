@@ -9,7 +9,9 @@ import time
 from io import BytesIO
 import requests
 from web3 import Web3
+from enum import Enum
 import web3
+from collections import namedtuple
 
 # Define the new tokenizer and model arguments
 tokenizer = Tokenizer('cl100k_base')
@@ -27,6 +29,37 @@ model_args = ModelArgs(
 )
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# Define Enums
+class TaskStatus(Enum):
+    SelectingSolver = 0
+    SolverSelectedStakeNotRemoved = 1
+    SolverSelected = 2
+    SolutionSubmitted = 3
+    Disputed = 4
+    VerifiersSelected = 5
+    Verified = 6
+    ResolvedCorrect = 7
+    ResolvedIncorrect = 8
+
+class Vote(Enum):
+    NoVote = 0
+    SolutionCorrect = 1
+    SolutionIncorrect = 2
+
+class PoolState(Enum):
+    Unlocked = 0
+    Locked = 1
+    SelectionsFinalizing = 2
+
+# Define Task named tuple
+Task = namedtuple('Task', [
+    'status', 'submitter', 'solver', 'timeStatusChanged', 'selectionId', 'numVerifiers', 
+    'selectedStakeId', 'params', 'postedSolution', 'verificationRounds', 'verifierStake', 
+    'disputerStake'
+])
+
 
 def save_to_disk(data, filename):
     torch.save(data, filename)

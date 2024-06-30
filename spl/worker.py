@@ -11,7 +11,7 @@ from web3.exceptions import ContractCustomError
 from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
-from common import model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors
+from common import Task, model_args, tokenizer, device, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional
 from io import BytesIO
@@ -197,8 +197,9 @@ def handle_event(event):
     if solver.lower() != worker_address.lower():
         return
 
-    task = contract.functions.getTask(task_id).call()
-    task_params_bytes = task[6]
+    task_tuple = contract.functions.getTask(task_id).call()
+    task = Task(*task_tuple)
+    task_params_bytes = task.params
     task_params = json.loads(task_params_bytes.decode('utf-8'))
 
     batch_url = task_params.get('batch_url')
@@ -335,7 +336,7 @@ def forward_task(layer_idx, inputs):
     if layer.attention.cache_k is not None and layer.attention.cache_k.shape[0] != bsz:
         layer.attention.cache_k = torch.zeros(bsz, layer.attention.cache_k.shape[1], layer.attention.cache_k.shape[2], layer.attention.cache_k.shape[3], device=device)
     if layer.attention.cache_v is not None and layer.attention.cache_v.shape[0] != bsz:
-        layer.attention.cache_v = torch.zeros(bsz, layer.attention.cache_v.shape[1], layer.attention.cache_v.shape[2], layer.attention.cache_v.shape[3], device.device)
+        layer.attention.cache_v = torch.zeros(bsz, layer.attention.cache_v.shape[1], layer.attention.cache_v.shape[2], layer.attention.cache_v.shape[3], device=device)
 
     outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask.to(device))
     check_for_nans(outputs, f"layer {layer_idx} outputs")
@@ -502,9 +503,10 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 def check_and_finalize_verifications():
     current_time = int(time.time())
     for task_id in list(processed_tasks):
-        task = contract.functions.getTask(task_id).call()
-        task_status = task[0]
-        time_status_changed = task[3]
+        task_tuple = contract.functions.getTask(task_id).call()
+        task = Task(*task_tuple)
+        task_status = task.status
+        time_status_changed = task.timeStatusChanged
         max_dispute_time = contract.functions.maxDisputeTime().call()
 
         if task_status == 2 and (current_time - time_status_changed) >= max_dispute_time:

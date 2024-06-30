@@ -5,7 +5,7 @@ import requests
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts, handle_contract_custom_error
+from common import load_contracts, handle_contract_custom_error, TaskStatus, Vote, PoolState, Task
 from io import BytesIO
 import torch
 
@@ -105,10 +105,10 @@ class Master:
 
     def submit_selection_req(self):
         try:
-            if self.pool.functions.state().call() != 0:
+            if self.pool.functions.state().call() != PoolState.Unlocked.value:
                 return self.pool.functions.currentSelectionId().call()
 
-            self.wait_for_state_change(0)
+            self.wait_for_state_change(PoolState.Unlocked.value)
             logging.info("Submitting selection request")
 
             tx = self.build_transaction(self.pool.functions.submitSelectionReq(), gas=500000)
@@ -160,22 +160,22 @@ class Master:
 
     def wait_for_state_change(self, target_state):
         while True:
-            current_state = self.pool.functions.state().call()
-            logging.info(f"Current pool state: {current_state}, target state: {target_state}")
+            current_state = PoolState(self.pool.functions.state().call())
+            logging.info(f"Current pool state: {current_state.name}, target state: {PoolState(target_state).name}")
             
-            if current_state == target_state:
+            if current_state == PoolState(target_state):
                 break
 
-            if current_state == 0 and target_state == 1:
+            if current_state == PoolState.Unlocked:
                 logging.info("Triggering lockGlobalState to change state to Locked")
                 self.trigger_lock_global_state()
-            elif current_state == 1 and target_state == 2:
+            elif current_state == PoolState.Locked:
                 logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
-            elif current_state == 2 and target_state == 0:
+            elif current_state == PoolState.SelectionsFinalizing:
                 logging.info("Triggering removeGlobalLock to change state to Unlocked")
                 self.trigger_remove_global_lock()
             else:
-                logging.info(f"Waiting for the pool state to change to {target_state}")
+                logging.info(f"Waiting for the pool state to change to {PoolState(target_state).name}")
                 time.sleep(5)
 
     def fulfill_random_words(self, vrf_request_id):
@@ -193,7 +193,7 @@ class Master:
 
             logging.info(f"Selecting solver for task ID: {task_id}")
 
-            self.wait_for_state_change(2)
+            self.wait_for_state_change(PoolState.SelectionsFinalizing.value)
 
             tx = self.build_transaction(self.contracts[task_type].functions.selectSolver(task_id), gas=1000000)
             self.sign_and_send_transaction(tx)
@@ -208,7 +208,7 @@ class Master:
 
             logging.info(f"Removing solver stake for task ID: {task_id}")
 
-            self.wait_for_state_change(0)
+            self.wait_for_state_change(PoolState.Unlocked.value)
 
             tx = self.build_transaction(self.contracts[task_type].functions.removeSolverStake(task_id), gas=1000000)
             self.sign_and_send_transaction(tx)
@@ -230,9 +230,10 @@ class Master:
 
     def get_task_result(self, task_type, task_id):
         try:
-            task = self.contracts[task_type].functions.getTask(task_id).call()
-            if task[0] == 4:
-                return json.loads(task[6].decode('utf-8'))
+            task_tuple = self.contracts[task_type].functions.getTask(task_id).call()
+            task = Task(*task_tuple)
+            if task.status == TaskStatus.Verified:
+                return json.loads(task.postedSolution.decode('utf-8'))
             return None
         except Exception as e:
             logging.error(f"Error getting task result for {task_type} with task ID {task_id}: {e}")
