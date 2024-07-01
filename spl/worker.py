@@ -263,7 +263,7 @@ def handle_event(event):
 
     if result_url:
         last_block = last_gradient_update[task_type]
-        submit_solution(task_id, result_url, last_block)
+        submit_solution(task_id, result_url, last_block, task_type)
 
     processed_tasks.add(task_id)
     
@@ -271,14 +271,16 @@ def handle_event(event):
 
     resume_gradient_updates()
 
-def submit_solution(task_id, result_url, last_block):
+def submit_solution(task_id, result_url, last_block, task_type):
     result = {
         'result_url': result_url,
         'last_block': last_block
     }
-    print(f"Submitting solution for task {task_id}...")
+    print(f"Submitting solution for task {task_id} with result URL: {result_url} and last block: {last_block}")
     tx = build_transaction(contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')))
     sign_and_send_transaction(tx)
+    print(f"Submitted solution for task {task_id} and type {task_type}")
+
 
 def upload_tensors_and_grads(error_output, grads, layer_idx):
     error_output_url = upload_tensor(error_output)

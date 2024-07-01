@@ -240,8 +240,10 @@ class Master:
         try:
             task_tuple = self.contracts[task_type].functions.getTask(task_id).call()
             task = Task(*task_tuple)
-            if task.status == TaskStatus.SolutionSubmitted: # not waiting until Verified -- optimistic assumption
-                return json.loads(task.postedSolution.decode('utf-8'))
+            print(f"{task_type} Task status: {task.status}")
+            print(f"Expected status: {TaskStatus.SolutionSubmitted.value}")
+            if task.status == TaskStatus.SolutionSubmitted.value: # not waiting until Verified -- optimistic assumption
+                return json.loads(task.postedSolution.decode('utf-8'))                
             return None
         except Exception as e:
             logging.error(f"Error getting task result for {task_type} with task ID {task_id}: {e}")
@@ -349,7 +351,7 @@ class Master:
     def wait_for_result(self, task_type, task_id):
         while True:
             result = self.get_task_result(task_type, task_id)
-            if result:
+            if result is not None:
                 return result
             time.sleep(5)
 

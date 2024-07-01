@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import threading
+import requests
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
 from common import model_args, tokenizer
