@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--pool_address', type=str, required=True, help="Pool contract address")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
-    parser.add_argument('--local_storage_dir', type=str, default='local_storage', help="Directory for local storage of files")
+    parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
     return parser.parse_args()
@@ -110,7 +110,7 @@ def initialize_model_and_embedding():
     if not embedding_initialized:
         vocab_size = tokenizer.get_vocab_size()
         global embedding
-        embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
+        embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)  # Ensure embedding is on the correct device
         embedding_initialized = True
 
     freqs_cis = precompute_freqs_cis(
@@ -119,7 +119,8 @@ def initialize_model_and_embedding():
         model_args.rope_theta,
     )
 
-    mask = torch.triu(torch.full((model_args.max_seq_len, model_args.max_seq_len), float('-inf')), diagonal=1).to(device)
+    mask = torch.triu(torch.full((model_args.max_seq_len, model_args.max_seq_len), float('-inf')), diagonal=1).to(device)  # Ensure mask is on the correct device
+
 
 def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
@@ -128,6 +129,16 @@ def check_for_nans(tensor, name):
 def download_file(url):
     response = requests.get(url)
     return torch.load(BytesIO(response.content))
+
+def download_json(url):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Raise an error for bad status codes
+        data = response.json()  # Parse and return the JSON content
+        return torch.tensor(data, dtype=torch.long).to(device)  # Convert to tensor
+    except requests.RequestException as e:
+        logging.error(f"Failed to download JSON from {url}: {e}")
+        raise
 
 def upload_tensor(tensor):
     local_file_path = os.path.join(args.local_storage_dir, f'{int(time.time())}.pt')
@@ -141,7 +152,6 @@ def pause_gradient_updates():
 def resume_gradient_updates():
     global gradient_update_paused
     gradient_update_paused = False
-    apply_gradient_updates()
 
 def build_transaction(function, value=0):
     nonce = web3.eth.get_transaction_count(worker_address)
@@ -202,22 +212,25 @@ def handle_event(event):
     task_params_bytes = task.params
     task_params = json.loads(task_params_bytes.decode('utf-8'))
 
-    batch_url = task_params.get('batch_url')
-    inputs_url = task_params.get('inputs_url')
-    error_url = task_params.get('error_url')
-    targets_url = task_params.get('targets_url')
-    logits_url = task_params.get('logits_url')
-
-    if batch_url:
-        batch = download_file(batch_url)
-    if inputs_url:
-        inputs = download_file(inputs_url)
-    if error_url:
-        error = download_file(error_url)
-    if targets_url:
-        targets = download_file(targets_url)
-    if logits_url:
-        logits = download_file(logits_url)
+    batch = None
+    if 'batch_url' in task_params:
+        batch = download_json(task_params['batch_url'])
+    
+    inputs = None
+    if 'inputs_url' in task_params:
+        inputs = download_file(task_params['inputs_url'])
+    
+    error = None
+    if 'error_url' in task_params:
+        error = download_file(task_params['error_url'])
+    
+    targets = None
+    if 'targets_url' in task_params:
+        targets = download_file(task_params['targets_url'])
+    
+    logits = None
+    if 'logits_url' in task_params:
+        logits = download_file(task_params['logits_url'])
 
     pause_gradient_updates()
 
@@ -250,9 +263,10 @@ def handle_event(event):
         submit_solution(task_id, result_url, last_block)
 
     processed_tasks.add(task_id)
+    
+    print(f"Processed task {task_id} successfully")
 
     resume_gradient_updates()
-    sync_tensors_to_latest_state()
 
 def submit_solution(task_id, result_url, last_block):
     result = {
@@ -317,9 +331,21 @@ def grads_to_sparse(grads):
 
 def embed_task(batch):
     global embedding
+
+    # Ensure batch is a tensor and move to the correct device
+    #if not isinstance(batch, torch.Tensor):
+    #    print("Batch is not a tensor, converting now.")
+    #    batch = torch.tensor(batch, dtype=torch.long)
+
+    #batch = batch.to(device)  # Move batch to the correct device
+
+    #print(f"Batch type: {type(batch)}, Batch shape: {batch.shape}")
+
     inputs = embedding(batch)
     check_for_nans(inputs, "embedding outputs")
     tensors['outputs'] = inputs
+
+
 
 def forward_task(layer_idx, inputs):
     global freqs_cis, mask, tensors

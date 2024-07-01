@@ -3,7 +3,7 @@ import os
 import json
 import logging
 import threading
-from flask import Flask, request, jsonify, Response, stream_with_context, send_file
+from flask import Flask, request, jsonify, Response, stream_with_context, send_file, send_from_directory
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
@@ -133,9 +133,9 @@ def get_batch():
         preloaded_batch = None
 
     try:
-        batch_url = os.path.join(data_dir, 'batch.json')
-        with open(batch_url, 'w') as file:
-            json.dump(batch, file)
+        batch_url = 'http://localhost:5001/data/batch.json'
+        #with open(batch_url, 'w') as file:
+        #    json.dump(batch, file)
         
         threading.Thread(target=preload_batch).start()
 
@@ -292,6 +292,15 @@ def check_stake():
         return jsonify({'status': 'all_staked'})
     else:
         return jsonify({'status': 'waiting', 'staked_workers': staked_workers, 'total_workers': total_workers})
+
+@app.route('/data/<path:filename>', methods=['GET'])
+def get_data_file(filename):
+    logging.info(f"Accessing file: {filename}")
+    try:
+        return send_from_directory(data_dir, filename)
+    except Exception as e:
+        logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
+        return jsonify({'error': 'File not found'}), 404
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")
