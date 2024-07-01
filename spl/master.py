@@ -62,6 +62,7 @@ class Master:
     def approve_token(self, token_address, spender_address, amount):
         token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
         tx = self.build_transaction(token_contract.functions.approve(spender_address, amount), gas=100000)
+        print(f"Submitting approve transaction for token at {token_address}...")
         self.sign_and_send_transaction(tx)
 
     def submit_task(self, task_type, params):
@@ -78,6 +79,7 @@ class Master:
             self.approve_token(token_address, spender_address, fee)
 
             tx = self.build_transaction(self.contracts[task_type].functions.submitTaskRequest(encoded_params), gas=1000000)
+            print(f"Submitting submitTaskRequest transaction for task type {task_type}...")
             receipt = self.sign_and_send_transaction(tx)
 
             logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
@@ -112,6 +114,7 @@ class Master:
             logging.info("Submitting selection request")
 
             tx = self.build_transaction(self.pool.functions.submitSelectionReq(), gas=500000)
+            print("Submitting submitSelectionReq transaction...")
             receipt = self.sign_and_send_transaction(tx)
 
             unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
@@ -143,6 +146,7 @@ class Master:
             time.sleep(remaining_time)
 
         tx = self.build_transaction(self.pool.functions.lockGlobalState(), gas=500000)
+        print("Submitting lockGlobalState transaction...")
         self.sign_and_send_transaction(tx)
 
     def trigger_remove_global_lock(self):
@@ -156,6 +160,7 @@ class Master:
             time.sleep(remaining_time)
 
         tx = self.build_transaction(self.pool.functions.removeGlobalLock(), gas=500000)
+        print("Submitting removeGlobalLock transaction...")
         self.sign_and_send_transaction(tx)
 
     def wait_for_state_change(self, target_state):
@@ -181,6 +186,7 @@ class Master:
     def fulfill_random_words(self, vrf_request_id):
         try:
             tx = self.build_transaction(self.vrf_coordinator.functions.fulfillRandomWords(vrf_request_id), gas=500000)
+            print("Submitting fulfillRandomWords transaction...")
             self.sign_and_send_transaction(tx)
         except Exception as e:
             logging.error(f"Error fulfilling random words: {e}")
@@ -196,6 +202,7 @@ class Master:
             self.wait_for_state_change(PoolState.SelectionsFinalizing.value)
 
             tx = self.build_transaction(self.contracts[task_type].functions.selectSolver(task_id), gas=1000000)
+            print(f"Submitting selectSolver transaction for task ID {task_id}...")
             self.sign_and_send_transaction(tx)
         except Exception as e:
             logging.error(f"Error selecting solver: {e}")
@@ -211,6 +218,7 @@ class Master:
             self.wait_for_state_change(PoolState.Unlocked.value)
 
             tx = self.build_transaction(self.contracts[task_type].functions.removeSolverStake(task_id), gas=1000000)
+            print(f"Submitting removeSolverStake transaction for task ID {task_id}...")
             self.sign_and_send_transaction(tx)
         except Exception as e:
             logging.error(f"Error removing solver stake: {e}")
@@ -232,7 +240,7 @@ class Master:
         try:
             task_tuple = self.contracts[task_type].functions.getTask(task_id).call()
             task = Task(*task_tuple)
-            if task.status == TaskStatus.Verified:
+            if task.status == TaskStatus.SolutionSubmitted: # not waiting until Verified -- optimistic assumption
                 return json.loads(task.postedSolution.decode('utf-8'))
             return None
         except Exception as e:

@@ -3,11 +3,10 @@ import os
 import json
 import logging
 import threading
-from flask import Flask, request, jsonify, Response, stream_with_context, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
-import requests
 
 app = Flask(__name__)
 sync_status = {}
@@ -81,6 +80,8 @@ def preload_batch():
 
     if batch:
         preloaded_batch = batch
+        with open(os.path.join(data_dir, 'batch.json'), 'w') as file:
+            json.dump(batch, file)
 
 preload_batch()
 
@@ -133,13 +134,9 @@ def get_batch():
         preloaded_batch = None
 
     try:
-        batch_url = 'http://localhost:5001/data/batch.json'
-        #with open(batch_url, 'w') as file:
-        #    json.dump(batch, file)
-        
+        batch_file_path = os.path.join(data_dir, 'batch.json')
         threading.Thread(target=preload_batch).start()
-
-        return jsonify({'batch_url': batch_url})
+        return jsonify({'batch_url': f'http://localhost:5001/data/{os.path.basename(batch_file_path)}'})
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
         return jsonify({'error': 'Could not get batch'}), 500

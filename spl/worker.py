@@ -141,9 +141,10 @@ def download_json(url):
         raise
 
 def upload_tensor(tensor):
+    tensor_name = f'{int(time.time())}.pt'
     local_file_path = os.path.join(args.local_storage_dir, f'{int(time.time())}.pt')
     torch.save(tensor, local_file_path)
-    return f'file://{local_file_path}'
+    return f'{args.sot_url}/data/{tensor_name}'
 
 def pause_gradient_updates():
     global gradient_update_paused
@@ -173,9 +174,11 @@ def deposit_stake():
     global stake_deposited
     if not stake_deposited:
         try:
+            print("Submitting approve transaction for depositing stake...")
             approve_tx = build_transaction(token_contract.functions.approve(args.pool_address, stake_amount))
             sign_and_send_transaction(approve_tx)
 
+            print("Submitting depositStake transaction...")
             deposit_tx = build_transaction(pool_contract.functions.depositStake(subnet_id, args.group))
             sign_and_send_transaction(deposit_tx)
 
@@ -273,6 +276,7 @@ def submit_solution(task_id, result_url, last_block):
         'result_url': result_url,
         'last_block': last_block
     }
+    print(f"Submitting solution for task {task_id}...")
     tx = build_transaction(contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')))
     sign_and_send_transaction(tx)
 
@@ -344,8 +348,6 @@ def embed_task(batch):
     inputs = embedding(batch)
     check_for_nans(inputs, "embedding outputs")
     tensors['outputs'] = inputs
-
-
 
 def forward_task(layer_idx, inputs):
     global freqs_cis, mask, tensors
@@ -537,6 +539,7 @@ def check_and_finalize_verifications():
 
         if task_status == 2 and (current_time - time_status_changed) >= max_dispute_time:
             if contract.functions.canVerificationBeFinalized(task_id).call():
+                print(f"Submitting finalizeVerification transaction for task {task_id}...")
                 tx = build_transaction(contract.functions.finalizeVerification(task_id))
                 sign_and_send_transaction(tx)
                 processed_tasks.remove(task_id)
