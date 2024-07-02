@@ -1,3 +1,4 @@
+# worker.py
 import argparse
 import json
 import logging
@@ -141,7 +142,7 @@ def download_json(url):
 
 def upload_tensor(tensor):
     tensor_name = f'{int(time.time())}.pt'
-    local_file_path = os.path.join(args.local_storage_dir, f'{int(time.time())}.pt')
+    local_file_path = os.path.join(args.local_storage_dir, tensor_name)
     torch.save(tensor, local_file_path)
     return f'{args.sot_url}/data/{tensor_name}'
 
@@ -327,7 +328,6 @@ def grads_to_sparse(grads):
             topk = torch.topk(flat_grad.abs(), k)
             indices.append(topk.indices)
             values.append(flat_grad[topk.indices])
-            flat_grad[topk.indices] = 0
     indices = torch.cat(indices)
     values = torch.cat(values)
     shape = grads[0].shape
@@ -575,7 +575,6 @@ def initialize_tensor(tensor_name):
     except requests.exceptions.RequestException as e:
         logging.error(f"Request exception in initialize_tensor: {e}")
 
-
 def update_tensor(tensor_name):
     try:
         response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name})
@@ -601,7 +600,6 @@ def update_tensor(tensor_name):
             logging.error(f"Failed to apply gradient updates: {tensor_name}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Request exception while updating gradients: {e}")
-
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
