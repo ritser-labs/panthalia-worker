@@ -2,11 +2,12 @@ import os
 import json
 import logging
 import threading
-from flask import Flask, request, jsonify, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory, Response
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
 from io import BytesIO
+import requests
 
 app = Flask(__name__)
 sync_status = {}
@@ -21,7 +22,9 @@ if not os.path.exists(data_dir):
 
 logging.info("Initializing or loading initial state...")
 state_dir = os.path.join(data_dir, 'state')
+gradients_dir = os.path.join(data_dir, 'gradients')
 os.makedirs(state_dir, exist_ok=True)
+os.makedirs(gradients_dir, exist_ok=True)
 
 # Dictionary to store gradient updates
 gradient_updates = {}
@@ -163,6 +166,8 @@ def update_state():
     result_url = data.get('result_url')
     block_number = data.get('block_number')
 
+    logging.debug(f"Received task_type: {task_type}, result_url: {result_url}, block_number: {block_number}")
+
     if not task_type or not result_url or block_number is None:
         logging.error("Missing task_type, result_url, or block_number in /update_state request")
         return jsonify({'error': 'Missing task_type, result_url, or block_number'}), 400
@@ -175,18 +180,23 @@ def update_state():
         tensor_data = BytesIO(response.content)
         tensor = torch.load(tensor_data)
 
-        state_file_path = os.path.join(data_dir, f'state/{task_type}.pt')
+        state_file_path = os.path.join(state_dir, f'{task_type}.pt')
         if os.path.exists(state_file_path):
             current_tensor = torch.load(state_file_path)
-            current_tensor.add_(tensor)
+            updated_tensor = current_tensor + tensor  # Perform addition without in-place operation
         else:
-            current_tensor = tensor
+            updated_tensor = tensor
 
-        torch.save(current_tensor, state_file_path)
+        torch.save(updated_tensor, state_file_path)
+
+        # Save gradient update
+        gradient_update_path = os.path.join(gradients_dir, f'{task_type}_update.pt')
+        torch.save(tensor, gradient_update_path)
 
         # Store the gradient update along with the block number
-        gradient_updates[task_type] = {'tensor': tensor, 'block_number': block_number}
+        gradient_updates[task_type] = {'file_path': gradient_update_path, 'block_number': block_number}
 
+        logging.debug(f"Updated state and stored gradient update for {task_type}")
         return jsonify({'status': 'success'})
     except Exception as e:
         logging.error(f"Error in /update_state: {e}", exc_info=True)
@@ -199,7 +209,7 @@ def latest_state():
     if not tensor_name:
         return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-    state_file_path = os.path.join(data_dir, 'state', f'{tensor_name}.pt')
+    state_file_path = os.path.join(state_dir, f'{tensor_name}.pt')
     if not os.path.exists(state_file_path):
         return jsonify({'error': 'Tensor not found'}), 404
 
@@ -213,16 +223,24 @@ def latest_state():
 def gradient_update():
     logging.info("Accessing /gradient_update endpoint")
     tensor_name = request.args.get('tensor_name')
+    logging.debug(f"Received tensor_name: {tensor_name}")
+
+    logging.debug(f"Available gradient updates: {list(gradient_updates.keys())}")
+
     if not tensor_name:
+        logging.error("Missing tensor_name parameter")
         return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
     if tensor_name not in gradient_updates:
-        return jsonify({'error': 'No updates available for tensor'}), 404
+        logging.error(f"No updates available for tensor {tensor_name}")
+        return jsonify({'error': f'No updates available for tensor {tensor_name}'}), 404
 
     try:
-        tensor_data = gradient_updates[tensor_name]['tensor']
+        gradient_update_path = gradient_updates[tensor_name]['file_path']
         block_number = gradient_updates[tensor_name]['block_number']
-        return send_file(BytesIO(torch.save(tensor_data)), mimetype='application/octet-stream', headers={'block_number': block_number})
+        response = send_file(gradient_update_path, mimetype='application/octet-stream')
+        response.headers['block_number'] = block_number
+        return response
     except Exception as e:
         logging.error(f"Error in /gradient_update: {e}", exc_info=True)
         return jsonify({'error': 'Could not retrieve gradient update'}), 500
@@ -246,13 +264,11 @@ def stream_gradients():
         return jsonify({'error': 'Missing task_id or gradients'}), 400
 
     try:
-        os.makedirs(os.path.join(data_dir, 'gradients'), exist_ok=True)
-        gradient_data = {
-            'gradients': gradients,
-            'block_number': block_number
-        }
-        with open(os.path.join(data_dir, f'gradients/{task_id}.json'), 'w') as file:
-            json.dump(gradient_data, file)
+        gradient_file_path = os.path.join(gradients_dir, f'{task_id}.pt')
+        tensor_data = BytesIO(json.dumps(gradients).encode())
+        tensor = torch.load(tensor_data)
+        torch.save(tensor, gradient_file_path)
+
         return jsonify({'status': 'success'})
     except Exception as e:
         logging.error(f"Error in /stream_gradients: {e}", exc_info=True)

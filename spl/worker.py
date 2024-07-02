@@ -569,6 +569,7 @@ def initialize_tensor(tensor_name):
 def update_tensor(tensor_name):
     try:
         url = os.path.join(args.sot_url, 'gradient_update')
+        logging.debug(f"Requesting gradient update for tensor: {tensor_name} from URL: {url}")
         response = requests.get(url, params={'tensor_name': tensor_name})
         response.raise_for_status()  # Raise an error for bad status codes
 
@@ -584,6 +585,7 @@ def update_tensor(tensor_name):
         logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}")
     except Exception as e:
         logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
+
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
