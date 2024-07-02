@@ -549,7 +549,7 @@ def report_sync_status(status):
     except requests.RequestException as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-def sync_tensors_to_latest_state(tensor_name):
+def initialize_tensor(tensor_name):
     try:
         response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name})
         if response.status_code == 200:
@@ -573,10 +573,10 @@ def sync_tensors_to_latest_state(tensor_name):
         else:
             logging.error(f"Failed to sync tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:
-        logging.error(f"Request exception in sync_tensors_to_latest_state: {e}")
+        logging.error(f"Request exception in initialize_tensor: {e}")
 
 
-def apply_gradient_updates(tensor_name):
+def update_tensor(tensor_name):
     try:
         response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name})
         if response.status_code == 200:
@@ -628,13 +628,13 @@ def main():
     logging.info("Starting tensor synchronization...")
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
     for tensor_name in relevant_tensors:
-        sync_tensors_to_latest_state(tensor_name)
+        initialize_tensor(tensor_name)
     report_sync_status('synced')
 
     while True:
         if not gradient_update_paused:
             for tensor_name in relevant_tensors:
-                apply_gradient_updates(tensor_name)
+                update_tensor(tensor_name)
         deposit_stake()
         for event in event_filter.get_new_entries():
             handle_event(event)
