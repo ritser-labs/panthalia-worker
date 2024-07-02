@@ -121,7 +121,6 @@ def initialize_model_and_embedding():
 
     mask = torch.triu(torch.full((model_args.max_seq_len, model_args.max_seq_len), float('-inf')), diagonal=1).to(device)  # Ensure mask is on the correct device
 
-
 def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
         logging.error(f"NaNs detected in {name}")
@@ -281,7 +280,6 @@ def submit_solution(task_id, result_url, last_block, task_type):
     sign_and_send_transaction(tx)
     print(f"Submitted solution for task {task_id} and type {task_type}")
 
-
 def upload_tensors_and_grads(error_output, grads, layer_idx):
     error_output_url = upload_tensor(error_output)
     grads_url = upload_tensor(grads_to_sparse(grads))
@@ -337,15 +335,6 @@ def grads_to_sparse(grads):
 
 def embed_task(batch):
     global embedding
-
-    # Ensure batch is a tensor and move to the correct device
-    #if not isinstance(batch, torch.Tensor):
-    #    print("Batch is not a tensor, converting now.")
-    #    batch = torch.tensor(batch, dtype=torch.long)
-
-    #batch = batch.to(device)  # Move batch to the correct device
-
-    #print(f"Batch type: {type(batch)}, Batch shape: {batch.shape}")
 
     inputs = embedding(batch)
     check_for_nans(inputs, "embedding outputs")
@@ -565,26 +554,54 @@ def sync_tensors_to_latest_state(tensor_name):
         response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name})
         if response.status_code == 200:
             latest_state = torch.load(BytesIO(response.content))
-            tensors[tensor_name] = latest_state
+            if latest_state.is_sparse:
+                indices = latest_state._indices()
+                values = latest_state._values()
+                current_tensor = tensors.get(tensor_name, torch.zeros(latest_state.size(), device=latest_state.device))
+
+                if indices.numel() > 0 and values.numel() > 0:
+                    reshaped_values = values.view(indices.shape[1], -1)
+                    current_tensor[indices[0], indices[1]] = reshaped_values
+                else:
+                    # Handle the case where indices or values are empty
+                    current_tensor[indices[0], indices[1]] = torch.tensor([], dtype=current_tensor.dtype, device=current_tensor.device)
+
+                tensors[tensor_name] = current_tensor
+            else:
+                tensors[tensor_name] = latest_state
             last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
         else:
             logging.error(f"Failed to sync tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Request exception in sync_tensors_to_latest_state: {e}")
 
+
 def apply_gradient_updates(tensor_name):
     try:
         response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name})
         if response.status_code == 200:
             latest_state = torch.load(BytesIO(response.content))
-            tensor = tensors.get(tensor_name, torch.zeros_like(latest_state))
-            tensor.add_(latest_state)
-            tensors[tensor_name] = tensor
+            if latest_state.is_sparse:
+                indices = latest_state._indices()
+                values = latest_state._values()
+                current_tensor = tensors.get(tensor_name, torch.zeros(latest_state.size(), device=latest_state.device))
+
+                if indices.numel() > 0 and values.numel() > 0:
+                    reshaped_values = values.view(indices.shape[1], -1)
+                    current_tensor[indices[0], indices[1]] = reshaped_values
+                else:
+                    # Handle the case where indices or values are empty
+                    current_tensor[indices[0], indices[1]] = torch.tensor([], dtype=current_tensor.dtype, device=current_tensor.device)
+
+                tensors[tensor_name] = current_tensor
+            else:
+                tensors[tensor_name] = latest_state
             last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
         else:
             logging.error(f"Failed to apply gradient updates: {tensor_name}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Request exception while updating gradients: {e}")
+
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []

@@ -173,9 +173,14 @@ def update_state():
         tensor_data = BytesIO(response.content)
         tensor = torch.load(tensor_data)
 
-        os.makedirs(os.path.join(data_dir, 'state'), exist_ok=True)
         state_file_path = os.path.join(data_dir, f'state/{task_type}.pt')
-        torch.save(tensor, state_file_path)
+        if os.path.exists(state_file_path):
+            current_tensor = torch.load(state_file_path)
+            current_tensor.add_(tensor)
+        else:
+            current_tensor = tensor
+
+        torch.save(current_tensor, state_file_path)
 
         # Store the block number along with the state
         block_number_file_path = os.path.join(data_dir, f'state/{task_type}_block_number.json')
@@ -186,28 +191,6 @@ def update_state():
     except Exception as e:
         logging.error(f"Error in /update_state: {e}", exc_info=True)
         return jsonify({'error': 'Could not update state'}), 500
-
-@app.route('/update_adam', methods=['POST'])
-def update_adam():
-    logging.info("Accessing /update_adam endpoint")
-    data = request.json
-    task_type = data.get('task_type')
-    adam_m = data.get('adam_m')
-    adam_v = data.get('adam_v')
-
-    if not task_type or adam_m is None or adam_v is None:
-        logging.error("Missing task_type, adam_m, or adam_v in /update_adam request")
-        return jsonify({'error': 'Missing task_type, adam_m, or adam_v'}), 400
-
-    try:
-        os.makedirs(os.path.join(data_dir, 'adam_m'), exist_ok=True)
-        os.makedirs(os.path.join(data_dir, 'adam_v'), exist_ok=True)
-        torch.save(torch.tensor(adam_m), os.path.join(data_dir, f'adam_m/{task_type}.pt'))
-        torch.save(torch.tensor(adam_v), os.path.join(data_dir, f'adam_v/{task_type}.pt'))
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        logging.error(f"Error in /update_adam: {e}", exc_info=True)
-        return jsonify({'error': 'Could not update Adam state'}), 500
 
 @app.route('/latest_state', methods=['GET'])
 def latest_state():

@@ -115,7 +115,7 @@ class Master:
 
             tx = self.build_transaction(self.pool.functions.submitSelectionReq(), gas=500000)
             print("Submitting submitSelectionReq transaction...")
-            receipt = self.sign_and_send_transaction(tx)
+            self.sign_and_send_transaction(tx)
 
             unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
             last_state_change_time = self.pool.functions.lastStateChangeTime().call()
@@ -367,7 +367,12 @@ class Master:
         self.update_adam_state(task_type, result['adam_m_url'], result['adam_v_url'], block_number)
 
     def update_adam_state(self, task_type, adam_m_url, adam_v_url, block_number):
-        response = requests.post(f"{self.sot_url}/update_adam", json={'task_type': task_type, 'adam_m': adam_m_url, 'adam_v': adam_v_url, 'block_number': block_number})
+        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': f'{task_type}_adam_m', 'result_url': adam_m_url, 'block_number': block_number})
+        if response.status_code != 200:
+            logging.error(f"Failed to update Adam state for {task_type}: {response.text}")
+        else:
+            logging.info(f"Updated Adam state for {task_type}")
+        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': f'{task_type}_adam_v', 'result_url': adam_v_url, 'block_number': block_number})
         if response.status_code != 200:
             logging.error(f"Failed to update Adam state for {task_type}: {response.text}")
         else:
