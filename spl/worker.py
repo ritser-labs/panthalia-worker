@@ -1,4 +1,3 @@
-# worker.py
 import argparse
 import json
 import logging
@@ -551,55 +550,40 @@ def report_sync_status(status):
 
 def initialize_tensor(tensor_name):
     try:
-        response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name})
-        if response.status_code == 200:
-            latest_state = torch.load(BytesIO(response.content))
-            if latest_state.is_sparse:
-                indices = latest_state._indices()
-                values = latest_state._values()
-                current_tensor = tensors.get(tensor_name, torch.zeros(latest_state.size(), device=latest_state.device))
+        url = os.path.join(args.sot_url, 'latest_state')
+        response = requests.get(url, params={'tensor_name': tensor_name})
+        response.raise_for_status()  # Raise an error for bad status codes
 
-                if indices.numel() > 0 and values.numel() > 0:
-                    reshaped_values = values.view(indices.shape[1], -1)
-                    current_tensor[indices[0], indices[1]] = reshaped_values
-                else:
-                    # Handle the case where indices or values are empty
-                    current_tensor[indices[0], indices[1]] = torch.tensor([], dtype=current_tensor.dtype, device=current_tensor.device)
+        latest_state = torch.load(BytesIO(response.content))
+        tensors[tensor_name] = latest_state.to(device)
+        last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
 
-                tensors[tensor_name] = current_tensor
-            else:
-                tensors[tensor_name] = latest_state
-            last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
-        else:
-            logging.error(f"Failed to sync tensor: {tensor_name}")
+        logging.info(f"Successfully initialized tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:
-        logging.error(f"Request exception in initialize_tensor: {e}")
+        logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"Failed to initialize tensor {tensor_name} due to error: {e}")
+        raise
 
 def update_tensor(tensor_name):
     try:
-        response = requests.get(f"{args.sot_url}/latest_state", params={'tensor_name': tensor_name})
-        if response.status_code == 200:
-            latest_state = torch.load(BytesIO(response.content))
-            if latest_state.is_sparse:
-                indices = latest_state._indices()
-                values = latest_state._values()
-                current_tensor = tensors.get(tensor_name, torch.zeros(latest_state.size(), device=latest_state.device))
+        url = os.path.join(args.sot_url, 'gradient_update')
+        response = requests.get(url, params={'tensor_name': tensor_name})
+        response.raise_for_status()  # Raise an error for bad status codes
 
-                if indices.numel() > 0 and values.numel() > 0:
-                    reshaped_values = values.view(indices.shape[1], -1)
-                    current_tensor[indices[0], indices[1]] = reshaped_values
-                else:
-                    # Handle the case where indices or values are empty
-                    current_tensor[indices[0], indices[1]] = torch.tensor([], dtype=current_tensor.dtype, device=current_tensor.device)
+        gradient_update = torch.load(BytesIO(response.content))
+        current_tensor = tensors.get(tensor_name, torch.zeros(gradient_update.size(), device=gradient_update.device))
+        current_tensor.add_(gradient_update)
 
-                tensors[tensor_name] = current_tensor
-            else:
-                tensors[tensor_name] = latest_state
-            last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
-        else:
-            logging.error(f"Failed to apply gradient updates: {tensor_name}")
+        tensors[tensor_name] = current_tensor
+        last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
+
+        logging.info(f"Successfully updated tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:
-        logging.error(f"Request exception while updating gradients: {e}")
+        logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}")
+    except Exception as e:
+        logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []

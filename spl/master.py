@@ -8,6 +8,7 @@ from web3.exceptions import ContractCustomError, TransactionNotFound
 from common import load_contracts, handle_contract_custom_error, TaskStatus, Vote, PoolState, Task
 from io import BytesIO
 import torch
+import os
 
 logging.basicConfig(level=logging.INFO)
 
@@ -379,11 +380,13 @@ class Master:
             logging.info(f"Updated Adam state for {task_type}")
 
     def get_batch_url(self):
-        response = requests.get(f"{self.sot_url}/get_batch")
+        url = os.path.join(self.sot_url, 'get_batch')
+        response = requests.get(url)
         return response.json()['batch_url']
 
     def get_targets_url(self):
-        response = requests.get(f"{self.sot_url}/get_targets")
+        url = os.path.join(self.sot_url, 'get_targets')
+        response = requests.get(url)
         return response.json()['targets_url']
 
 if __name__ == "__main__":

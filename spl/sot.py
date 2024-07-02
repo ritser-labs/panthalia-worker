@@ -1,13 +1,12 @@
-from io import BytesIO
 import os
 import json
 import logging
 import threading
-import requests
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
+from io import BytesIO
 
 app = Flask(__name__)
 sync_status = {}
@@ -23,6 +22,9 @@ if not os.path.exists(data_dir):
 logging.info("Initializing or loading initial state...")
 state_dir = os.path.join(data_dir, 'state')
 os.makedirs(state_dir, exist_ok=True)
+
+# Dictionary to store gradient updates
+gradient_updates = {}
 
 def initialize_tensor(name, shape, random_init=True):
     file_path = os.path.join(state_dir, f'{name}.pt')
@@ -182,10 +184,8 @@ def update_state():
 
         torch.save(current_tensor, state_file_path)
 
-        # Store the block number along with the state
-        block_number_file_path = os.path.join(data_dir, f'state/{task_type}_block_number.json')
-        with open(block_number_file_path, 'w') as block_file:
-            json.dump({'block_number': block_number}, block_file)
+        # Store the gradient update along with the block number
+        gradient_updates[task_type] = {'tensor': tensor, 'block_number': block_number}
 
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -208,6 +208,24 @@ def latest_state():
     except Exception as e:
         logging.error(f"Error in /latest_state: {e}", exc_info=True)
         return jsonify({'error': 'Could not retrieve latest state'}), 500
+
+@app.route('/gradient_update', methods=['GET'])
+def gradient_update():
+    logging.info("Accessing /gradient_update endpoint")
+    tensor_name = request.args.get('tensor_name')
+    if not tensor_name:
+        return jsonify({'error': 'Missing tensor_name parameter'}), 400
+
+    if tensor_name not in gradient_updates:
+        return jsonify({'error': 'No updates available for tensor'}), 404
+
+    try:
+        tensor_data = gradient_updates[tensor_name]['tensor']
+        block_number = gradient_updates[tensor_name]['block_number']
+        return send_file(BytesIO(torch.save(tensor_data)), mimetype='application/octet-stream', headers={'block_number': block_number})
+    except Exception as e:
+        logging.error(f"Error in /gradient_update: {e}", exc_info=True)
+        return jsonify({'error': 'Could not retrieve gradient update'}), 500
 
 @app.route('/stream_gradients', methods=['POST'])
 def stream_gradients():
