@@ -56,10 +56,10 @@ def calculate_transformer_block_size(args):
 
 # Calculate tensor sizes for initialization
 tensor_sizes = {
-    'embed': (model_args.vocab_size, model_args.dim),
-    'embed_adam_m': (model_args.vocab_size, model_args.dim),
-    'embed_adam_v': (model_args.vocab_size, model_args.dim),
-    'final_logits': (model_args.dim, model_args.vocab_size),
+    'embed': (model_args.vocab_size * model_args.dim,),
+    'embed_adam_m': (model_args.vocab_size * model_args.dim,),
+    'embed_adam_v': (model_args.vocab_size * model_args.dim,),
+    'final_logits': (model_args.dim * model_args.vocab_size,),
 }
 
 for i in range(model_args.n_layers):
