@@ -573,6 +573,12 @@ def update_tensor(tensor_name):
         response = requests.get(url, params={'tensor_name': tensor_name})
         response.raise_for_status()  # Raise an error for bad status codes
 
+        if response.headers['Content-Type'] == 'application/json':
+            json_data = response.json()
+            if json_data.get('status') == 'no_updates':
+                logging.info(f"No updates available for tensor {tensor_name}")
+                return
+
         gradient_update = torch.load(BytesIO(response.content))
         current_tensor = tensors.get(tensor_name, torch.zeros(gradient_update.size(), device=gradient_update.device))
         current_tensor.add_(gradient_update)
@@ -585,7 +591,6 @@ def update_tensor(tensor_name):
         logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}")
     except Exception as e:
         logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
-
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
