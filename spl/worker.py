@@ -99,19 +99,39 @@ processed_tasks = set()
 freqs_cis = None
 mask = None
 
+def block_to_tensor(block: TransformerBlock) -> torch.Tensor:
+    params = list(block.parameters())
+    return torch.cat([p.view(-1) for p in params])
+
+def tensor_to_block(tensor: torch.Tensor, layer_idx: int) -> TransformerBlock:
+    block = TransformerBlock(layer_idx, model_args).to(device)
+    pointer = 0
+    for param in block.parameters():
+        num_param = param.numel()
+        logging.debug(f"Pointer: {pointer}, Num param: {num_param}, Tensor size: {tensor.numel()}")
+        if pointer + num_param > tensor.numel():
+            raise ValueError(f"Pointer {pointer} with num_param {num_param} exceeds tensor size {tensor.numel()}")
+        logging.debug(f"Reshaping tensor slice from {pointer} to {pointer + num_param} to shape {param.size()}")
+        param.data = tensor[pointer:pointer + num_param].view(param.size()).to(device)
+        pointer += num_param
+    return block
+
 def initialize_model_and_embedding():
     global model_initialized, embedding_initialized, freqs_cis, mask
 
     if not model_initialized:
+        logging.info("Initializing distributed environment")
         initialize_distributed_environment(args.backend)
         initialize_model_parallel(model_parallel_size_=1)
         model_initialized = True
-    
+        logging.info("Model initialized")
+
     if not embedding_initialized:
         vocab_size = tokenizer.get_vocab_size()
         global embedding
         embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)  # Ensure embedding is on the correct device
         embedding_initialized = True
+        logging.info("Embedding initialized")
 
     freqs_cis = precompute_freqs_cis(
         model_args.dim // model_args.n_heads,
@@ -120,6 +140,12 @@ def initialize_model_and_embedding():
     )
 
     mask = torch.triu(torch.full((model_args.max_seq_len, model_args.max_seq_len), float('-inf')), diagonal=1).to(device)  # Ensure mask is on the correct device
+
+    logging.info("Initializing layers")
+    for layer_idx in range(model_args.n_layers):
+        tensor_name = f'layer_{layer_idx}'
+        initialize_tensor(tensor_name)
+        logging.info(f"Layer {layer_idx} initialized")
 
 def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
@@ -198,7 +224,7 @@ def report_stake_status():
         else:
             logging.error(f"Failed to report staking status for worker {worker_address}: {response.text}")
     except requests.RequestException as e:
-        logging.error(f"Exception while reporting staking status for worker {worker_address}: {e}")
+        logging.error(f"Exception while reporting staking status: {e}")
 
 def handle_event(event):
     task_id = event['args']['taskId']
@@ -341,10 +367,19 @@ def embed_task(batch):
 
 def forward_task(layer_idx, inputs):
     global freqs_cis, mask, tensors
+
+    logging.debug(f"Entering forward_task for layer {layer_idx} with inputs shape {inputs.shape}")
+
     if torch.isnan(inputs).any() or torch.isinf(inputs).any():
         raise ValueError(f"NaNs or Infs detected in inputs for layer {layer_idx}")
 
-    layer = tensors[f'layer_{layer_idx}']
+    layer_key = f'layer_{layer_idx}'
+    if layer_key not in tensors or tensors[layer_key] is None:
+        logging.error(f"Layer {layer_idx} not found or not initialized")
+        raise ValueError(f"Layer {layer_idx} not found or not initialized")
+
+    layer = tensors[layer_key]
+    logging.debug(f"Layer {layer_idx} successfully retrieved")
 
     start_pos = 0
     seqlen = inputs.shape[1]
@@ -352,13 +387,17 @@ def forward_task(layer_idx, inputs):
 
     bsz = inputs.shape[0]
     if layer.attention.cache_k is not None and layer.attention.cache_k.shape[0] != bsz:
+        logging.debug(f"Resizing cache_k for layer {layer_idx}")
         layer.attention.cache_k = torch.zeros(bsz, layer.attention.cache_k.shape[1], layer.attention.cache_k.shape[2], layer.attention.cache_k.shape[3], device=device)
     if layer.attention.cache_v is not None and layer.attention.cache_v.shape[0] != bsz:
+        logging.debug(f"Resizing cache_v for layer {layer_idx}")
         layer.attention.cache_v = torch.zeros(bsz, layer.attention.cache_v.shape[1], layer.attention.cache_v.shape[2], layer.attention.cache_v.shape[3], device=device)
 
+    logging.debug(f"Performing forward pass for layer {layer_idx}")
     outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask.to(device))
     check_for_nans(outputs, f"layer {layer_idx} outputs")
     tensors['outputs'] = outputs
+    logging.debug(f"Forward pass completed for layer {layer_idx}")
 
 def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global freqs_cis, mask, tensors
@@ -497,7 +536,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
         v = torch.zeros_like(tensor, device=device)
         adam_v[tensor_name] = v
 
-    for i, param in enumerate(tensor):
+    for i, param in enumerate(tensor.parameters()):
         if param.requires_grad:
             if param.grad is not None:
                 param.grad.zero_()
@@ -551,13 +590,28 @@ def report_sync_status(status):
 def initialize_tensor(tensor_name):
     try:
         url = os.path.join(args.sot_url, 'latest_state')
+        logging.info(f"Loading tensor {tensor_name} from {url}")
         response = requests.get(url, params={'tensor_name': tensor_name})
         response.raise_for_status()  # Raise an error for bad status codes
 
-        latest_state = torch.load(BytesIO(response.content))
-        tensors[tensor_name] = latest_state.to(device)
-        last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
+        state_dict = torch.load(BytesIO(response.content))
+        logging.debug(f"Loaded tensor {tensor_name} with shape {state_dict.shape}")
 
+        # Calculate the expected size of the parameters for the TransformerBlock
+        expected_size = sum(p.numel() for p in TransformerBlock(args.layer_idx, model_args).parameters())
+        actual_size = state_dict.numel()
+        logging.debug(f"Expected size: {expected_size}, Actual size: {actual_size}")
+
+        if actual_size != expected_size:
+            logging.error(f"Size mismatch for tensor {tensor_name}: expected {expected_size}, got {actual_size}")
+            return
+
+        if "layer_" in tensor_name:
+            tensors[tensor_name] = tensor_to_block(state_dict, args.layer_idx)
+        else:
+            tensors[tensor_name] = state_dict
+
+        last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
         logging.info(f"Successfully initialized tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
@@ -611,6 +665,7 @@ def get_relevant_tensors_for_task(task_type):
     return relevant_tensors
 
 def main():
+    logging.info("Starting main process")
     initialize_model_and_embedding()
     event_filter = contract.events.SolverSelected.create_filter(fromBlock='latest')
 
@@ -631,4 +686,5 @@ def main():
         time.sleep(10)
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
     main()
