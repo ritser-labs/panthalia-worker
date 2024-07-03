@@ -29,29 +29,66 @@ os.makedirs(gradients_dir, exist_ok=True)
 # Dictionary to store gradient updates
 gradient_updates = {}
 
+def calculate_transformer_block_size(args):
+    """
+    Calculate the number of parameters in a transformer block based on the model arguments.
+    """
+    head_dim = args.dim // args.n_heads
+    n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
+    hidden_dim = int(2 * 4 * args.dim / 3)
+    hidden_dim = args.multiple_of * ((hidden_dim + args.multiple_of - 1) // args.multiple_of)
+    
+    attention_size = (
+        args.dim * args.n_heads * head_dim +  # wq
+        args.dim * n_kv_heads * head_dim +    # wk
+        args.dim * n_kv_heads * head_dim +    # wv
+        args.dim * args.n_heads * head_dim    # wo
+    )
+    feedforward_size = (
+        args.dim * hidden_dim +  # w1
+        hidden_dim * args.dim +  # w2
+        args.dim * hidden_dim    # w3
+    )
+    norm_size = 2 * args.dim  # Two RMSNorm layers
+
+    total_size = attention_size + feedforward_size + norm_size
+    return total_size
+
+# Calculate tensor sizes for initialization
+tensor_sizes = {
+    'embed': (model_args.vocab_size, model_args.dim),
+    'embed_adam_m': (model_args.vocab_size, model_args.dim),
+    'embed_adam_v': (model_args.vocab_size, model_args.dim),
+    'final_logits': (model_args.dim, model_args.vocab_size),
+}
+
+for i in range(model_args.n_layers):
+    block_size = calculate_transformer_block_size(model_args)
+    tensor_sizes[f'layer_{i}'] = (block_size,)
+    tensor_sizes[f'layer_{i}_adam_m'] = (block_size,)
+    tensor_sizes[f'layer_{i}_adam_v'] = (block_size,)
+
 def initialize_tensor(name, shape, random_init=True):
     file_path = os.path.join(state_dir, f'{name}.pt')
     if os.path.exists(file_path):
-        pass
+        return
+    if random_init:
+        tensor = torch.randn(*shape)
     else:
-        if random_init:
-            tensor = torch.randn(*shape)
-        else:
-            tensor = torch.zeros(*shape)
-        torch.save(tensor, file_path)
+        tensor = torch.zeros(*shape)
+    torch.save(tensor, file_path)
 
-initialize_tensor('embed', (model_args.max_seq_len, model_args.dim))
-initialize_tensor('embed_adam_m', (model_args.max_seq_len, model_args.dim), random_init=False)
-initialize_tensor('embed_adam_v', (model_args.max_seq_len, model_args.dim), random_init=False)
-
-for i in range(model_args.n_layers):
-    initialize_tensor(f'layer_{i}', (model_args.max_seq_len, model_args.dim))
-    initialize_tensor(f'layer_{i}_adam_m', (model_args.max_seq_len, model_args.dim), random_init=False)
-    initialize_tensor(f'layer_{i}_adam_v', (model_args.max_seq_len, model_args.dim), random_init=False)
-
-initialize_tensor('final_logits', (model_args.max_seq_len, model_args.dim))
-initialize_tensor('final_logits_adam_m', (model_args.max_seq_len, model_args.dim), random_init=False)
-initialize_tensor('final_logits_adam_v', (model_args.max_seq_len, model_args.dim), random_init=False)
+def initialize_all_tensors():
+    initialize_tensor('embed', tensor_sizes['embed'])
+    initialize_tensor('embed_adam_m', tensor_sizes['embed_adam_m'], random_init=False)
+    initialize_tensor('embed_adam_v', tensor_sizes['embed_adam_v'], random_init=False)
+    for i in range(model_args.n_layers):
+        initialize_tensor(f'layer_{i}', tensor_sizes[f'layer_{i}'])
+        initialize_tensor(f'layer_{i}_adam_m', tensor_sizes[f'layer_{i}_adam_m'], random_init=False)
+        initialize_tensor(f'layer_{i}_adam_v', tensor_sizes[f'layer_{i}_adam_v'], random_init=False)
+    initialize_tensor('final_logits', tensor_sizes['final_logits'])
+    initialize_tensor('final_logits_adam_m', tensor_sizes['final_logits'], random_init=False)
+    initialize_tensor('final_logits_adam_v', tensor_sizes['final_logits'], random_init=False)
 
 logging.info("Loading Wikipedia dataset...")
 dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
@@ -319,4 +356,8 @@ def get_data_file(filename):
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")
+
+    logging.info("Initializing tensors")
+    initialize_all_tensors()
+
     app.run(host='0.0.0.0', port=5001)
