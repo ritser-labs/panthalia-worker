@@ -232,8 +232,8 @@ def gradient_update():
         return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
     if tensor_name not in gradient_updates:
-        logging.error(f"No updates available for tensor {tensor_name}")
-        return jsonify({'error': f'No updates available for tensor {tensor_name}'}), 404
+        logging.warning(f"No updates available for tensor {tensor_name}")
+        return jsonify({'status': 'no_updates', 'message': f'No updates available for tensor {tensor_name}'}), 200
 
     try:
         gradient_update_path = gradient_updates[tensor_name]['file_path']
