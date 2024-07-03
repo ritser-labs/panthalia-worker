@@ -256,22 +256,22 @@ class Master:
 
         logging.info("Starting embed forward task")
         embed_result = self.handle_embed_forward(model_params)
-        self.update_sot('embed', embed_result, embed_result['block_number'])
+        # Do not update SOT here
 
         layer_inputs_url = embed_result['result_url']
         for layer_idx in range(model_params['n_layers']):
             logging.info(f"Starting forward task for layer {layer_idx}")
             layer_result = self.handle_layer_forward(layer_idx, layer_inputs_url, model_params)
             layer_inputs_url = layer_result['result_url']
-            self.update_sot(f'forward_layer_{layer_idx}', layer_result, layer_result['block_number'])
+            # Do not update SOT here
 
         logging.info("Starting final logits forward task")
         final_logits_result = self.handle_final_logits_forward(layer_inputs_url)
-        self.update_sot('final_logits', final_logits_result, final_logits_result['block_number'])
+        # Do not update SOT here
 
         logging.info("Starting loss computation task")
         loss_result = self.handle_loss_computation(final_logits_result['result_url'])
-        self.update_sot('loss', loss_result, loss_result['block_number'])
+        # Do not update SOT here
 
         error_url = loss_result['result_url']
         for layer_idx in reversed(range(model_params['n_layers'])):
