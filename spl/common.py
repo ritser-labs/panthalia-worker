@@ -12,6 +12,7 @@ from web3 import Web3
 from enum import Enum
 import web3
 from collections import namedtuple
+from device import device
 
 # Define the new tokenizer and model arguments
 tokenizer = Tokenizer('cl100k_base')
@@ -27,9 +28,6 @@ model_args = ModelArgs(
     max_batch_size=32,
     max_seq_len=2048
 )
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 # Define Enums
 class TaskStatus(Enum):

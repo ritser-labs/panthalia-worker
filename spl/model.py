@@ -14,6 +14,7 @@ from fairscale.nn.model_parallel.layers import (
     VocabParallelEmbedding,
 )
 from torch import nn
+from device import device
 
 
 @dataclass
@@ -133,7 +134,7 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
+        ).to(device)
         self.cache_v = torch.zeros(
             (
                 args.max_batch_size,
@@ -141,7 +142,7 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
+        ).to(device)
 
     def forward(
         self,
