@@ -37,6 +37,9 @@ def report_sync():
     key = f"{task_type}_{layer_idx}" if layer_idx else task_type
     if task_type and status:
         sync_status[key] = status
+        synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
+        total_workers = len(sync_status)
+        print(f"Synced {synced_workers}/{total_workers} workers.")
         return jsonify({'status': 'success'})
     else:
         return jsonify({'status': 'error', 'message': 'Missing argument'}), 400
@@ -65,7 +68,9 @@ def wait_for_workers_to_sync(worker_count, timeout=600):
     """Wait for all workers to sync their deposit stake."""
     start_time = time.time()
     while time.time() - start_time < timeout:
-        if len(sync_status) >= worker_count and all(status == 'synced' for status in sync_status.values()):
+        synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
+        print(f"Synced {synced_workers}/{worker_count} workers.")
+        if synced_workers >= worker_count:
             print("All workers have synced.")
             return True
         time.sleep(2)
