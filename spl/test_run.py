@@ -39,7 +39,8 @@ def report_sync():
         sync_status[key] = status
         synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
         total_workers = len(sync_status)
-        print(f"Synced {synced_workers}/{total_workers} workers.")
+        unsynced_workers = [key.split('_')[0] + (f" layer {key.split('_')[-1]}" if 'layer' in key else '') for key, status in sync_status.items() if status != 'synced']
+        print(f"Synced {synced_workers}/{total_workers} workers. Unsynced workers: {unsynced_workers}")
         return jsonify({'status': 'success'})
     else:
         return jsonify({'status': 'error', 'message': 'Missing argument'}), 400
@@ -69,7 +70,8 @@ def wait_for_workers_to_sync(worker_count, timeout=600):
     start_time = time.time()
     while time.time() - start_time < timeout:
         synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
-        print(f"Synced {synced_workers}/{worker_count} workers.")
+        unsynced_workers = [key.split('_')[0] + (f" layer {key.split('_')[-1]}" if 'layer' in key else '') for key, status in sync_status.items() if status != 'synced']
+        print(f"Synced {synced_workers}/{worker_count} workers. Unsynced workers: {unsynced_workers}")
         if synced_workers >= worker_count:
             print("All workers have synced.")
             return True
@@ -147,6 +149,9 @@ if __name__ == "__main__":
     pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
     token_address = pool_contract.functions.token().call()
     token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+
+    # Initialize sync_status with all subnet addresses
+    sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
 
     # Generate wallets and fund them
     num_wallets = len(subnet_addresses)
