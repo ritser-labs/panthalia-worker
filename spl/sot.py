@@ -2,14 +2,14 @@ import os
 import json
 import logging
 import threading
-from flask import Flask, request, jsonify, send_file, send_from_directory, Response
+from quart import Quart, request, jsonify, send_file, send_from_directory, Response
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
 from io import BytesIO
 import requests
 
-app = Flask(__name__)
+app = Quart(__name__)
 sync_status = {}
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
     logging.FileHandler("sot.log"),
@@ -129,11 +129,11 @@ def preload_batch():
 preload_batch()
 
 @app.route('/health', methods=['GET'])
-def health_check():
+async def health_check():
     return jsonify({'status': 'healthy'}), 200
 
 @app.route('/latest_model_params', methods=['GET'])
-def get_latest_model_params():
+async def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
     try:
         with open(os.path.join(data_dir, 'latest_model_params.json'), 'r') as file:
@@ -144,9 +144,9 @@ def get_latest_model_params():
         return jsonify({'error': 'Could not load model parameters'}), 500
 
 @app.route('/publish_result', methods=['POST'])
-def publish_result():
+async def publish_result():
     logging.info("Accessing /publish_result endpoint")
-    data = request.json
+    data = await request.get_json()
     task_id = data.get('task_id')
     result = data.get('result')
 
@@ -164,7 +164,7 @@ def publish_result():
         return jsonify({'error': 'Could not publish result'}), 500
 
 @app.route('/get_batch', methods=['GET'])
-def get_batch():
+async def get_batch():
     logging.info("Accessing /get_batch endpoint")
     global preloaded_batch
 
@@ -185,7 +185,7 @@ def get_batch():
         return jsonify({'error': 'Could not get batch'}), 500
 
 @app.route('/get_targets', methods=['GET'])
-def get_targets():
+async def get_targets():
     logging.info("Accessing /get_targets endpoint")
     try:
         with open(os.path.join(data_dir, 'targets.json'), 'r') as file:
@@ -196,9 +196,9 @@ def get_targets():
         return jsonify({'error': 'Could not get targets'}), 500
 
 @app.route('/update_state', methods=['POST'])
-def update_state():
+async def update_state():
     logging.info("Accessing /update_state endpoint")
-    data = request.json
+    data = await request.get_json()
     task_type = data.get('task_type')
     result_url = data.get('result_url')
     block_number = data.get('block_number')
@@ -240,7 +240,7 @@ def update_state():
         return jsonify({'error': 'Could not update state'}), 500
 
 @app.route('/latest_state', methods=['GET'])
-def latest_state():
+async def latest_state():
     logging.info("Accessing /latest_state endpoint")
     tensor_name = request.args.get('tensor_name')
     if not tensor_name:
@@ -251,13 +251,13 @@ def latest_state():
         return jsonify({'error': 'Tensor not found'}), 404
 
     try:
-        return send_file(state_file_path, mimetype='application/octet-stream')
+        return await send_file(state_file_path, mimetype='application/octet-stream')
     except Exception as e:
         logging.error(f"Error in /latest_state: {e}", exc_info=True)
         return jsonify({'error': 'Could not retrieve latest state'}), 500
 
 @app.route('/gradient_update', methods=['GET'])
-def gradient_update():
+async def gradient_update():
     logging.info("Accessing /gradient_update endpoint")
     tensor_name = request.args.get('tensor_name')
     logging.debug(f"Received tensor_name: {tensor_name}")
@@ -275,7 +275,7 @@ def gradient_update():
     try:
         gradient_update_path = gradient_updates[tensor_name]['file_path']
         block_number = gradient_updates[tensor_name]['block_number']
-        response = send_file(gradient_update_path, mimetype='application/octet-stream')
+        response = await send_file(gradient_update_path, mimetype='application/octet-stream')
         response.headers['block_number'] = block_number
         return response
     except Exception as e:
@@ -283,9 +283,9 @@ def gradient_update():
         return jsonify({'error': 'Could not retrieve gradient update'}), 500
 
 @app.route('/stream_gradients', methods=['POST'])
-def stream_gradients():
+async def stream_gradients():
     logging.info("Accessing /stream_gradients endpoint")
-    data = request.json
+    data = await request.get_json()
     logging.debug(f"Received data: {data}")
 
     if not data:
@@ -312,7 +312,7 @@ def stream_gradients():
         return jsonify({'error': 'Could not stream gradients'}), 500
 
 @app.route('/tensor_size', methods=['GET'])
-def get_tensor_size():
+async def get_tensor_size():
     logging.info("Accessing /tensor_size endpoint")
     tensor_name = request.args.get('tensor_name')
     if not tensor_name:
@@ -327,8 +327,8 @@ def get_tensor_size():
     return jsonify({'size': size})
 
 @app.route('/report_stake', methods=['POST'])
-def report_stake():
-    data = request.json
+async def report_stake():
+    data = await request.get_json()
     worker_address = data.get('worker_address')
     if worker_address:
         sync_status[worker_address] = 'staked'
@@ -337,7 +337,7 @@ def report_stake():
         return jsonify({'status': 'error', 'message': 'Missing worker_address'}), 400
 
 @app.route('/check_stake', methods=['GET'])
-def check_stake():
+async def check_stake():
     total_workers = int(request.args.get('total_workers', 0))
     staked_workers = len(sync_status)
     if staked_workers >= total_workers:
@@ -346,10 +346,10 @@ def check_stake():
         return jsonify({'status': 'waiting', 'staked_workers': staked_workers, 'total_workers': total_workers})
 
 @app.route('/data/<path:filename>', methods=['GET'])
-def get_data_file(filename):
+async def get_data_file(filename):
     logging.info(f"Accessing file: {filename}")
     try:
-        return send_from_directory(data_dir, filename)
+        return await send_from_directory(data_dir, filename)
     except Exception as e:
         logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
         return jsonify({'error': 'File not found'}), 404
