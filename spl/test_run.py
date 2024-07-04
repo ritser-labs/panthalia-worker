@@ -39,8 +39,7 @@ def report_sync():
         sync_status[key] = status
         synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
         total_workers = len(sync_status)
-        unsynced_workers = [key.split('_')[0] + (f" layer {key.split('_')[-1]}" if 'layer' in key else '') for key, status in sync_status.items() if status != 'synced']
-        print(f"Synced {synced_workers}/{total_workers} workers. Unsynced workers: {unsynced_workers}")
+        print(f"Synced {synced_workers}/{total_workers} workers.")
         return jsonify({'status': 'success'})
     else:
         return jsonify({'status': 'error', 'message': 'Missing argument'}), 400
@@ -212,7 +211,7 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'forward_layer_0':
+        if args.detailed_logs or task_type == 'embed':
             worker_processes.append(subprocess.Popen(command))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))

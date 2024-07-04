@@ -99,6 +99,7 @@ processed_tasks = set()
 
 freqs_cis = None
 mask = None
+embedding = None  # Define the global embedding variable
 
 def block_to_tensor(block: TransformerBlock) -> torch.Tensor:
     params = list(block.parameters())
@@ -115,13 +116,13 @@ def tensor_to_block(tensor: torch.Tensor, layer_idx: int) -> TransformerBlock:
     for param in block.parameters():
         num_param = param.numel()
         logging.debug(f"Pointer: {pointer}, Num param: {num_param}, Tensor size: {tensor.numel()}")
-        
+
         if pointer + num_param > tensor.numel():
             raise ValueError(f"Pointer {pointer} with num_param {num_param} exceeds tensor size {tensor.numel()}")
-        
+
         param.data = tensor[pointer:pointer + num_param].view(param.size()).to(device)
         pointer += num_param
-    
+
     return block
 
 
@@ -247,7 +248,7 @@ def handle_event(event):
     solver = event['args']['solver']
 
     print(f"Received event for task {args.task_type} and id {task_id}")
-    
+
     if solver.lower() != worker_address.lower():
         return
 
@@ -259,19 +260,19 @@ def handle_event(event):
     batch = None
     if 'batch_url' in task_params:
         batch = download_json(task_params['batch_url'])
-    
+
     inputs = None
     if 'inputs_url' in task_params:
         inputs = download_file(task_params['inputs_url'])
-    
+
     error = None
     if 'error_url' in task_params:
         error = download_file(task_params['error_url'])
-    
+
     targets = None
     if 'targets_url' in task_params:
         targets = download_file(task_params['targets_url'])
-    
+
     logits = None
     if 'logits_url' in task_params:
         logits = download_file(task_params['logits_url'])
@@ -307,7 +308,7 @@ def handle_event(event):
         submit_solution(task_id, result_url, last_block, task_type)
 
     processed_tasks.add(task_id)
-    
+
     print(f"Processed task {task_id} successfully")
 
     resume_gradient_updates()
@@ -345,7 +346,7 @@ def extract_sparse_adam_params(grads, layer_idx):
         tensor_name = "embedding"
     else:
         tensor_name = f"layer_{layer_idx}"
-    
+
     for grad in grads:
         if grad is not None:
             flat_grad = grad.flatten()
@@ -465,9 +466,9 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     state_dict = tensors['output_layer_state_dict']
     output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
     output_layer.load_state_dict(state_dict)
-    
+
     logits = output_layer(inputs.to(device))
-    
+
     logits.retain_grad()
 
     logits.backward(error.to(device), retain_graph=True)
@@ -492,7 +493,7 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
 
     error = error.view(embeddings.shape)
     logging.info(f"Reshaped error tensor shape: {error.shape}")
-    
+
     embeddings.retain_grad()
 
     embeddings.backward(error.to(device), retain_graph=True)
@@ -544,7 +545,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
     m = adam_m[tensor_name]
     v = adam_v[tensor_name]
-    
+
     if m is None:
         m = torch.zeros_like(tensor, device=device)
         adam_m[tensor_name] = m
@@ -604,22 +605,38 @@ def report_sync_status(status):
         logging.error(f"Exception while reporting sync status: {e}")
 
 def initialize_tensor(tensor_name):
+    global embedding
     try:
         url = os.path.join(args.sot_url, 'latest_state')
         logging.info(f"Loading tensor {tensor_name} from {url}")
         response = requests.get(url, params={'tensor_name': tensor_name})
         response.raise_for_status()  # Raise an error for bad status codes
 
-        state_dict = torch.load(BytesIO(response.content))
-        logging.debug(f"Loaded tensor {tensor_name} with shape {state_dict.shape}")
-        
+        tensor = torch.load(BytesIO(response.content))
+        logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}")
+
         if "layer_" in tensor_name:
-            tensors[tensor_name] = tensor_to_block(state_dict, args.layer_idx)
+            tensors[tensor_name] = tensor_to_block(tensor, args.layer_idx)
         else:
-            tensors[tensor_name] = state_dict
+            tensors[tensor_name] = tensor
 
         last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
         logging.info(f"Successfully initialized tensor: {tensor_name}")
+
+        if tensor_name == 'embed':
+            vocab_size = tokenizer.get_vocab_size()
+            embedding_dim = model_args.dim
+
+            # Reshape the tensor to the correct shape
+            reshaped_tensor = tensor.view(vocab_size, embedding_dim)
+
+            embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
+
+            # Convert reshaped tensor to state_dict format
+            state_dict = {'weight': reshaped_tensor}
+            embedding.load_state_dict(state_dict)
+            logging.info("VocabParallelEmbedding initialized and loaded")
+
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
         raise
@@ -650,13 +667,15 @@ def update_tensor(tensor_name):
         if tensor_name == 'embed':
             global embedding
             vocab_size = tokenizer.get_vocab_size()
-            embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
-            embedding.load_state_dict(current_tensor)
+            embedding_dim = model_args.dim
+            reshaped_tensor = current_tensor.view(vocab_size, embedding_dim)
+            state_dict = {'weight': reshaped_tensor}
+            embedding.load_state_dict(state_dict)
             logging.info("VocabParallelEmbedding initialized and loaded")
 
         elif tensor_name == 'final_logits':
             global output_layer
-            state_dict = current_tensor
+            state_dict = {'weight': current_tensor.view(model_args.dim, -1)}
             output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
             output_layer.load_state_dict(state_dict)
             logging.info("Final logits layer initialized and loaded")
