@@ -402,6 +402,9 @@ def forward_task(layer_idx, inputs):
     seqlen = inputs.shape[1]
     freqs_cis_slice = freqs_cis[start_pos: start_pos + seqlen]
 
+    # Update mask dimensions based on input sequence length
+    mask_slice = mask[:seqlen, :seqlen]
+
     bsz = inputs.shape[0]
     if layer.attention.cache_k is not None and layer.attention.cache_k.shape[0] != bsz:
         logging.debug(f"Resizing cache_k for layer {layer_idx}")
@@ -411,7 +414,7 @@ def forward_task(layer_idx, inputs):
         layer.attention.cache_v = torch.zeros(bsz, layer.attention.cache_v.shape[1], layer.attention.cache_v.shape[2], layer.attention.cache_v.shape[3], device=device)
 
     logging.debug(f"Performing forward pass for layer {layer_idx}")
-    outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask.to(device))
+    outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
     check_for_nans(outputs, f"layer {layer_idx} outputs")
     tensors['outputs'] = outputs
     logging.debug(f"Forward pass completed for layer {layer_idx}")

@@ -211,7 +211,7 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'embed':
+        if args.detailed_logs or task_type == 'forward_layer_3':
             worker_processes.append(subprocess.Popen(command))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
