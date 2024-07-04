@@ -107,15 +107,23 @@ def block_to_tensor(block: TransformerBlock) -> torch.Tensor:
 def tensor_to_block(tensor: torch.Tensor, layer_idx: int) -> TransformerBlock:
     block = TransformerBlock(layer_idx, model_args).to(device)
     pointer = 0
+    total_params = sum(p.numel() for p in block.parameters())
+
+    if tensor.numel() != total_params:
+        raise ValueError(f"Total number of parameters {total_params} does not match the size of the tensor {tensor.numel()}")
+
     for param in block.parameters():
         num_param = param.numel()
         logging.debug(f"Pointer: {pointer}, Num param: {num_param}, Tensor size: {tensor.numel()}")
+        
         if pointer + num_param > tensor.numel():
             raise ValueError(f"Pointer {pointer} with num_param {num_param} exceeds tensor size {tensor.numel()}")
-        logging.debug(f"Reshaping tensor slice from {pointer} to {pointer + num_param} to shape {param.size()}")
+        
         param.data = tensor[pointer:pointer + num_param].view(param.size()).to(device)
         pointer += num_param
+    
     return block
+
 
 def initialize_distributed_environment_and_globals():
     global freqs_cis, mask

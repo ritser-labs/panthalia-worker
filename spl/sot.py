@@ -35,9 +35,6 @@ gradient_updates = {}
 executor = ThreadPoolExecutor()
 
 def calculate_transformer_block_size(args):
-    """
-    Calculate the number of parameters in a transformer block based on the model arguments.
-    """
     head_dim = args.dim // args.n_heads
     n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
     hidden_dim = int(2 * 4 * args.dim / 3)
@@ -59,7 +56,7 @@ def calculate_transformer_block_size(args):
     total_size = attention_size + feedforward_size + norm_size
     return total_size
 
-# Calculate tensor sizes for initialization
+# Update tensor sizes for each layer
 tensor_sizes = {
     'embed': (model_args.vocab_size * model_args.dim,),
     'embed_adam_m': (model_args.vocab_size * model_args.dim,),
@@ -73,6 +70,7 @@ for i in range(model_args.n_layers):
     tensor_sizes[f'layer_{i}_adam_m'] = (block_size,)
     tensor_sizes[f'layer_{i}_adam_v'] = (block_size,)
 
+
 async def initialize_tensor(name, shape, random_init=True):
     file_path = os.path.join(state_dir, f'{name}.pt')
     if os.path.exists(file_path):
@@ -81,6 +79,7 @@ async def initialize_tensor(name, shape, random_init=True):
         tensor = torch.randn(*shape)
     else:
         tensor = torch.zeros(*shape)
+    tensor = tensor.flatten()  # Ensure the tensor is 1D
     await asyncio.get_event_loop().run_in_executor(executor, torch.save, tensor, file_path)
 
 async def initialize_all_tensors():
