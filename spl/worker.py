@@ -596,24 +596,7 @@ def initialize_tensor(tensor_name):
 
         state_dict = torch.load(BytesIO(response.content))
         logging.debug(f"Loaded tensor {tensor_name} with shape {state_dict.shape}")
-
-        # Calculate the expected size of the parameters for the embedding and final logits
-        if tensor_name in ['embed', 'embed_adam_m', 'embed_adam_v']:
-            expected_size = model_args.vocab_size * model_args.dim
-        elif tensor_name in ['final_logits', 'final_logits_adam_m', 'final_logits_adam_v']:
-            expected_size = model_args.dim * model_args.vocab_size
-        elif "layer_" in tensor_name:
-            expected_size = sum(p.numel() for p in TransformerBlock(args.layer_idx, model_args).parameters())
-        else:
-            expected_size = state_dict.numel()  # Default to the loaded size if unknown tensor
-
-        actual_size = state_dict.numel()
-        logging.debug(f"Expected size: {expected_size}, Actual size: {actual_size}")
-
-        if actual_size != expected_size:
-            logging.error(f"Size mismatch for tensor {tensor_name}: expected {expected_size}, got {actual_size}")
-            return
-
+        
         if "layer_" in tensor_name:
             tensors[tensor_name] = tensor_to_block(state_dict, args.layer_idx)
         else:
