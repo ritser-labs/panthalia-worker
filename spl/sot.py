@@ -8,6 +8,9 @@ from common import model_args, tokenizer
 from datasets import load_dataset
 from io import BytesIO
 import requests
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import aiofiles
 
 app = Quart(__name__)
 sync_status = {}
@@ -28,6 +31,8 @@ os.makedirs(gradients_dir, exist_ok=True)
 
 # Dictionary to store gradient updates
 gradient_updates = {}
+
+executor = ThreadPoolExecutor()
 
 def calculate_transformer_block_size(args):
     """
@@ -68,7 +73,7 @@ for i in range(model_args.n_layers):
     tensor_sizes[f'layer_{i}_adam_m'] = (block_size,)
     tensor_sizes[f'layer_{i}_adam_v'] = (block_size,)
 
-def initialize_tensor(name, shape, random_init=True):
+async def initialize_tensor(name, shape, random_init=True):
     file_path = os.path.join(state_dir, f'{name}.pt')
     if os.path.exists(file_path):
         return
@@ -76,28 +81,30 @@ def initialize_tensor(name, shape, random_init=True):
         tensor = torch.randn(*shape)
     else:
         tensor = torch.zeros(*shape)
-    torch.save(tensor, file_path)
+    await asyncio.get_event_loop().run_in_executor(executor, torch.save, tensor, file_path)
 
-def initialize_all_tensors():
-    initialize_tensor('embed', tensor_sizes['embed'])
-    initialize_tensor('embed_adam_m', tensor_sizes['embed_adam_m'], random_init=False)
-    initialize_tensor('embed_adam_v', tensor_sizes['embed_adam_v'], random_init=False)
+async def initialize_all_tensors():
+    tasks = []
+    tasks.append(initialize_tensor('embed', tensor_sizes['embed']))
+    tasks.append(initialize_tensor('embed_adam_m', tensor_sizes['embed_adam_m'], random_init=False))
+    tasks.append(initialize_tensor('embed_adam_v', tensor_sizes['embed_adam_v'], random_init=False))
     for i in range(model_args.n_layers):
-        initialize_tensor(f'layer_{i}', tensor_sizes[f'layer_{i}'])
-        initialize_tensor(f'layer_{i}_adam_m', tensor_sizes[f'layer_{i}_adam_m'], random_init=False)
-        initialize_tensor(f'layer_{i}_adam_v', tensor_sizes[f'layer_{i}_adam_v'], random_init=False)
-    initialize_tensor('final_logits', tensor_sizes['final_logits'])
-    initialize_tensor('final_logits_adam_m', tensor_sizes['final_logits'], random_init=False)
-    initialize_tensor('final_logits_adam_v', tensor_sizes['final_logits'], random_init=False)
+        tasks.append(initialize_tensor(f'layer_{i}', tensor_sizes[f'layer_{i}']))
+        tasks.append(initialize_tensor(f'layer_{i}_adam_m', tensor_sizes[f'layer_{i}_adam_m'], random_init=False))
+        tasks.append(initialize_tensor(f'layer_{i}_adam_v', tensor_sizes[f'layer_{i}_adam_v'], random_init=False))
+    tasks.append(initialize_tensor('final_logits', tensor_sizes['final_logits']))
+    tasks.append(initialize_tensor('final_logits_adam_m', tensor_sizes['final_logits'], random_init=False))
+    tasks.append(initialize_tensor('final_logits_adam_v', tensor_sizes['final_logits'], random_init=False))
+    await asyncio.gather(*tasks)
 
 logging.info("Loading Wikipedia dataset...")
 dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
 dataset_iter = iter(dataset)
 
 preloaded_batch = None
-batch_lock = threading.Lock()
+batch_lock = asyncio.Lock()
 
-def preload_batch():
+async def preload_batch():
     global preloaded_batch, dataset_iter
     batch_size = 2
     max_seq_len = 512
@@ -123,10 +130,17 @@ def preload_batch():
 
     if batch:
         preloaded_batch = batch
-        with open(os.path.join(data_dir, 'batch.json'), 'w') as file:
-            json.dump(batch, file)
+        async with aiofiles.open(os.path.join(data_dir, 'batch.json'), 'w') as file:
+            await file.write(json.dumps(batch))
 
-preload_batch()
+async def async_preload_batch():
+    async with batch_lock:
+        await preload_batch()
+
+async def initialize_service():
+    logging.info("Initializing tensors")
+    await initialize_all_tensors()
+    await async_preload_batch()
 
 @app.route('/health', methods=['GET'])
 async def health_check():
@@ -136,8 +150,8 @@ async def health_check():
 async def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
     try:
-        with open(os.path.join(data_dir, 'latest_model_params.json'), 'r') as file:
-            model_params = json.load(file)
+        async with aiofiles.open(os.path.join(data_dir, 'latest_model_params.json'), 'r') as file:
+            model_params = json.loads(await file.read())
         return jsonify(model_params)
     except Exception as e:
         logging.error(f"Error accessing /latest_model_params: {e}", exc_info=True)
@@ -156,8 +170,8 @@ async def publish_result():
 
     try:
         os.makedirs(os.path.join(data_dir, 'task_results'), exist_ok=True)
-        with open(os.path.join(data_dir, f'task_results/{task_id}.json'), 'w') as file:
-            json.dump(result, file)
+        async with aiofiles.open(os.path.join(data_dir, f'task_results/{task_id}.json'), 'w') as file:
+            await file.write(json.dumps(result))
         return jsonify({'status': 'success'})
     except Exception as e:
         logging.error(f"Error in /publish_result: {e}", exc_info=True)
@@ -168,7 +182,7 @@ async def get_batch():
     logging.info("Accessing /get_batch endpoint")
     global preloaded_batch
 
-    with batch_lock:
+    async with batch_lock:
         if preloaded_batch is None:
             logging.error("No preloaded batch available")
             return jsonify({"error": "No preloaded batch available"}), 404
@@ -178,7 +192,7 @@ async def get_batch():
 
     try:
         batch_file_path = os.path.join(data_dir, 'batch.json')
-        threading.Thread(target=preload_batch).start()
+        asyncio.create_task(async_preload_batch())
         return jsonify({'batch_url': f'http://localhost:5001/data/{os.path.basename(batch_file_path)}'})
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
@@ -188,8 +202,8 @@ async def get_batch():
 async def get_targets():
     logging.info("Accessing /get_targets endpoint")
     try:
-        with open(os.path.join(data_dir, 'targets.json'), 'r') as file:
-            targets = json.load(file)
+        async with aiofiles.open(os.path.join(data_dir, 'targets.json'), 'r') as file:
+            targets = json.loads(await file.read())
         return jsonify(targets)
     except Exception as e:
         logging.error(f"Error in /get_targets: {e}", exc_info=True)
@@ -210,7 +224,7 @@ async def update_state():
         return jsonify({'error': 'Missing task_type, result_url, or block_number'}), 400
 
     try:
-        response = requests.get(result_url)
+        response = await asyncio.get_event_loop().run_in_executor(executor, requests.get, result_url)
         if response.status_code != 200:
             raise ValueError(f"Failed to download tensor from {result_url}")
 
@@ -224,11 +238,11 @@ async def update_state():
         else:
             updated_tensor = tensor
 
-        torch.save(updated_tensor, state_file_path)
+        await asyncio.get_event_loop().run_in_executor(executor, torch.save, updated_tensor, state_file_path)
 
         # Save gradient update
         gradient_update_path = os.path.join(gradients_dir, f'{task_type}_update.pt')
-        torch.save(tensor, gradient_update_path)
+        await asyncio.get_event_loop().run_in_executor(executor, torch.save, tensor, gradient_update_path)
 
         # Store the gradient update along with the block number
         gradient_updates[task_type] = {'file_path': gradient_update_path, 'block_number': block_number}
@@ -304,7 +318,7 @@ async def stream_gradients():
         gradient_file_path = os.path.join(gradients_dir, f'{task_id}.pt')
         tensor_data = BytesIO(json.dumps(gradients).encode())
         tensor = torch.load(tensor_data)
-        torch.save(tensor, gradient_file_path)
+        await asyncio.get_event_loop().run_in_executor(executor, torch.save, tensor, gradient_file_path)
 
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -356,8 +370,5 @@ async def get_data_file(filename):
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")
-
-    logging.info("Initializing tensors")
-    initialize_all_tensors()
-
+    asyncio.run(initialize_service())
     app.run(host='0.0.0.0', port=5001)
