@@ -116,22 +116,12 @@ def tensor_to_block(tensor: torch.Tensor, layer_idx: int) -> TransformerBlock:
         pointer += num_param
     return block
 
-def initialize_model_and_embedding():
-    global model_initialized, embedding_initialized, freqs_cis, mask
+def initialize_distributed_environment_and_globals():
+    global freqs_cis, mask
 
-    if not model_initialized:
-        logging.info("Initializing distributed environment")
-        initialize_distributed_environment(args.backend)
-        initialize_model_parallel(model_parallel_size_=1)
-        model_initialized = True
-        logging.info("Model initialized")
-
-    if not embedding_initialized:
-        vocab_size = tokenizer.get_vocab_size()
-        global embedding
-        embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)  # Ensure embedding is on the correct device
-        embedding_initialized = True
-        logging.info("Embedding initialized")
+    logging.info("Initializing distributed environment")
+    initialize_distributed_environment(args.backend)
+    initialize_model_parallel(model_parallel_size_=1)
 
     freqs_cis = precompute_freqs_cis(
         model_args.dim // model_args.n_heads,
@@ -139,13 +129,30 @@ def initialize_model_and_embedding():
         model_args.rope_theta,
     )
 
-    mask = torch.triu(torch.full((model_args.max_seq_len, model_args.max_seq_len), float('-inf')), diagonal=1).to(device)  # Ensure mask is on the correct device
+    mask = torch.triu(torch.full((model_args.max_seq_len, model_args.max_seq_len), float('-inf')), diagonal=1).to(device)
+    logging.info("Environment and global variables initialized")
 
-    logging.info("Initializing layers")
-    for layer_idx in range(model_args.n_layers):
-        tensor_name = f'layer_{layer_idx}'
-        initialize_tensor(tensor_name)
-        logging.info(f"Layer {layer_idx} initialized")
+def initialize_relevant_tensors(task_type, layer_idx=None):
+    logging.info(f"Initializing tensors relevant to the task_type: {task_type}")
+
+    if task_type in ['embed', 'embed_backward']:
+        initialize_tensor('embed')
+        initialize_tensor('embed_adam_m')
+        initialize_tensor('embed_adam_v')
+    elif task_type in ['final_logits', 'final_logits_backward']:
+        initialize_tensor('final_logits')
+        initialize_tensor('final_logits_adam_m')
+        initialize_tensor('final_logits_adam_v')
+    elif task_type in ['forward', 'backward']:
+        if layer_idx is None:
+            raise ValueError("layer_idx must be specified for forward and backward tasks")
+        initialize_tensor(f'layer_{layer_idx}')
+        initialize_tensor(f'layer_{layer_idx}_adam_m')
+        initialize_tensor(f'layer_{layer_idx}_adam_v')
+    elif task_type == 'loss':
+        pass
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
 
 def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
@@ -631,6 +638,25 @@ def update_tensor(tensor_name):
         tensors[tensor_name] = current_tensor
         last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
 
+        if tensor_name == 'embed':
+            global embedding
+            vocab_size = tokenizer.get_vocab_size()
+            embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
+            embedding.load_state_dict(current_tensor)
+            logging.info("VocabParallelEmbedding initialized and loaded")
+
+        elif tensor_name == 'final_logits':
+            global output_layer
+            state_dict = current_tensor
+            output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
+            output_layer.load_state_dict(state_dict)
+            logging.info("Final logits layer initialized and loaded")
+
+        elif tensor_name.startswith('layer_'):
+            layer_idx = int(tensor_name.split('_')[1])
+            tensors[tensor_name] = tensor_to_block(current_tensor, layer_idx)
+            logging.info(f"Transformer block {layer_idx} initialized and loaded")
+
         logging.info(f"Successfully updated tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}")
@@ -657,7 +683,7 @@ def get_relevant_tensors_for_task(task_type):
 
 def main():
     logging.info("Starting main process")
-    initialize_model_and_embedding()
+    initialize_distributed_environment_and_globals()
     event_filter = contract.events.SolverSelected.create_filter(fromBlock='latest')
 
     logging.info("Starting tensor synchronization...")
