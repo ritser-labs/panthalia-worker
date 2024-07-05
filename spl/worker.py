@@ -556,6 +556,15 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
         v = torch.zeros_like(tensor, device=device)
         adam_v[tensor_name] = v
 
+    # Unflatten m and v for calculations
+    if tensor_name.startswith("embed") or tensor_name.startswith("final_logits"):
+        tensor_shape = tensor.view(-1).shape
+        m = m.view(tensor_shape)
+        v = v.view(tensor_shape)
+    else:
+        m = m.view(-1)  # Assuming the grads have the same flattened shape
+        v = v.view(-1)
+
     for i, param in enumerate(tensor.parameters()):
         if param.requires_grad:
             if param.grad is not None:
@@ -575,7 +584,16 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
             torch.nn.utils.clip_grad_norm_(param, max_grad_norm)
 
+    # Flatten m and v before storing them back
+    if tensor_name.startswith("embed") or tensor_name.startswith("final_logits"):
+        adam_m[tensor_name] = m.view(-1)
+        adam_v[tensor_name] = v.view(-1)
+    else:
+        adam_m[tensor_name] = m
+        adam_v[tensor_name] = v
+
     logging.info(f"Updated state dict for {tensor_name}")
+
 
 def check_and_finalize_verifications():
     current_time = int(time.time())
