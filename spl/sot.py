@@ -7,7 +7,7 @@ import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
 from io import BytesIO
-import requests
+import aiohttp
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import aiofiles
@@ -145,6 +145,11 @@ async def initialize_service():
 async def health_check():
     return jsonify({'status': 'healthy'}), 200
 
+async def fetch(session, url):
+    async with session.get(url, timeout=10) as response:
+        response.raise_for_status()
+        return await response.read()
+
 @app.route('/latest_model_params', methods=['GET'])
 async def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
@@ -223,14 +228,12 @@ async def update_state():
         return jsonify({'error': 'Missing task_type, result_url, or block_number'}), 400
 
     try:
-        response = await asyncio.get_event_loop().run_in_executor(executor, requests.get, result_url)
-        if response.status_code != 200:
-            raise ValueError(f"Failed to download tensor from {result_url}")
-
-        tensor_data = BytesIO(response.content)
-        tensor = torch.load(tensor_data)
-
+        async with aiohttp.ClientSession() as session:
+            tensor_data = await fetch(session, result_url)
+        
+        tensor = torch.load(BytesIO(tensor_data))
         state_file_path = os.path.join(state_dir, f'{task_type}.pt')
+        
         if os.path.exists(state_file_path):
             current_tensor = torch.load(state_file_path)
             updated_tensor = current_tensor + tensor  # Perform addition without in-place operation
@@ -248,9 +251,11 @@ async def update_state():
 
         logging.debug(f"Updated state and stored gradient update for {task_type}")
         return jsonify({'status': 'success'})
+    except aiohttp.ClientError as e:
+        logging.error(f"Failed to update tensor {task_type} due to request exception: {e}")
     except Exception as e:
-        logging.error(f"Error in /update_state: {e}", exc_info=True)
-        return jsonify({'error': 'Could not update state'}), 500
+        logging.error(f"Failed to update tensor {task_type} due to error: {e}")
+    return jsonify({'error': 'Could not update state'}), 500
 
 @app.route('/latest_state', methods=['GET'])
 async def latest_state():
