@@ -35,6 +35,7 @@ def report_sync():
     status = request.args.get('status')
     layer_idx = request.args.get('layer_idx')
     key = f"{task_type}_{layer_idx}" if layer_idx else task_type
+    print(f"Received sync report for task_type={task_type}, layer_idx={layer_idx}, status={status}")
     if task_type and status:
         sync_status[key] = status
         synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
@@ -69,8 +70,7 @@ def wait_for_workers_to_sync(worker_count, timeout=600):
     start_time = time.time()
     while time.time() - start_time < timeout:
         synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
-        unsynced_workers = [key.split('_')[0] + (f" layer {key.split('_')[-1]}" if 'layer' in key else '') for key, status in sync_status.items() if status != 'synced']
-        print(f"Synced {synced_workers}/{worker_count} workers. Unsynced workers: {unsynced_workers}")
+        print(f"Synced {synced_workers}/{worker_count} workers.")
         if synced_workers >= worker_count:
             print("All workers have synced.")
             return True
@@ -211,7 +211,7 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'forward_layer_3':
+        if args.detailed_logs or task_type == 'embed':
             worker_processes.append(subprocess.Popen(command))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
