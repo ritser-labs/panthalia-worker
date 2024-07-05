@@ -15,7 +15,7 @@ from collections import namedtuple
 from device import device
 
 # Define the new tokenizer and model arguments
-tokenizer = Tokenizer('cl100k_base')
+tokenizer = Tokenizer('r50k_base')
 
 model_args = ModelArgs(
     vocab_size=tokenizer.get_vocab_size(),
