@@ -9,6 +9,8 @@ from flask import Flask, request, jsonify
 from common import model_args, load_abi
 from web3 import Web3
 from eth_account import Account
+import glob
+import shutil
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -109,6 +111,24 @@ def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, am
         web3.eth.wait_for_transaction_receipt(signed_tx.hash)
 
 if __name__ == "__main__":
+    # Delete all .pt files in the data directory
+    pt_files = glob.glob(os.path.join(args.local_storage_dir, '*.pt'))
+    for pt_file in pt_files:
+        try:
+            os.remove(pt_file)
+            print(f"Deleted file: {pt_file}")
+        except Exception as e:
+            print(f"Error deleting file {pt_file}: {e}")
+
+    # Delete the state directory and its contents
+    state_dir = os.path.join(args.local_storage_dir, 'state')
+    if os.path.exists(state_dir):
+        try:
+            shutil.rmtree(state_dir)
+            print(f"Deleted directory: {state_dir}")
+        except Exception as e:
+            print(f"Error deleting directory {state_dir}: {e}")
+
     # Start Flask server in a separate thread
     flask_thread = threading.Thread(target=lambda: app.run(port=5002))
     flask_thread.start()
@@ -211,7 +231,8 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'embed':
+        if args.detailed_logs or task_type == 'forward_layer_3':
+        #if True:
             worker_processes.append(subprocess.Popen(command))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
