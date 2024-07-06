@@ -7,13 +7,12 @@ import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
 from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 app = Flask(__name__)
 sync_status = {}
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
-    logging.FileHandler("sot.log"),
     logging.StreamHandler()
 ])
 
@@ -30,7 +29,7 @@ os.makedirs(gradients_dir, exist_ok=True)
 # Dictionary to store gradient updates
 gradient_updates = {}
 
-executor = ThreadPoolExecutor()
+executor = ThreadPoolExecutor(max_workers=10)
 
 def calculate_transformer_block_size(args):
     head_dim = args.dim // args.n_heads
@@ -137,9 +136,13 @@ def health_check():
     return jsonify({'status': 'healthy'}), 200
 
 def fetch(session, url):
-    with session.get(url, timeout=10) as response:
-        response.raise_for_status()
-        return response.content
+    try:
+        with session.get(url, timeout=10) as response:
+            response.raise_for_status()
+            return response.content
+    except requests.RequestException as e:
+        logging.error(f"Error fetching {url}: {e}")
+        raise
 
 @app.route('/latest_model_params', methods=['GET'])
 def get_latest_model_params():
@@ -365,4 +368,4 @@ def get_data_file(filename):
 if __name__ == "__main__":
     logging.info("Starting SOT service...")
     initialize_service()
-    app.run(host='0.0.0.0', port=5001)
+    app.run(host='0.0.0.0', port=5001, debug=True)

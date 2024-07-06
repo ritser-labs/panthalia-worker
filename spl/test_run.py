@@ -110,6 +110,8 @@ def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, am
         web3.eth.send_raw_transaction(signed_tx.rawTransaction)
         web3.eth.wait_for_transaction_receipt(signed_tx.hash)
 
+# Existing code...
+
 if __name__ == "__main__":
     # Delete all .pt files in the data directory
     pt_files = glob.glob(os.path.join(args.local_storage_dir, '*.pt'))
@@ -183,16 +185,13 @@ if __name__ == "__main__":
     print("Starting SOT service...")
 
     # Start the SOT service
-    sot_process = subprocess.Popen(['python', 'sot.py'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    sot_log_thread = threading.Thread(target=read_logs, args=(sot_process,))
-    sot_log_thread.start()
+    sot_process = subprocess.Popen(['python', 'sot.py'])
     print(f"SOT service started with PID {sot_process.pid}")
 
     # Wait for the SOT service to be available
     if not wait_for_sot(args.sot_url):
         print("Error: SOT service did not become available within the timeout period.")
         sot_process.terminate()
-        sot_log_thread.join()
         exit(1)
 
     # Print worker initialization stage
@@ -232,7 +231,6 @@ if __name__ == "__main__":
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
         if args.detailed_logs or task_type == 'forward_layer_3':
-        #if True:
             worker_processes.append(subprocess.Popen(command))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
@@ -245,7 +243,6 @@ if __name__ == "__main__":
             p.terminate()
             p.wait()
         sot_process.terminate()
-        sot_log_thread.join()
         exit(1)
 
     # Print master initialization stage
@@ -277,7 +274,6 @@ if __name__ == "__main__":
 
     # Terminate the SOT process
     sot_process.terminate()
-    sot_log_thread.join()
 
     # Print final stage
     print("Test run completed.")
