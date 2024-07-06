@@ -2,17 +2,15 @@ import os
 import json
 import logging
 import threading
-from quart import Quart, request, jsonify, send_file, send_from_directory, Response
+from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
 from io import BytesIO
-import aiohttp
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import aiofiles
+import requests
 
-app = Quart(__name__)
+app = Flask(__name__)
 sync_status = {}
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
     logging.FileHandler("sot.log"),
@@ -71,7 +69,7 @@ for i in range(model_args.n_layers):
     tensor_sizes[f'layer_{i}_adam_v'] = (block_size,)
 
 
-async def initialize_tensor(name, shape, random_init=True):
+def initialize_tensor(name, shape, random_init=True):
     file_path = os.path.join(state_dir, f'{name}.pt')
     if os.path.exists(file_path):
         return
@@ -80,30 +78,27 @@ async def initialize_tensor(name, shape, random_init=True):
     else:
         tensor = torch.zeros(*shape)
     tensor = tensor.flatten()  # Ensure the tensor is 1D
-    await asyncio.get_event_loop().run_in_executor(executor, torch.save, tensor, file_path)
+    torch.save(tensor, file_path)
 
-async def initialize_all_tensors():
-    tasks = []
-    tasks.append(initialize_tensor('embed', tensor_sizes['embed']))
-    tasks.append(initialize_tensor('embed_adam_m', tensor_sizes['embed_adam_m'], random_init=False))
-    tasks.append(initialize_tensor('embed_adam_v', tensor_sizes['embed_adam_v'], random_init=False))
+def initialize_all_tensors():
+    initialize_tensor('embed', tensor_sizes['embed'])
+    initialize_tensor('embed_adam_m', tensor_sizes['embed_adam_m'], random_init=False)
+    initialize_tensor('embed_adam_v', tensor_sizes['embed_adam_v'], random_init=False)
     for i in range(model_args.n_layers):
-        tasks.append(initialize_tensor(f'layer_{i}', tensor_sizes[f'layer_{i}']))
-        tasks.append(initialize_tensor(f'layer_{i}_adam_m', tensor_sizes[f'layer_{i}_adam_m'], random_init=False))
-        tasks.append(initialize_tensor(f'layer_{i}_adam_v', tensor_sizes[f'layer_{i}_adam_v'], random_init=False))
-    tasks.append(initialize_tensor('final_logits', tensor_sizes['final_logits']))
-    tasks.append(initialize_tensor('final_logits_adam_m', tensor_sizes['final_logits'], random_init=False))
-    tasks.append(initialize_tensor('final_logits_adam_v', tensor_sizes['final_logits'], random_init=False))
-    await asyncio.gather(*tasks)
+        initialize_tensor(f'layer_{i}', tensor_sizes[f'layer_{i}'])
+        initialize_tensor(f'layer_{i}_adam_m', tensor_sizes[f'layer_{i}_adam_m'], random_init=False)
+        initialize_tensor(f'layer_{i}_adam_v', tensor_sizes[f'layer_{i}_adam_v'], random_init=False)
+    initialize_tensor('final_logits', tensor_sizes['final_logits'])
+    initialize_tensor('final_logits_adam_m', tensor_sizes['final_logits'], random_init=False)
+    initialize_tensor('final_logits_adam_v', tensor_sizes['final_logits'], random_init=False)
 
 logging.info("Loading Wikipedia dataset...")
 dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
 dataset_iter = iter(dataset)
 
 preloaded_batch = None
-batch_lock = asyncio.Lock()
 
-async def preload_batch():
+def preload_batch():
     global preloaded_batch, dataset_iter
     batch_size = 2
     max_seq_len = 512
@@ -129,42 +124,38 @@ async def preload_batch():
 
     if batch:
         preloaded_batch = batch
-        async with aiofiles.open(os.path.join(data_dir, 'batch.json'), 'w') as file:
-            await file.write(json.dumps(batch))
+        with open(os.path.join(data_dir, 'batch.json'), 'w') as file:
+            file.write(json.dumps(batch))
 
-async def async_preload_batch():
-    async with batch_lock:
-        await preload_batch()
-
-async def initialize_service():
+def initialize_service():
     logging.info("Initializing tensors")
-    await initialize_all_tensors()
-    await async_preload_batch()
+    initialize_all_tensors()
+    preload_batch()
 
 @app.route('/health', methods=['GET'])
-async def health_check():
+def health_check():
     return jsonify({'status': 'healthy'}), 200
 
-async def fetch(session, url):
-    async with session.get(url, timeout=10) as response:
+def fetch(session, url):
+    with session.get(url, timeout=10) as response:
         response.raise_for_status()
-        return await response.read()
+        return response.content
 
 @app.route('/latest_model_params', methods=['GET'])
-async def get_latest_model_params():
+def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
     try:
-        async with aiofiles.open(os.path.join(data_dir, 'latest_model_params.json'), 'r') as file:
-            model_params = json.loads(await file.read())
+        with open(os.path.join(data_dir, 'latest_model_params.json'), 'r') as file:
+            model_params = json.load(file)
         return jsonify(model_params)
     except Exception as e:
         logging.error(f"Error accessing /latest_model_params: {e}", exc_info=True)
         return jsonify({'error': 'Could not load model parameters'}), 500
 
 @app.route('/publish_result', methods=['POST'])
-async def publish_result():
+def publish_result():
     logging.info("Accessing /publish_result endpoint")
-    data = await request.get_json()
+    data = request.get_json()
     task_id = data.get('task_id')
     result = data.get('result')
 
@@ -174,49 +165,48 @@ async def publish_result():
 
     try:
         os.makedirs(os.path.join(data_dir, 'task_results'), exist_ok=True)
-        async with aiofiles.open(os.path.join(data_dir, f'task_results/{task_id}.json'), 'w') as file:
-            await file.write(json.dumps(result))
+        with open(os.path.join(data_dir, f'task_results/{task_id}.json'), 'w') as file:
+            file.write(json.dumps(result))
         return jsonify({'status': 'success'})
     except Exception as e:
         logging.error(f"Error in /publish_result: {e}", exc_info=True)
         return jsonify({'error': 'Could not publish result'}), 500
 
 @app.route('/get_batch', methods=['GET'])
-async def get_batch():
+def get_batch():
     logging.info("Accessing /get_batch endpoint")
     global preloaded_batch
 
-    async with batch_lock:
-        if preloaded_batch is None:
-            logging.error("No preloaded batch available")
-            return jsonify({"error": "No preloaded batch available"}), 404
+    if preloaded_batch is None:
+        logging.error("No preloaded batch available")
+        return jsonify({"error": "No preloaded batch available"}), 404
 
-        batch = preloaded_batch
-        preloaded_batch = None
+    batch = preloaded_batch
+    preloaded_batch = None
 
     try:
         batch_file_path = os.path.join(data_dir, 'batch.json')
-        asyncio.create_task(async_preload_batch())
+        threading.Thread(target=preload_batch).start()
         return jsonify({'batch_url': f'http://localhost:5001/data/{os.path.basename(batch_file_path)}'})
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
         return jsonify({'error': 'Could not get batch'}), 500
 
 @app.route('/get_targets', methods=['GET'])
-async def get_targets():
+def get_targets():
     logging.info("Accessing /get_targets endpoint")
     try:
-        async with aiofiles.open(os.path.join(data_dir, 'targets.json'), 'r') as file:
-            targets = json.loads(await file.read())
+        with open(os.path.join(data_dir, 'targets.json'), 'r') as file:
+            targets = json.load(file)
         return jsonify(targets)
     except Exception as e:
         logging.error(f"Error in /get_targets: {e}", exc_info=True)
         return jsonify({'error': 'Could not get targets'}), 500
 
 @app.route('/update_state', methods=['POST'])
-async def update_state():
+def update_state():
     logging.info("Accessing /update_state endpoint")
-    data = await request.get_json()
+    data = request.get_json()
     task_type = data.get('task_type')
     result_url = data.get('result_url')
     block_number = data.get('block_number')
@@ -228,8 +218,8 @@ async def update_state():
         return jsonify({'error': 'Missing task_type, result_url, or block_number'}), 400
 
     try:
-        async with aiohttp.ClientSession() as session:
-            tensor_data = await fetch(session, result_url)
+        with requests.Session() as session:
+            tensor_data = fetch(session, result_url)
         
         tensor = torch.load(BytesIO(tensor_data))
         state_file_path = os.path.join(state_dir, f'{task_type}.pt')
@@ -240,25 +230,25 @@ async def update_state():
         else:
             updated_tensor = tensor
 
-        await asyncio.get_event_loop().run_in_executor(executor, torch.save, updated_tensor, state_file_path)
+        torch.save(updated_tensor, state_file_path)
 
         # Save gradient update
         gradient_update_path = os.path.join(gradients_dir, f'{task_type}_update.pt')
-        await asyncio.get_event_loop().run_in_executor(executor, torch.save, tensor, gradient_update_path)
+        torch.save(tensor, gradient_update_path)
 
         # Store the gradient update along with the block number
         gradient_updates[task_type] = {'file_path': gradient_update_path, 'block_number': block_number}
 
         logging.debug(f"Updated state and stored gradient update for {task_type}")
         return jsonify({'status': 'success'})
-    except aiohttp.ClientError as e:
+    except requests.RequestException as e:
         logging.error(f"Failed to update tensor {task_type} due to request exception: {e}")
     except Exception as e:
         logging.error(f"Failed to update tensor {task_type} due to error: {e}")
     return jsonify({'error': 'Could not update state'}), 500
 
 @app.route('/latest_state', methods=['GET'])
-async def latest_state():
+def latest_state():
     logging.info("Accessing /latest_state endpoint")
     tensor_name = request.args.get('tensor_name')
     if not tensor_name:
@@ -269,13 +259,13 @@ async def latest_state():
         return jsonify({'error': 'Tensor not found'}), 404
 
     try:
-        return await send_file(state_file_path, mimetype='application/octet-stream')
+        return send_file(state_file_path, mimetype='application/octet-stream')
     except Exception as e:
         logging.error(f"Error in /latest_state: {e}", exc_info=True)
         return jsonify({'error': 'Could not retrieve latest state'}), 500
 
 @app.route('/gradient_update', methods=['GET'])
-async def gradient_update():
+def gradient_update():
     logging.info("Accessing /gradient_update endpoint")
     tensor_name = request.args.get('tensor_name')
     logging.debug(f"Received tensor_name: {tensor_name}")
@@ -293,7 +283,7 @@ async def gradient_update():
     try:
         gradient_update_path = gradient_updates[tensor_name]['file_path']
         block_number = gradient_updates[tensor_name]['block_number']
-        response = await send_file(gradient_update_path, mimetype='application/octet-stream')
+        response = send_file(gradient_update_path, mimetype='application/octet-stream')
         response.headers['block_number'] = block_number
         return response
     except Exception as e:
@@ -301,9 +291,9 @@ async def gradient_update():
         return jsonify({'error': 'Could not retrieve gradient update'}), 500
 
 @app.route('/stream_gradients', methods=['POST'])
-async def stream_gradients():
+def stream_gradients():
     logging.info("Accessing /stream_gradients endpoint")
-    data = await request.get_json()
+    data = request.get_json()
     logging.debug(f"Received data: {data}")
 
     if not data:
@@ -322,7 +312,7 @@ async def stream_gradients():
         gradient_file_path = os.path.join(gradients_dir, f'{task_id}.pt')
         tensor_data = BytesIO(json.dumps(gradients).encode())
         tensor = torch.load(tensor_data)
-        await asyncio.get_event_loop().run_in_executor(executor, torch.save, tensor, gradient_file_path)
+        torch.save(tensor, gradient_file_path)
 
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -330,7 +320,7 @@ async def stream_gradients():
         return jsonify({'error': 'Could not stream gradients'}), 500
 
 @app.route('/tensor_size', methods=['GET'])
-async def get_tensor_size():
+def get_tensor_size():
     logging.info("Accessing /tensor_size endpoint")
     tensor_name = request.args.get('tensor_name')
     if not tensor_name:
@@ -345,8 +335,8 @@ async def get_tensor_size():
     return jsonify({'size': size})
 
 @app.route('/report_stake', methods=['POST'])
-async def report_stake():
-    data = await request.get_json()
+def report_stake():
+    data = request.get_json()
     worker_address = data.get('worker_address')
     if worker_address:
         sync_status[worker_address] = 'staked'
@@ -355,7 +345,7 @@ async def report_stake():
         return jsonify({'status': 'error', 'message': 'Missing worker_address'}), 400
 
 @app.route('/check_stake', methods=['GET'])
-async def check_stake():
+def check_stake():
     total_workers = int(request.args.get('total_workers', 0))
     staked_workers = len(sync_status)
     if staked_workers >= total_workers:
@@ -364,15 +354,15 @@ async def check_stake():
         return jsonify({'status': 'waiting', 'staked_workers': staked_workers, 'total_workers': total_workers})
 
 @app.route('/data/<path:filename>', methods=['GET'])
-async def get_data_file(filename):
+def get_data_file(filename):
     logging.info(f"Accessing file: {filename}")
     try:
-        return await send_from_directory(data_dir, filename)
+        return send_from_directory(data_dir, filename)
     except Exception as e:
         logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
         return jsonify({'error': 'File not found'}), 404
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")
-    asyncio.run(initialize_service())
+    initialize_service()
     app.run(host='0.0.0.0', port=5001)
