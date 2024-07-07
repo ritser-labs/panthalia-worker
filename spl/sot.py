@@ -58,7 +58,7 @@ tensor_sizes = {
     'embed': (model_args.vocab_size * model_args.dim,),
     'embed_adam_m': (model_args.vocab_size * model_args.dim,),
     'embed_adam_v': (model_args.vocab_size * model_args.dim,),
-    'final_logits': (model_args.dim * model_args.vocab_size,),
+    'final_logits': (model_args.dim + model_args.dim * model_args.vocab_size,),  # Add the size of RMSNorm and ColumnParallelLinear combined
 }
 
 for i in range(model_args.n_layers):
@@ -66,7 +66,6 @@ for i in range(model_args.n_layers):
     tensor_sizes[f'layer_{i}'] = (block_size,)
     tensor_sizes[f'layer_{i}_adam_m'] = (block_size,)
     tensor_sizes[f'layer_{i}_adam_v'] = (block_size,)
-
 
 def initialize_tensor(name, shape, random_init=True):
     file_path = os.path.join(state_dir, f'{name}.pt')

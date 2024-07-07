@@ -10,11 +10,11 @@ from web3 import Web3
 from web3.exceptions import ContractCustomError
 from web3.middleware import geth_poa_middleware
 from collections import defaultdict
-from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis
+from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
 from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
-from typing import Optional
+from typing import Optional, Tuple
 from io import BytesIO
 import time
 import os
@@ -101,6 +101,7 @@ freqs_cis = None
 mask = None
 embedding = None  # Define the global embedding variable
 final_logits_layer = None
+final_logits_norm = None
 
 def block_to_tensor(block: TransformerBlock) -> torch.Tensor:
     params = list(block.parameters())
@@ -126,6 +127,34 @@ def tensor_to_block(tensor: torch.Tensor, layer_idx: int) -> TransformerBlock:
 
     return block
 
+def tensor_to_final_logits(tensor: torch.Tensor) -> Tuple[RMSNorm, ColumnParallelLinear]:
+    global final_logits_norm, final_logits_layer
+    
+    dim = model_args.dim
+    vocab_size = model_args.vocab_size
+
+    # Initialize RMSNorm and ColumnParallelLinear layers
+    final_logits_norm = RMSNorm(dim, eps=model_args.norm_eps).to(device)
+    final_logits_layer = ColumnParallelLinear(dim, vocab_size, bias=False).to(device)
+
+    pointer = 0
+
+    # Load RMSNorm weights
+    norm_weight_numel = final_logits_norm.weight.numel()
+    final_logits_norm.weight.data = tensor[pointer:pointer + norm_weight_numel].view(final_logits_norm.weight.size()).to(device)
+    pointer += norm_weight_numel
+
+    # Load ColumnParallelLinear weights
+    linear_weight_numel = final_logits_layer.weight.numel()
+    final_logits_layer.weight.data = tensor[pointer:pointer + linear_weight_numel].view(final_logits_layer.weight.size()).to(device)
+    pointer += linear_weight_numel
+
+    return final_logits_norm, final_logits_layer
+
+def final_logits_to_tensor() -> torch.Tensor:
+    norm_weight = final_logits_norm.weight.data.view(-1)
+    linear_weight = final_logits_layer.weight.data.view(-1)
+    return torch.cat((norm_weight, linear_weight))
 
 def initialize_distributed_environment_and_globals():
     global freqs_cis, mask
@@ -246,7 +275,7 @@ def report_stake_status():
 
 def handle_event(event):
     task_id = event['args']['taskId']
-    solver = event['args']['solver']
+    solver = event['args']['args']['solver']
 
     print(f"Received event for task {args.task_type} and id {task_id}")
 
@@ -456,21 +485,23 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     tensors['grads'] = grads
 
 def final_logits_task(inputs):
-    global final_logits_layer, tensors
+    global final_logits_layer, final_logits_norm, tensors
 
-    # Perform a forward pass through the final logits layer
-    logits = final_logits_layer(inputs.to(device))
+    # Apply RMSNorm before the final logits layer
+    normalized_inputs = final_logits_norm(inputs)
+    logits = final_logits_layer(normalized_inputs.to(device))
     check_for_nans(logits, "final logits outputs")
     tensors['logits'] = logits
 
 def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
-    global final_logits_layer, tensors
+    global final_logits_layer, final_logits_norm, tensors
 
     if error is None:
         raise ValueError(f"Error tensor is None")
 
-    # Perform a forward pass to get logits
-    logits = final_logits_layer(inputs.to(device))
+    # Apply RMSNorm before the final logits layer
+    normalized_inputs = final_logits_norm(inputs)
+    logits = final_logits_layer(normalized_inputs.to(device))
     check_for_nans(logits, "final logits outputs")
 
     # Ensure inputs require gradient
@@ -495,7 +526,6 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     apply_adamw(-1, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
     tensors['error_output'] = (inputs.grad, grads)
     tensors['grads'] = grads
-
 
 def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global embedding, tensors
@@ -603,7 +633,6 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
     logging.info(f"Updated state dict for {tensor_name}")
 
-
 def check_and_finalize_verifications():
     current_time = int(time.time())
     for task_id in list(processed_tasks):
@@ -637,6 +666,8 @@ def report_sync_status(status):
 def initialize_tensor(tensor_name):
     global embedding
     global final_logits_layer
+    global final_logits_norm
+
     try:
         url = os.path.join(args.sot_url, 'latest_state')
         logging.info(f"Loading tensor {tensor_name} from {url}")
@@ -667,16 +698,10 @@ def initialize_tensor(tensor_name):
             state_dict = {'weight': reshaped_tensor}
             embedding.load_state_dict(state_dict)
             logging.info("VocabParallelEmbedding initialized and loaded")
-        
+
         if tensor_name == 'final_logits':
-            state_dict = {'weight': tensor.view(model_args.dim, -1)}
-            output_layer = ColumnParallelLinear(
-                model_args.dim,
-                model_args.vocab_size,
-                bias=False
-            ).to(device)
-            output_layer.load_state_dict(state_dict)
-            logging.info("Final logits layer initialized and loaded")
+            final_logits_norm, final_logits_layer = tensor_to_final_logits(tensor)
+            logging.info("Final logits layer and RMSNorm initialized and loaded")
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
@@ -686,6 +711,10 @@ def initialize_tensor(tensor_name):
         raise
 
 def update_tensor(tensor_name):
+    global embedding
+    global final_logits_layer
+    global final_logits_norm
+
     try:
         url = os.path.join(args.sot_url, 'gradient_update')
         logging.debug(f"Requesting gradient update for tensor: {tensor_name} from URL: {url}")
@@ -706,7 +735,6 @@ def update_tensor(tensor_name):
         last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
 
         if tensor_name == 'embed':
-            global embedding
             vocab_size = tokenizer.get_vocab_size()
             embedding_dim = model_args.dim
             reshaped_tensor = current_tensor.view(vocab_size, embedding_dim)
@@ -715,11 +743,8 @@ def update_tensor(tensor_name):
             logging.info("VocabParallelEmbedding initialized and loaded")
 
         elif tensor_name == 'final_logits':
-            global output_layer
-            state_dict = {'weight': current_tensor.view(model_args.dim, -1)}
-            output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
-            output_layer.load_state_dict(state_dict)
-            logging.info("Final logits layer initialized and loaded")
+            final_logits_norm, final_logits_layer = tensor_to_final_logits(current_tensor)
+            logging.info("Final logits layer and RMSNorm initialized and loaded")
 
         elif tensor_name.startswith('layer_'):
             layer_idx = int(tensor_name.split('_')[1])
