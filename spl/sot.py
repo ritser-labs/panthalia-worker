@@ -31,6 +31,9 @@ gradient_updates = {}
 
 executor = ThreadPoolExecutor(max_workers=10)
 
+# Replace hardcoded URL with a variable
+BASE_URL = 'http://localhost:5001'
+
 def calculate_transformer_block_size(args):
     head_dim = args.dim // args.n_heads
     n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
@@ -189,7 +192,7 @@ def get_batch():
     try:
         batch_file_path = os.path.join(data_dir, 'batch.json')
         threading.Thread(target=preload_batch).start()
-        return jsonify({'batch_url': f'http://localhost:5001/data/{os.path.basename(batch_file_path)}'})
+        return jsonify({'batch_url': f'{BASE_URL}/data/{os.path.basename(batch_file_path)}'})
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
         return jsonify({'error': 'Could not get batch'}), 500
@@ -199,7 +202,7 @@ def get_targets():
     logging.info("Accessing /get_targets endpoint")
     try:
         targets_file_path = os.path.join(data_dir, 'targets.json')
-        return jsonify({'targets_url': f'http://localhost:5001/data/{os.path.basename(targets_file_path)}'})
+        return jsonify({'targets_url': f'{BASE_URL}/data/{os.path.basename(targets_file_path)}'})
     except Exception as e:
         logging.error(f"Error in /get_targets: {e}", exc_info=True)
         return jsonify({'error': 'Could not get targets'}), 500
