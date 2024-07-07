@@ -275,7 +275,7 @@ def report_stake_status():
 
 def handle_event(event):
     task_id = event['args']['taskId']
-    solver = event['args']['args']['solver']
+    solver = event['args']['solver']
 
     print(f"Received event for task {args.task_type} and id {task_id}")
 
