@@ -100,6 +100,7 @@ processed_tasks = set()
 freqs_cis = None
 mask = None
 embedding = None  # Define the global embedding variable
+final_logits_layer = None
 
 def block_to_tensor(block: TransformerBlock) -> torch.Tensor:
     params = list(block.parameters())
@@ -455,38 +456,46 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     tensors['grads'] = grads
 
 def final_logits_task(inputs):
-    global tensors
-    state_dict = tensors['output_layer_state_dict']
-    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
-    output_layer.load_state_dict(state_dict)
+    global final_logits_layer, tensors
 
-    logits = output_layer(inputs.to(device))
-    check_for_nans(logits, "final logits")
+    # Perform a forward pass through the final logits layer
+    logits = final_logits_layer(inputs.to(device))
+    check_for_nans(logits, "final logits outputs")
     tensors['logits'] = logits
 
 def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
-    global tensors
-    state_dict = tensors['output_layer_state_dict']
-    output_layer = ColumnParallelLinear(model_args.dim, state_dict['weight'].shape[0], bias=False).to(device)
-    output_layer.load_state_dict(state_dict)
+    global final_logits_layer, tensors
 
-    logits = output_layer(inputs.to(device))
+    if error is None:
+        raise ValueError(f"Error tensor is None")
 
+    # Perform a forward pass to get logits
+    logits = final_logits_layer(inputs.to(device))
+    check_for_nans(logits, "final logits outputs")
+
+    # Ensure inputs require gradient
+    inputs.requires_grad = True
+
+    # Retain the gradients and perform backward pass
     logits.retain_grad()
-
     logits.backward(error.to(device), retain_graph=True)
 
-    logits_grad = logits.grad
-    logging.debug(f"Gradients for logits: {logits_grad.shape}")
+    if inputs.grad is None:
+        raise ValueError(f"Gradient for inputs is None after backward pass for final logits layer")
 
-    logits_grad = torch.einsum('bij,jk->bik', logits_grad, output_layer.weight)
+    check_for_nans(inputs.grad, "Gradient for inputs in final logits layer")
 
-    grads = [param.grad for param in output_layer.parameters() if param.grad is not None]
-    logging.debug(f"Gradients for final logits layer parameters: {grads}")
+    grads = [param.grad for param in final_logits_layer.parameters() if param.grad is not None]
+    logging.debug(f"Gradients for final logits layer: {grads}")
 
+    for i, grad in enumerate(grads):
+        check_for_nans(grad, f"Gradient {i} for final logits layer")
+
+    # Apply AdamW updates
     apply_adamw(-1, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
-    tensors['error_output'] = (logits_grad, grads)
+    tensors['error_output'] = (inputs.grad, grads)
     tensors['grads'] = grads
+
 
 def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global embedding, tensors
@@ -627,6 +636,7 @@ def report_sync_status(status):
 
 def initialize_tensor(tensor_name):
     global embedding
+    global final_logits_layer
     try:
         url = os.path.join(args.sot_url, 'latest_state')
         logging.info(f"Loading tensor {tensor_name} from {url}")
@@ -645,7 +655,7 @@ def initialize_tensor(tensor_name):
         logging.info(f"Successfully initialized tensor: {tensor_name}")
 
         if tensor_name == 'embed':
-            vocab_size = tokenizer.get_vocab_size()
+            vocab_size = model_args.vocab_size
             embedding_dim = model_args.dim
 
             # Reshape the tensor to the correct shape
@@ -657,6 +667,16 @@ def initialize_tensor(tensor_name):
             state_dict = {'weight': reshaped_tensor}
             embedding.load_state_dict(state_dict)
             logging.info("VocabParallelEmbedding initialized and loaded")
+        
+        if tensor_name == 'final_logits':
+            state_dict = {'weight': tensor.view(model_args.dim, -1)}
+            output_layer = ColumnParallelLinear(
+                model_args.dim,
+                model_args.vocab_size,
+                bias=False
+            ).to(device)
+            output_layer.load_state_dict(state_dict)
+            logging.info("Final logits layer initialized and loaded")
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
