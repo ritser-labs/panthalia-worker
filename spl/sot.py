@@ -198,12 +198,12 @@ def get_batch():
 def get_targets():
     logging.info("Accessing /get_targets endpoint")
     try:
-        with open(os.path.join(data_dir, 'targets.json'), 'r') as file:
-            targets = json.load(file)
-        return jsonify(targets)
+        targets_file_path = os.path.join(data_dir, 'targets.json')
+        return jsonify({'targets_url': f'http://localhost:5001/data/{os.path.basename(targets_file_path)}'})
     except Exception as e:
         logging.error(f"Error in /get_targets: {e}", exc_info=True)
         return jsonify({'error': 'Could not get targets'}), 500
+
 
 @app.route('/update_state', methods=['POST'])
 def update_state():
