@@ -5,7 +5,7 @@ import requests
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts, handle_contract_custom_error, TaskStatus, Vote, PoolState, Task
+from common import load_contracts, handle_contract_custom_error, TaskStatus, Vote, PoolState, Task, get_learning_hyperparameters
 from io import BytesIO
 import torch
 import os
@@ -326,8 +326,13 @@ class Master:
         return result
 
     def handle_layer_backward(self, layer_idx, error_url, model_params):
+        learning_params = get_learning_hyperparameters()
         task_type = f'backward_layer_{layer_idx}'
-        task_params = {'layer_idx': layer_idx, 'error_url': error_url, 'model_params': model_params}
+        task_params = {
+            'layer_idx': layer_idx,
+            'error_url': error_url,
+            **learning_params
+        }
         task_id, block_number = self.submit_task(task_type, task_params)
         result = self.wait_for_result(task_type, task_id)
         result['block_number'] = block_number
@@ -335,7 +340,12 @@ class Master:
         return result
 
     def handle_final_logits_backward(self, error_url, inputs_url, model_params):
-        task_params = {'error_url': error_url, 'inputs_url': inputs_url, 'model_params': model_params}
+        learning_params = get_learning_hyperparameters()
+        task_params = {
+            'error_url': error_url,
+            'inputs_url': inputs_url,
+            **learning_params
+        }
         task_id, block_number = self.submit_task('final_logits_backward', task_params)
         result = self.wait_for_result('final_logits_backward', task_id)
         result['block_number'] = block_number
@@ -343,7 +353,12 @@ class Master:
         return result
 
     def handle_embed_backward(self, error_url, batch_url):
-        task_params = {'error_url': error_url, 'batch_url': batch_url}
+        learning_params = get_learning_hyperparameters()
+        task_params = {
+            'error_url': error_url,
+            'batch_url': batch_url,
+            **learning_params
+        }
         task_id, block_number = self.submit_task('embed_backward', task_params)
         result = self.wait_for_result('embed_backward', task_id)
         result['block_number'] = block_number

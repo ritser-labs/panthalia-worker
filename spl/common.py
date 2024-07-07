@@ -209,3 +209,13 @@ def transact_with_contract_function(w3, contract_function, transaction_params):
     except Exception as e:
         logging.error(f"Unexpected error during transaction: {e}")
         raise
+
+def get_learning_hyperparameters():
+    return {
+        'learning_rate': 0.001,
+        'beta1': 0.9,
+        'beta2': 0.999,
+        'epsilon': 1e-8,
+        'weight_decay': 0.01,
+        't': 1  # This might be dynamically set elsewhere in the code
+    }
