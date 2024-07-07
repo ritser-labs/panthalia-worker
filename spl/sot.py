@@ -104,6 +104,7 @@ def preload_batch():
     batch_size = 2
     max_seq_len = 512
     batch = []
+    targets = []
 
     for _ in range(batch_size):
         try:
@@ -120,6 +121,10 @@ def preload_batch():
             elif len(tokens) > max_seq_len:
                 tokens = tokens[:max_seq_len]
             batch.append(tokens)
+            
+            # Shift tokens to create targets
+            target_tokens = tokens[1:] + [tokenizer.pad_id]
+            targets.append(target_tokens)
         except StopIteration:
             break
 
@@ -127,6 +132,8 @@ def preload_batch():
         preloaded_batch = batch
         with open(os.path.join(data_dir, 'batch.json'), 'w') as file:
             file.write(json.dumps(batch))
+        with open(os.path.join(data_dir, 'targets.json'), 'w') as file:
+            file.write(json.dumps(targets))
 
 def initialize_service():
     logging.info("Initializing tensors")

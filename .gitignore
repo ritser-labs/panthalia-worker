@@ -7,6 +7,7 @@ pipeline/storage
 spl/data/*.pt
 spl/data/state/*
 spl/data/batch.json
+spl/data/targets.json
 spl/data/gradients/*
 spl/out.txt
 spl/abis/*
