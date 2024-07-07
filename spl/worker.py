@@ -301,7 +301,7 @@ def handle_event(event):
 
     targets = None
     if 'targets_url' in task_params:
-        targets = download_file(task_params['targets_url'])
+        targets = download_json(task_params['targets_url'])
 
     logits = None
     if 'logits_url' in task_params:
@@ -794,7 +794,7 @@ def main():
         for event in event_filter.get_new_entries():
             handle_event(event)
         check_and_finalize_verifications()
-        time.sleep(10)
+        time.sleep(1)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
