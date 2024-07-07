@@ -110,8 +110,6 @@ def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, am
         web3.eth.send_raw_transaction(signed_tx.rawTransaction)
         web3.eth.wait_for_transaction_receipt(signed_tx.hash)
 
-# Existing code...
-
 if __name__ == "__main__":
     # Delete all .pt files in the data directory
     pt_files = glob.glob(os.path.join(args.local_storage_dir, '*.pt'))
@@ -230,7 +228,7 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'forward_layer_3':
+        if args.detailed_logs or task_type == 'final_logits':
             worker_processes.append(subprocess.Popen(command))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
