@@ -521,8 +521,7 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     check_for_nans(inputs.grad, "Gradient for inputs in final logits layer")
 
     # Collect gradients for both final_logits_layer and final_logits_norm
-    grads = [param.grad.to(device) for param in final_logits_norm.parameters() if param.grad is not None]
-    grads += [param.grad.to(device) for param in final_logits_layer.parameters() if param.grad is not None]
+    grads = [param.grad.to(device) for group in [final_logits_norm.parameters(), final_logits_layer.parameters()] for param in group if param.grad is not None]
     
     logging.debug(f"Gradients for final logits layer: {grads}")
 
