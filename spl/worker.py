@@ -315,7 +315,7 @@ def handle_event(event):
         result = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -2)
     elif task_type == 'loss':
         loss_task(logits, targets)
-        result['result_url'] = upload_tensor(tensors['loss'])
+        result['result_url'] = upload_tensor(tensors['logits_grad'])
 
     result['last_block'] = last_gradient_update[task_type]
     submit_solution(task_id, result)
@@ -546,16 +546,23 @@ def loss_task(logits, targets):
 
     targets = targets.reshape(-1)
 
+    # Compute the loss
     loss = F.cross_entropy(logits.to(device), targets.to(device), ignore_index=pad_id)
-    tensors['loss'] = loss.item()
 
+    # Ensure logits require gradients
     logits.retain_grad()
+    
+    # Perform backward pass to compute gradients with respect to logits
     loss.backward(retain_graph=True)
+    
+    # Check for NaNs in gradients
     check_for_nans(logits.grad, "logits gradients")
     logging.info(f"Logits gradients for loss: {logits.grad.shape}")
 
+    # Reshape logits gradients to the original shape
     logits_grad = logits.grad.reshape(batch_size, seq_len, vocab_size)
 
+    # Store logits gradients in the tensors dictionary
     tensors['logits_grad'] = logits_grad
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
