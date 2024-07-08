@@ -343,7 +343,7 @@ class Master:
             time.sleep(5)
 
     def update_sot(self, task_type, result, block_number):
-        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': task_type, 'result_url': result['result_url'], 'block_number': block_number})
+        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': task_type, 'result_url': result['grads_url'], 'block_number': block_number})
         if response.status_code != 200:
             logging.error(f"Failed to update SOT for {task_type}: {response.text}")
         else:
