@@ -294,31 +294,31 @@ def handle_event(event):
 
     task_type = args.task_type
     layer_idx = args.layer_idx
+    result = {}
     if task_type == 'embed':
         embed_task(batch)
-        result_url = upload_tensor(tensors['outputs'])
+        result['result_url'] = upload_tensor(tensors['outputs'])
     elif task_type == 'forward':
         forward_task(layer_idx, inputs)
-        result_url = upload_tensor(tensors['outputs'])
+        result['result_url'] = upload_tensor(tensors['outputs'])
     elif task_type == 'backward':
         backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], layer_idx)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], layer_idx)
     elif task_type == 'final_logits':
         final_logits_task(inputs)
-        result_url = upload_tensor(tensors['logits'])
+        result['result_url'] = upload_tensor(tensors['logits'])
     elif task_type == 'final_logits_backward':
         final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -1)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -1)
     elif task_type == 'embed_backward':
         embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result_url = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -2)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -2)
     elif task_type == 'loss':
         loss_task(logits, targets)
-        result_url = upload_tensor(tensors['logits_grad'])
+        result['result_url'] = upload_tensor(tensors['loss'])
 
-    if result_url:
-        last_block = last_gradient_update[task_type]
-        submit_solution(task_id, result_url, last_block, task_type)
+    result['last_block'] = last_gradient_update[task_type]
+    submit_solution(task_id, result)
 
     processed_tasks.add(task_id)
 
@@ -326,11 +326,7 @@ def handle_event(event):
 
     resume_gradient_updates()
 
-def submit_solution(task_id, result_url, last_block, task_type):
-    result = {
-        'result_url': result_url,
-        'last_block': last_block
-    }
+def submit_solution(task_id, result):
     try:
         receipt = transact_with_contract_function(web3, contract, 'submitSolution', args.private_key, task_id, json.dumps(result).encode('utf-8'))
         logging.info(f"submitSolution transaction receipt: {receipt}")
