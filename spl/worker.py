@@ -12,7 +12,7 @@ from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
-from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors
+from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors, transact_with_contract_function
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional, Tuple
 from io import BytesIO
@@ -61,6 +61,7 @@ def parse_args():
     parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
+    parser.add_argument('--sync_url', type=str, required=False, help="URL for reporting sync status", default='http://localhost:5002')
     return parser.parse_args()
 
 args = parse_args()
@@ -226,33 +227,15 @@ def resume_gradient_updates():
     global gradient_update_paused
     gradient_update_paused = False
 
-def build_transaction(function, value=0):
-    nonce = web3.eth.get_transaction_count(worker_address)
-    gas_price = web3.eth.gas_price
-    return function.build_transaction({
-        'chainId': web3.eth.chain_id,
-        'gas': 200000,
-        'gasPrice': gas_price,
-        'nonce': nonce,
-        'value': value,
-    })
-
-def sign_and_send_transaction(tx):
-    signed_tx = worker_account.sign_transaction(tx)
-    tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-    return web3.eth.wait_for_transaction_receipt(tx_hash)
-
 def deposit_stake():
     global stake_deposited
     if not stake_deposited:
         try:
-            print("Submitting approve transaction for depositing stake...")
-            approve_tx = build_transaction(token_contract.functions.approve(args.pool_address, stake_amount))
-            sign_and_send_transaction(approve_tx)
+            receipt = transact_with_contract_function(web3, token_contract, 'approve', args.private_key, args.pool_address, stake_amount)
+            logging.info(f"Approved token transaction receipt: {receipt}")
 
-            print("Submitting depositStake transaction...")
-            deposit_tx = build_transaction(pool_contract.functions.depositStake(subnet_id, args.group))
-            sign_and_send_transaction(deposit_tx)
+            receipt = transact_with_contract_function(web3, pool_contract, 'depositStake', args.private_key, subnet_id, args.group)
+            logging.info(f"depositStake transaction receipt: {receipt}")
 
             stake_deposited = True
             report_stake_status()
@@ -277,7 +260,7 @@ def handle_event(event):
     task_id = event['args']['taskId']
     solver = event['args']['solver']
 
-    print(f"Received event for task {args.task_type} and id {task_id}")
+    logging.info(f"Received event for task {args.task_type} and id {task_id}")
 
     if solver.lower() != worker_address.lower():
         return
@@ -339,7 +322,7 @@ def handle_event(event):
 
     processed_tasks.add(task_id)
 
-    print(f"Processed task {task_id} successfully")
+    logging.info(f"Processed task {task_id} successfully")
 
     resume_gradient_updates()
 
@@ -348,10 +331,12 @@ def submit_solution(task_id, result_url, last_block, task_type):
         'result_url': result_url,
         'last_block': last_block
     }
-    print(f"Submitting solution for task {task_id} with result URL: {result_url} and last block: {last_block}")
-    tx = build_transaction(contract.functions.submitSolution(task_id, json.dumps(result).encode('utf-8')))
-    sign_and_send_transaction(tx)
-    print(f"Submitted solution for task {task_id} and type {task_type}")
+    try:
+        receipt = transact_with_contract_function(web3, contract, 'submitSolution', args.private_key, task_id, json.dumps(result).encode('utf-8'))
+        logging.info(f"submitSolution transaction receipt: {receipt}")
+    except Exception as e:
+        logging.error(f"Error submitting solution for task {task_id}: {e}")
+        raise
 
 def upload_tensors_and_grads(error_output, grads, layer_idx):
     error_output_url = upload_tensor(error_output)
@@ -631,7 +616,6 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
     logging.info(f"Updated state dict for {tensor_name}")
 
-
 def check_and_finalize_verifications():
     current_time = int(time.time())
     for task_id in list(processed_tasks):
@@ -643,17 +627,20 @@ def check_and_finalize_verifications():
 
         if task_status == 2 and (current_time - time_status_changed) >= max_dispute_time:
             if contract.functions.canVerificationBeFinalized(task_id).call():
-                print(f"Submitting finalizeVerification transaction for task {task_id}...")
-                tx = build_transaction(contract.functions.finalizeVerification(task_id))
-                sign_and_send_transaction(tx)
-                processed_tasks.remove(task_id)
+                try:
+                    receipt = transact_with_contract_function(web3, contract, 'finalizeVerification', args.private_key, task_id)
+                    logging.info(f"finalizeVerification transaction receipt: {receipt}")
+                    processed_tasks.remove(task_id)
+                except Exception as e:
+                    logging.error(f"Error finalizing verification for task {task_id}: {e}")
+                    raise
 
 def report_sync_status(status):
     try:
         if hasattr(args, 'layer_idx') and args.layer_idx is not None:
-            url = f"http://localhost:5002/report_sync?task_type={args.task_type}&layer_idx={args.layer_idx}&status={status}"
+            url = f"{args.sync_url}/report_sync?task_type={args.task_type}&layer_idx={args.layer_idx}&status={status}"
         else:
-            url = f"http://localhost:5002/report_sync?task_type={args.task_type}&status={status}"
+            url = f"{args.sync_url}/report_sync?task_type={args.task_type}&status={status}"
         response = requests.get(url)
         if response.status_code == 200:
             logging.info(f"Reported sync status: {status}")

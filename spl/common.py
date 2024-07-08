@@ -10,7 +10,7 @@ from io import BytesIO
 import requests
 from web3 import Web3
 from enum import Enum
-import web3
+import web3 as Web3Module
 from collections import namedtuple
 from device import device
 
@@ -198,13 +198,45 @@ def decode_custom_error(web3, error_selectors, error_bytes):
         logging.error(f"Error decoding message chunk: {e}")
         raise
 
-def transact_with_contract_function(w3, contract_function, transaction_params):
+def transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, gas=500000):
+    account = web3.eth.account.from_key(private_key)
+    nonce = web3.eth.get_transaction_count(account.address)
+    gas_price = web3.eth.gas_price
+
+    function = getattr(contract.functions, function_name)(*args)
+    tx_params = {
+        'chainId': web3.eth.chain_id,
+        'gas': gas,
+        'gasPrice': gas_price,
+        'nonce': nonce,
+        'value': value
+    }
+
     try:
-        txn_hash = contract_function.transact(transaction_params)
-        return w3.eth.wait_for_transaction_receipt(txn_hash)
-    except web3.exceptions.ContractCustomError as e:
-        error_selectors = load_error_selectors(w3)
-        handle_contract_custom_error(w3, error_selectors, e)
+        tx = function.build_transaction(tx_params)
+        signed_tx = account.sign_transaction(tx)
+        tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+
+        if receipt['status'] == 0:
+            # Decode the error message
+            tx = web3.eth.get_transaction(tx_hash)
+            try:
+                error_message = web3.eth.call({
+                    'to': tx['to'],
+                    'data': tx['input']
+                }, tx.blockNumber)
+                decoded_error_message = web3.codec.decode_abi(['string'], error_message)
+                logging.error(f"Transaction failed with error message: {decoded_error_message}")
+                raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, Error: {decoded_error_message}")
+            except Exception as decode_err:
+                logging.error(f"Failed to decode error message: {decode_err}")
+                raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}")
+
+        return receipt
+    except Web3Module.exceptions.ContractCustomError as e:
+        error_selectors = load_error_selectors(web3)
+        handle_contract_custom_error(web3, error_selectors, e)
         raise
     except Exception as e:
         logging.error(f"Unexpected error during transaction: {e}")

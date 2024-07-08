@@ -5,7 +5,7 @@ import requests
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts, handle_contract_custom_error, TaskStatus, Vote, PoolState, Task, get_learning_hyperparameters
+from common import load_contracts, handle_contract_custom_error, TaskStatus, Vote, PoolState, Task, get_learning_hyperparameters, transact_with_contract_function
 from io import BytesIO
 import torch
 import os
@@ -39,32 +39,10 @@ class Master:
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
-    def build_transaction(self, function, value=0, gas=500000):
-        nonce = self.web3.eth.get_transaction_count(self.account.address)
-        gas_price = self.web3.eth.gas_price
-        return function.build_transaction({
-            'chainId': self.web3.eth.chain_id,
-            'gas': gas,
-            'gasPrice': gas_price,
-            'nonce': nonce,
-            'value': value
-        })
-
-    def sign_and_send_transaction(self, tx):
-        signed_txn = self.web3.eth.account.sign_transaction(tx, private_key=self.account._private_key)
-        tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
-        logging.info(f"Transaction receipt: {receipt}")
-        if receipt['status'] == 0:
-            self.log_transaction_failure(receipt)
-            raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, block number: {receipt['blockNumber']}")
-        return receipt
-
     def approve_token(self, token_address, spender_address, amount):
         token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
-        tx = self.build_transaction(token_contract.functions.approve(spender_address, amount), gas=100000)
-        print(f"Submitting approve transaction for token at {token_address}...")
-        self.sign_and_send_transaction(tx)
+        receipt = transact_with_contract_function(self.web3, token_contract, 'approve', self.account._private_key, spender_address, amount, gas=100000)
+        logging.info(f"Approved token transaction receipt: {receipt}")
 
     def submit_task(self, task_type, params):
         try:
@@ -79,9 +57,8 @@ class Master:
             spender_address = self.contracts[task_type].address
             self.approve_token(token_address, spender_address, fee)
 
-            tx = self.build_transaction(self.contracts[task_type].functions.submitTaskRequest(encoded_params), gas=1000000)
-            print(f"Submitting submitTaskRequest transaction for task type {task_type}...")
-            receipt = self.sign_and_send_transaction(tx)
+            receipt = transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.account._private_key, encoded_params, gas=1000000)
+            logging.info(f"submitTaskRequest transaction receipt: {receipt}")
 
             logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
             if not logs:
@@ -114,9 +91,8 @@ class Master:
             self.wait_for_state_change(PoolState.Unlocked.value)
             logging.info("Submitting selection request")
 
-            tx = self.build_transaction(self.pool.functions.submitSelectionReq(), gas=500000)
-            print("Submitting submitSelectionReq transaction...")
-            self.sign_and_send_transaction(tx)
+            receipt = transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.account._private_key, gas=500000)
+            logging.info(f"submitSelectionReq transaction receipt: {receipt}")
 
             unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
             last_state_change_time = self.pool.functions.lastStateChangeTime().call()
@@ -146,9 +122,12 @@ class Master:
             logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
             time.sleep(remaining_time)
 
-        tx = self.build_transaction(self.pool.functions.lockGlobalState(), gas=500000)
-        print("Submitting lockGlobalState transaction...")
-        self.sign_and_send_transaction(tx)
+        try:
+            receipt = transact_with_contract_function(self.web3, self.pool, 'lockGlobalState', self.account._private_key, gas=500000)
+            logging.info(f"lockGlobalState transaction receipt: {receipt}")
+        except Exception as e:
+            logging.error(f"Error triggering lock global state: {e}")
+            raise
 
     def trigger_remove_global_lock(self):
         selections_finalizing_min_period = self.pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
@@ -160,15 +139,19 @@ class Master:
             logging.info(f"Waiting for {remaining_time} seconds until SELECTIONS_FINALIZING_MIN_PERIOD is over")
             time.sleep(remaining_time)
 
-        tx = self.build_transaction(self.pool.functions.removeGlobalLock(), gas=500000)
-        print("Submitting removeGlobalLock transaction...")
-        self.sign_and_send_transaction(tx)
+        try:
+            receipt = transact_with_contract_function(self.web3, self.pool, 'removeGlobalLock', self.account._private_key, gas=500000)
+            logging.info(f"removeGlobalLock transaction receipt: {receipt}")
+        except Exception as e:
+            logging.error(f"Error triggering remove global lock: {e}")
+            raise
+
 
     def wait_for_state_change(self, target_state):
         while True:
             current_state = PoolState(self.pool.functions.state().call())
             logging.info(f"Current pool state: {current_state.name}, target state: {PoolState(target_state).name}")
-            
+
             if current_state == PoolState(target_state):
                 break
 
@@ -186,41 +169,30 @@ class Master:
 
     def fulfill_random_words(self, vrf_request_id):
         try:
-            tx = self.build_transaction(self.vrf_coordinator.functions.fulfillRandomWords(vrf_request_id), gas=500000)
-            print("Submitting fulfillRandomWords transaction...")
-            self.sign_and_send_transaction(tx)
+            receipt = transact_with_contract_function(self.web3, self.vrf_coordinator, 'fulfillRandomWords', self.account._private_key, vrf_request_id, gas=500000)
+            logging.info(f"fulfillRandomWords transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error fulfilling random words: {e}")
             raise
 
     def select_solver(self, task_type, task_id):
         try:
-            if task_type not in self.contracts:
-                raise ValueError(f"No contract loaded for task type {task_type}")
-
             logging.info(f"Selecting solver for task ID: {task_id}")
 
             self.wait_for_state_change(PoolState.SelectionsFinalizing.value)
-
-            tx = self.build_transaction(self.contracts[task_type].functions.selectSolver(task_id), gas=1000000)
-            print(f"Submitting selectSolver transaction for task ID {task_id}...")
-            self.sign_and_send_transaction(tx)
+            receipt = transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id, gas=1000000)
+            logging.info(f"selectSolver transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error selecting solver: {e}")
             raise
 
     def remove_solver_stake(self, task_type, task_id):
         try:
-            if task_type not in self.contracts:
-                raise ValueError(f"No contract loaded for task type {task_type}")
-
             logging.info(f"Removing solver stake for task ID: {task_id}")
 
             self.wait_for_state_change(PoolState.Unlocked.value)
-
-            tx = self.build_transaction(self.contracts[task_type].functions.removeSolverStake(task_id), gas=1000000)
-            print(f"Submitting removeSolverStake transaction for task ID {task_id}...")
-            self.sign_and_send_transaction(tx)
+            receipt = transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.account._private_key, task_id, gas=1000000)
+            logging.info(f"removeSolverStake transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error removing solver stake: {e}")
             raise
@@ -241,10 +213,10 @@ class Master:
         try:
             task_tuple = self.contracts[task_type].functions.getTask(task_id).call()
             task = Task(*task_tuple)
-            print(f"{task_type} Task status: {task.status}")
-            print(f"Expected status: {TaskStatus.SolutionSubmitted.value}")
-            if task.status == TaskStatus.SolutionSubmitted.value: # not waiting until Verified -- optimistic assumption
-                return json.loads(task.postedSolution.decode('utf-8'))                
+            logging.info(f"{task_type} Task status: {task.status}")
+            logging.info(f"Expected status: {TaskStatus.SolutionSubmitted.value}")
+            if task.status == TaskStatus.SolutionSubmitted.value:
+                return json.loads(task.postedSolution.decode('utf-8'))
             return None
         except Exception as e:
             logging.error(f"Error getting task result for {task_type} with task ID {task_id}: {e}")
@@ -258,22 +230,18 @@ class Master:
 
         logging.info("Starting embed forward task")
         embed_result = self.handle_embed_forward(model_params, batch_url)
-        # Do not update SOT here
 
         layer_inputs_url = [embed_result['result_url']]
         for layer_idx in range(model_params['n_layers']):
             logging.info(f"Starting forward task for layer {layer_idx}")
             layer_result = self.handle_layer_forward(layer_idx, layer_inputs_url[-1], model_params)
             layer_inputs_url.append(layer_result['result_url'])
-            # Do not update SOT here
 
         logging.info("Starting final logits forward task")
         final_logits_result = self.handle_final_logits_forward(layer_inputs_url[-1])
-        # Do not update SOT here
 
         logging.info("Starting loss computation task")
         loss_result = self.handle_loss_computation(final_logits_result['result_url'])
-        # Do not update SOT here
 
         error_url = loss_result['result_url']
 
