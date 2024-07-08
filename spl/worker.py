@@ -575,7 +575,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     max_grad_norm = 1.0
 
     if layer_idx == -1:
-        tensor_name = "output"
+        tensor_name = "final_logits"
     elif layer_idx == -2:
         tensor_name = "embedding"
     else:
