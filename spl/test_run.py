@@ -183,7 +183,8 @@ if __name__ == "__main__":
     print("Starting SOT service...")
 
     # Start the SOT service
-    sot_process = subprocess.Popen(['python', 'sot.py'])
+    #sot_process = subprocess.Popen(['python', 'sot.py'])
+    sot_process = subprocess.Popen(['python', 'sot.py'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"SOT service started with PID {sot_process.pid}")
 
     # Wait for the SOT service to be available
@@ -228,7 +229,7 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'loss':
+        if args.detailed_logs or task_type == 'final_logits_backward':
             worker_processes.append(subprocess.Popen(command))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
