@@ -355,11 +355,14 @@ def submit_solution(task_id, result_url, last_block, task_type):
 
 def upload_tensors_and_grads(error_output, grads, layer_idx):
     error_output_url = upload_tensor(error_output)
-    grads_url = upload_tensor(grads_to_sparse(grads))
+    grads_sparse = grads_to_sparse(grads)
+    grads_url = upload_tensor(grads_sparse)
     adam_m_sparse, adam_v_sparse = extract_sparse_adam_params(grads, layer_idx)
     adam_m_url = upload_tensor(adam_m_sparse)
     adam_v_url = upload_tensor(adam_v_sparse)
-    block_number = web3.eth.blockNumber
+    block_number = web3.eth.block_number
+    if adam_m_sparse.shape != grads_sparse.shape or adam_v_sparse.shape != grads_sparse.shape:
+        raise ValueError(f"Shapes of Adam parameters do not match the gradients: {adam_m_sparse.shape} vs {grads_sparse.shape}")
     return {
         'error_output_url': error_output_url,
         'grads_url': grads_url,
@@ -371,7 +374,7 @@ def upload_tensors_and_grads(error_output, grads, layer_idx):
 def extract_sparse_adam_params(grads, layer_idx):
     indices, values_m, values_v = [], [], []
     if layer_idx == -1:
-        tensor_name = "output"
+        tensor_name = "final_logits"
     elif layer_idx == -2:
         tensor_name = "embedding"
     else:
@@ -382,9 +385,10 @@ def extract_sparse_adam_params(grads, layer_idx):
             flat_grad = grad.flatten()
             k = max(1, int(flat_grad.numel() * 0.01))
             topk = torch.topk(flat_grad.abs(), k)
-            indices.append(topk.indices)
-            values_m.append(adam_m[tensor_name].flatten()[topk.indices])
-            values_v.append(adam_v[tensor_name].flatten()[topk.indices])
+            # Ensure indices are on the same device as the tensor
+            indices.append(topk.indices.to(flat_grad.device))
+            values_m.append(adam_m[tensor_name].flatten().to(flat_grad.device)[topk.indices])
+            values_v.append(adam_v[tensor_name].flatten().to(flat_grad.device)[topk.indices])
     indices = torch.cat(indices)
     values_m = torch.cat(values_m)
     values_v = torch.cat(values_v)
@@ -474,7 +478,7 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
 
     check_for_nans(inputs.grad, f"Gradient for inputs in layer {layer_idx}")
 
-    grads = [param.grad for param in layer.parameters() if param.grad is not None]
+    grads = [param.grad.to(device) for param in layer.parameters() if param.grad is not None]
     logging.debug(f"Gradients for layer {layer_idx}: {grads}")
 
     for i, grad in enumerate(grads):
@@ -500,7 +504,7 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
         raise ValueError(f"Error tensor is None")
 
     # Apply RMSNorm before the final logits layer
-    normalized_inputs = final_logits_norm(inputs)
+    normalized_inputs = final_logits_norm(inputs.to(device))
     logits = final_logits_layer(normalized_inputs.to(device))
     check_for_nans(logits, "final logits outputs")
 
@@ -516,7 +520,10 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
 
     check_for_nans(inputs.grad, "Gradient for inputs in final logits layer")
 
-    grads = [param.grad for param in final_logits_layer.parameters() if param.grad is not None]
+    # Collect gradients for both final_logits_layer and final_logits_norm
+    grads = [param.grad.to(device) for param in final_logits_norm.parameters() if param.grad is not None]
+    grads += [param.grad.to(device) for param in final_logits_layer.parameters() if param.grad is not None]
+    
     logging.debug(f"Gradients for final logits layer: {grads}")
 
     for i, grad in enumerate(grads):
@@ -531,16 +538,16 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
     global embedding, tensors
     logging.info(f"Error tensor shape: {error.shape}")
 
-    embeddings = embedding(batch)
+    embeddings = embedding(batch.to(device))
 
-    error = error.view(embeddings.shape)
+    error = error.view(embeddings.shape).to(device)
     logging.info(f"Reshaped error tensor shape: {error.shape}")
 
     embeddings.retain_grad()
 
     embeddings.backward(error.to(device), retain_graph=True)
 
-    grads = [param.grad for param in embedding.parameters() if param.grad is not None]
+    grads = [param.grad.to(device) for param in embedding.parameters() if param.grad is not None]
     logging.info(f"Gradients for embedding: {grads}")
 
     apply_adamw(-2, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
@@ -585,53 +592,46 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     if tensor is None:
         raise ValueError(f"Failed to load tensor for {tensor_name}")
 
+    # Ensure tensor is on the correct device
+    device = tensor.device
+
+    # Flatten gradients to match the flattened tensor
+    grads_flat = torch.cat([grad.view(-1).to(device) for grad in grads])
+
     m = adam_m[tensor_name]
     v = adam_v[tensor_name]
 
     if m is None:
         m = torch.zeros_like(tensor, device=device)
         adam_m[tensor_name] = m
+    else:
+        m = m.to(device)
+
     if v is None:
         v = torch.zeros_like(tensor, device=device)
         adam_v[tensor_name] = v
-
-    # Unflatten m and v for calculations
-    if tensor_name.startswith("embed") or tensor_name.startswith("final_logits"):
-        tensor_shape = tensor.view(-1).shape
-        m = m.view(tensor_shape)
-        v = v.view(tensor_shape)
     else:
-        m = m.view(-1)  # Assuming the grads have the same flattened shape
-        v = v.view(-1)
+        v = v.to(device)
 
-    for i, param in enumerate(tensor.parameters()):
-        if param.requires_grad:
-            if param.grad is not None:
-                param.grad.zero_()
+    # AdamW update rules applied to the flattened tensors
+    m = beta1 * m + (1 - beta1) * grads_flat
+    v = beta2 * v + (1 - beta2) * (grads_flat ** 2)
 
-            param.data -= learning_rate * weight_decay * param.data
+    m_hat = m / (1 - beta1 ** t)
+    v_hat = v / (1 - beta2 ** t)
 
-            m[i] = beta1 * m[i] + (1 - beta1) * grads[i]
-            v[i] = beta2 * v[i] + (1 - beta2) * (grads[i] ** 2)
+    tensor.data -= learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
+    tensor.data -= learning_rate * weight_decay * tensor.data
 
-            m_hat = m[i] / (1 - beta1 ** t)
-            v_hat = v[i] / (1 - beta2 ** t)
+    # Clip gradients
+    torch.nn.utils.clip_grad_norm_([tensor], max_grad_norm)
 
-            param.data -= learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
-
-            check_for_nans(param.data, f"Updated param data in {tensor_name}")
-
-            torch.nn.utils.clip_grad_norm_(param, max_grad_norm)
-
-    # Flatten m and v before storing them back
-    if tensor_name.startswith("embed") or tensor_name.startswith("final_logits"):
-        adam_m[tensor_name] = m.view(-1)
-        adam_v[tensor_name] = v.view(-1)
-    else:
-        adam_m[tensor_name] = m
-        adam_v[tensor_name] = v
+    # Update adam_m and adam_v with the new values
+    adam_m[tensor_name] = m
+    adam_v[tensor_name] = v
 
     logging.info(f"Updated state dict for {tensor_name}")
+
 
 def check_and_finalize_verifications():
     current_time = int(time.time())
