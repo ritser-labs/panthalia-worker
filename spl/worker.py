@@ -609,6 +609,15 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     if tensor is None:
         raise ValueError(f"Failed to load tensor for {tensor_name}")
 
+    # Ensure tensor is on the correct device
+    if isinstance(tensor, torch.Tensor):
+        tensor = tensor.to(device)
+    elif isinstance(tensor, TransformerBlock):
+        # Flatten the parameters of the TransformerBlock
+        tensor = block_to_tensor(tensor).to(device)
+    else:
+        raise TypeError("Unsupported tensor type")
+
     # Flatten gradients to match the flattened tensor
     grads_flat = torch.cat([grad.view(-1).to(device) for grad in grads])
 
@@ -616,13 +625,13 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     v = adam_v[tensor_name]
 
     if m is None:
-        m = torch.zeros_like(tensor, device=device)
+        m = torch.zeros_like(tensor)
         adam_m[tensor_name] = m
     else:
         m = m.to(device)
 
     if v is None:
-        v = torch.zeros_like(tensor, device=device)
+        v = torch.zeros_like(tensor)
         adam_v[tensor_name] = v
     else:
         v = v.to(device)
