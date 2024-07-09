@@ -8,6 +8,7 @@ from common import model_args, tokenizer
 from datasets import load_dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from device import device
 import requests
 
 app = Flask(__name__)
@@ -232,12 +233,12 @@ def update_state():
     try:
         with requests.Session() as session:
             tensor_data = fetch(session, result_url)
-        
-        tensor = torch.load(BytesIO(tensor_data))
+
+        tensor = torch.load(BytesIO(tensor_data), map_location=device)  # Load tensor to the correct device
         state_file_path = os.path.join(state_dir, f'{tensor_name}.pt')
         
         if os.path.exists(state_file_path):
-            current_tensor = torch.load(state_file_path)
+            current_tensor = torch.load(state_file_path, map_location=device)  # Load existing tensor to the correct device
             updated_tensor = current_tensor + tensor  # Perform addition without in-place operation
         else:
             updated_tensor = tensor
@@ -258,6 +259,7 @@ def update_state():
     except Exception as e:
         logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
     return jsonify({'error': 'Could not update state'}), 500
+
 
 @app.route('/latest_state', methods=['GET'])
 def latest_state():

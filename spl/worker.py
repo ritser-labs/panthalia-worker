@@ -354,27 +354,34 @@ def upload_tensors_and_grads(error_output, grads, layer_idx):
 
 def extract_sparse_adam_params(grads, layer_idx):
     indices, values_m, values_v = [], [], []
+    
     if layer_idx == -1:
         tensor_name = "final_logits"
+        total_params = model_args.dim + (model_args.vocab_size * model_args.dim)
     elif layer_idx == -2:
         tensor_name = "embedding"
+        total_params = model_args.vocab_size * model_args.dim
     else:
         tensor_name = f"layer_{layer_idx}"
+        if tensor_name not in tensors:
+            raise ValueError(f"Layer {layer_idx} not found or not initialized")
+        layer = tensors[tensor_name]
+        total_params = sum(p.numel() for p in layer.parameters())
 
     for grad in grads:
         if grad is not None:
             flat_grad = grad.flatten()
             k = max(1, int(flat_grad.numel() * 0.01))
             topk = torch.topk(flat_grad.abs(), k)
-            # Ensure indices are on the same device as the tensor
             indices.append(topk.indices.to(flat_grad.device))
             values_m.append(adam_m[tensor_name].flatten().to(flat_grad.device)[topk.indices])
             values_v.append(adam_v[tensor_name].flatten().to(flat_grad.device)[topk.indices])
+    
     indices = torch.cat(indices)
     values_m = torch.cat(values_m)
     values_v = torch.cat(values_v)
-    shape = grads[0].shape
-    return torch.sparse_coo_tensor(indices.unsqueeze(0), values_m, shape, device=device), torch.sparse_coo_tensor(indices.unsqueeze(0), values_v, shape, device=device)
+    
+    return torch.sparse_coo_tensor(indices.unsqueeze(0), values_m, (total_params,), device=device), torch.sparse_coo_tensor(indices.unsqueeze(0), values_v, (total_params,), device=device)
 
 def grads_to_sparse(grads):
     indices, values = [], []
@@ -387,8 +394,8 @@ def grads_to_sparse(grads):
             values.append(flat_grad[topk.indices])
     indices = torch.cat(indices)
     values = torch.cat(values)
-    shape = grads[0].shape
-    return torch.sparse_coo_tensor(indices.unsqueeze(0), values, shape, device=device)
+    total_params = sum(grad.numel() for grad in grads if grad is not None)
+    return torch.sparse_coo_tensor(indices.unsqueeze(0), values, (total_params,), device=device)
 
 def embed_task(batch):
     global embedding
@@ -716,8 +723,12 @@ def update_tensor(tensor_name):
                 logging.info(f"No updates available for tensor {tensor_name}")
                 return
 
-        gradient_update = torch.load(BytesIO(response.content))
-        current_tensor = tensors.get(tensor_name, torch.zeros(gradient_update.size(), device=gradient_update.device))
+        gradient_update = torch.load(BytesIO(response.content)).to(device)  # Ensure gradient_update is on the same device
+        logging.debug(f"Gradient update tensor for {tensor_name} is on device: {gradient_update.device}")
+
+        current_tensor = tensors.get(tensor_name, torch.zeros(gradient_update.size(), device=device))  # Ensure current_tensor is on the same device
+        logging.debug(f"Current tensor for {tensor_name} is on device: {current_tensor.device}")
+
         current_tensor.add_(gradient_update)
 
         tensors[tensor_name] = current_tensor
@@ -742,9 +753,10 @@ def update_tensor(tensor_name):
 
         logging.info(f"Successfully updated tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}")
+        logging.error(f"Failed to update tensor {tensor_name} with new grads due to request exception: {e}")
     except Exception as e:
-        logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
+        logging.error(f"Failed to update tensor {tensor_name} with new grads due to error: {e}")
+
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
@@ -766,6 +778,7 @@ def get_relevant_tensors_for_task(task_type):
 
 def main():
     logging.info("Starting main process")
+    torch.set_default_device(device)
     initialize_distributed_environment_and_globals()
     event_filter = contract.events.SolverSelected.create_filter(fromBlock='latest')
 

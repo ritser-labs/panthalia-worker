@@ -246,18 +246,15 @@ class Master:
         error_url = loss_result['result_url']
 
         logging.info("Starting final logits backward task")
-        final_logits_backward_result = self.handle_final_logits_backward(error_url, layer_inputs_url[-1], model_params)
-        self.update_sot('final_logits_backward', final_logits_backward_result, final_logits_backward_result['block_number'])
+        self.handle_final_logits_backward(error_url, layer_inputs_url[-1], model_params)
 
         for layer_idx in reversed(range(model_params['n_layers'])):
             logging.info(f"Starting backward task for layer {layer_idx}")
             layer_result = self.handle_layer_backward(layer_idx, error_url, layer_inputs_url[layer_idx], model_params)
             error_url = layer_result['error_output_url']
-            self.update_sot(f'backward_layer_{layer_idx}', layer_result, layer_result['block_number'])
 
         logging.info("Starting embed backward task")
-        embed_backward_result = self.handle_embed_backward(error_url, batch_url)
-        self.update_sot('embed_backward', embed_backward_result, embed_backward_result['block_number'])
+        self.handle_embed_backward(error_url, batch_url)
 
     def get_latest_model_params(self):
         response = requests.get(f"{self.sot_url}/latest_model_params")
