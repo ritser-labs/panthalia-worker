@@ -453,7 +453,10 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     seqlen = inputs.shape[1]
     freqs_cis_slice = freqs_cis[start_pos: start_pos + seqlen]
 
-    outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask.to(device))
+    # Slice the mask to match the sequence length
+    mask_slice = mask[:seqlen, :seqlen]
+
+    outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
     check_for_nans(outputs, f"layer {layer_idx} outputs")
 
     inputs.requires_grad = True
