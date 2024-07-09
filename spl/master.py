@@ -246,7 +246,9 @@ class Master:
         error_url = loss_result['result_url']
 
         logging.info("Starting final logits backward task")
-        self.handle_final_logits_backward(error_url, layer_inputs_url[-1], model_params)
+        final_logits_result = self.handle_final_logits_backward(error_url, layer_inputs_url[-1], model_params)
+
+        error_url = final_logits_result['error_output_url']
 
         for layer_idx in reversed(range(model_params['n_layers'])):
             logging.info(f"Starting backward task for layer {layer_idx}")
