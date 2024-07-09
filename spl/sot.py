@@ -219,22 +219,22 @@ def get_targets():
 def update_state():
     logging.info("Accessing /update_state endpoint")
     data = request.get_json()
-    task_type = data.get('task_type')
+    tensor_name = data.get('tensor_name')
     result_url = data.get('result_url')
     block_number = data.get('block_number')
 
-    logging.debug(f"Received task_type: {task_type}, result_url: {result_url}, block_number: {block_number}")
+    logging.debug(f"Received tensor_name: {tensor_name}, result_url: {result_url}, block_number: {block_number}")
 
-    if not task_type or not result_url or block_number is None:
-        logging.error("Missing task_type, result_url, or block_number in /update_state request")
-        return jsonify({'error': 'Missing task_type, result_url, or block_number'}), 400
+    if not tensor_name or not result_url or block_number is None:
+        logging.error("Missing tensor_name, result_url, or block_number in /update_state request")
+        return jsonify({'error': 'Missing tensor_name, result_url, or block_number'}), 400
 
     try:
         with requests.Session() as session:
             tensor_data = fetch(session, result_url)
         
         tensor = torch.load(BytesIO(tensor_data))
-        state_file_path = os.path.join(state_dir, f'{task_type}.pt')
+        state_file_path = os.path.join(state_dir, f'{tensor_name}.pt')
         
         if os.path.exists(state_file_path):
             current_tensor = torch.load(state_file_path)
@@ -245,18 +245,18 @@ def update_state():
         torch.save(updated_tensor, state_file_path)
 
         # Save gradient update
-        gradient_update_path = os.path.join(gradients_dir, f'{task_type}_update.pt')
+        gradient_update_path = os.path.join(gradients_dir, f'{tensor_name}_update.pt')
         torch.save(tensor, gradient_update_path)
 
         # Store the gradient update along with the block number
-        gradient_updates[task_type] = {'file_path': gradient_update_path, 'block_number': block_number}
+        gradient_updates[tensor_name] = {'file_path': gradient_update_path, 'block_number': block_number}
 
-        logging.debug(f"Updated state and stored gradient update for {task_type}")
+        logging.debug(f"Updated state and stored gradient update for {tensor_name}")
         return jsonify({'status': 'success'})
     except requests.RequestException as e:
-        logging.error(f"Failed to update tensor {task_type} due to request exception: {e}")
+        logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}")
     except Exception as e:
-        logging.error(f"Failed to update tensor {task_type} due to error: {e}")
+        logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
     return jsonify({'error': 'Could not update state'}), 500
 
 @app.route('/latest_state', methods=['GET'])

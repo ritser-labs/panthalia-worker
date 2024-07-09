@@ -306,7 +306,7 @@ class Master:
         task_id, block_number = self.submit_task(task_type, task_params)
         result = self.wait_for_result(task_type, task_id)
         result['block_number'] = block_number
-        self.update_sot_with_sparse(task_type, result, block_number)
+        self.update_sot_with_sparse(task_type, result, block_number, layer_idx)
         return result
 
     def handle_final_logits_backward(self, error_url, inputs_url, model_params):
@@ -342,28 +342,36 @@ class Master:
                 return result
             time.sleep(5)
 
-    def update_sot(self, task_type, result, block_number):
-        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': task_type, 'result_url': result['grads_url'], 'block_number': block_number})
+    def update_sot(self, tensor_name, result, block_number):
+        response = requests.post(f"{self.sot_url}/update_state", json={'tensor_name': tensor_name, 'result_url': result['grads_url'], 'block_number': block_number})
         if response.status_code != 200:
-            logging.error(f"Failed to update SOT for {task_type}: {response.text}")
+            logging.error(f"Failed to update SOT for {tensor_name}: {response.text}")
         else:
-            logging.info(f"Updated SOT for {task_type} with result: {result}")
+            logging.info(f"Updated SOT for {tensor_name} with result: {result}")
 
-    def update_sot_with_sparse(self, task_type, result, block_number):
-        self.update_sot(task_type, result, block_number)
-        self.update_adam_state(task_type, result['adam_m_url'], result['adam_v_url'], block_number)
+    def update_sot_with_sparse(self, task_type, result, block_number, layer_idx=None):
+        if task_type == 'embed_backward':
+            tensor_name = 'embed'
+        elif task_type == 'final_logits_backward':
+            tensor_name = 'final_logits'
+        elif task_type == 'backward':
+            tensor_name = f'layer_{layer_idx}'
+        else:
+            raise ValueError(f"Unsupported task type: {task_type}")
+        self.update_sot(tensor_name, result, block_number)
+        self.update_adam_state(tensor_name, result['adam_m_url'], result['adam_v_url'], block_number)
 
-    def update_adam_state(self, task_type, adam_m_url, adam_v_url, block_number):
-        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': f'{task_type}_adam_m', 'result_url': adam_m_url, 'block_number': block_number})
+    def update_adam_state(self, tensor_name, adam_m_url, adam_v_url, block_number):
+        response = requests.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_m', 'result_url': adam_m_url, 'block_number': block_number})
         if response.status_code != 200:
-            logging.error(f"Failed to update Adam state for {task_type}: {response.text}")
+            logging.error(f"Failed to update Adam state for {tensor_name}: {response.text}")
         else:
-            logging.info(f"Updated Adam state for {task_type}")
-        response = requests.post(f"{self.sot_url}/update_state", json={'task_type': f'{task_type}_adam_v', 'result_url': adam_v_url, 'block_number': block_number})
+            logging.info(f"Updated Adam state for {tensor_name}")
+        response = requests.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_v', 'result_url': adam_v_url, 'block_number': block_number})
         if response.status_code != 200:
-            logging.error(f"Failed to update Adam state for {task_type}: {response.text}")
+            logging.error(f"Failed to update Adam state for {tensor_name}: {response.text}")
         else:
-            logging.info(f"Updated Adam state for {task_type}")
+            logging.info(f"Updated Adam state for {tensor_name}")
 
     def get_batch_url(self):
         url = os.path.join(self.sot_url, 'get_batch')
