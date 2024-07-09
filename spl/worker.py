@@ -460,6 +460,11 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     check_for_nans(outputs, f"layer {layer_idx} outputs")
 
     inputs.requires_grad = True
+    
+    # Ensure the shapes of error and outputs match
+    if error.shape != outputs.shape:
+        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and outputs has shape {outputs.shape}")
+
 
     outputs.retain_grad()
     outputs.backward(error.to(device), retain_graph=True)
@@ -491,38 +496,53 @@ def final_logits_task(inputs):
 def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global final_logits_layer, final_logits_norm, tensors
 
-    if error is None:
-        raise ValueError(f"Error tensor is None")
+    logging.info(f"Error tensor shape: {error.shape}")
 
-    # Apply RMSNorm before the final logits layer
-    normalized_inputs = final_logits_norm(inputs.to(device))
-    logits = final_logits_layer(normalized_inputs.to(device))
-    check_for_nans(logits, "final logits outputs")
+    # Ensure the inputs and error tensors are on the correct device
+    inputs = inputs.to(device)
+    error = error.to(device)
 
-    # Ensure inputs require gradient
+    # Ensure the inputs require gradients
     inputs.requires_grad = True
 
-    # Retain the gradients and perform backward pass
+    # Apply RMSNorm to the inputs
+    normalized_inputs = final_logits_norm(inputs)
+
+    # Pass the normalized inputs through the final logits layer
+    logits = final_logits_layer(normalized_inputs)
     logits.retain_grad()
-    logits.backward(error.to(device), retain_graph=True)
+
+    # Ensure the shapes of error and logits match
+    if error.shape != logits.shape:
+        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and logits has shape {logits.shape}")
+
+    # Perform backward pass on logits
+    logits.backward(error, retain_graph=True)
 
     if inputs.grad is None:
-        raise ValueError(f"Gradient for inputs is None after backward pass for final logits layer")
+        raise ValueError(f"Gradient for inputs is None after backward pass")
 
-    check_for_nans(inputs.grad, "Gradient for inputs in final logits layer")
+    # Extract gradients for RMSNorm and ColumnParallelLinear layers
+    final_logits_grads = [param.grad.to(device) for param in final_logits_layer.parameters() if param.grad is not None]
+    norm_grads = [param.grad.to(device) for param in final_logits_norm.parameters() if param.grad is not None]
 
-    # Collect gradients for both final_logits_layer and final_logits_norm
-    grads = [param.grad.to(device) for group in [final_logits_norm.parameters(), final_logits_layer.parameters()] for param in group if param.grad is not None]
-    
-    logging.debug(f"Gradients for final logits layer: {grads}")
+    # Check for NaNs in gradients
+    for i, grad in enumerate(final_logits_grads):
+        check_for_nans(grad, f"Final logits gradient {i}")
 
-    for i, grad in enumerate(grads):
-        check_for_nans(grad, f"Gradient {i} for final logits layer")
+    for i, grad in enumerate(norm_grads):
+        check_for_nans(grad, f"RMSNorm gradient {i}")
 
-    # Apply AdamW updates
-    apply_adamw(-1, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
-    tensors['error_output'] = (inputs.grad, grads)
-    tensors['grads'] = grads
+    # Concatenate gradients for AdamW optimization
+    combined_grads = final_logits_grads + norm_grads
+
+    # Apply AdamW optimization to both RMSNorm and ColumnParallelLinear layers
+    apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+
+    # Store the error output (gradients of inputs) in the tensors dictionary
+    tensors['error_output'] = inputs.grad
+    tensors['grads'] = combined_grads
+
 
 def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global embedding, tensors
@@ -588,9 +608,6 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     tensor = tensors[tensor_name]
     if tensor is None:
         raise ValueError(f"Failed to load tensor for {tensor_name}")
-
-    # Ensure tensor is on the correct device
-    device = tensor.device
 
     # Flatten gradients to match the flattened tensor
     grads_flat = torch.cat([grad.view(-1).to(device) for grad in grads])
