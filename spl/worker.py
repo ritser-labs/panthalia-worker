@@ -335,6 +335,7 @@ def submit_solution(task_id, result):
         raise
 
 def upload_tensors_and_grads(error_output, grads, layer_idx):
+    print(f'Error output shape: {error_output.shape}')
     error_output_url = upload_tensor(error_output)
     grads_sparse = grads_to_sparse(grads)
     grads_url = upload_tensor(grads_sparse)
@@ -460,6 +461,11 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     check_for_nans(outputs, f"layer {layer_idx} outputs")
 
     inputs.requires_grad = True
+    
+    # Ensure the shapes of error and inputs match
+    if error.shape != inputs.shape:
+        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and inputs has shape {inputs.shape}")
+
 
     outputs.retain_grad()
     outputs.backward(error.to(device), retain_graph=True)
@@ -476,7 +482,7 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
         check_for_nans(grad, f"Gradient {i} for layer {layer_idx}")
 
     apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
-    tensors['error_output'] = (inputs.grad, grads)
+    tensors['error_output'] = inputs.grad
     tensors['grads'] = grads
 
 def final_logits_task(inputs):
@@ -491,38 +497,55 @@ def final_logits_task(inputs):
 def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global final_logits_layer, final_logits_norm, tensors
 
-    if error is None:
-        raise ValueError(f"Error tensor is None")
+    logging.info(f"Error tensor shape: {error.shape}")
 
-    # Apply RMSNorm before the final logits layer
-    normalized_inputs = final_logits_norm(inputs.to(device))
-    logits = final_logits_layer(normalized_inputs.to(device))
-    check_for_nans(logits, "final logits outputs")
+    # Ensure the inputs and error tensors are on the correct device
+    inputs = inputs.to(device)
+    error = error.to(device)
 
-    # Ensure inputs require gradient
+    # Ensure the inputs require gradients
     inputs.requires_grad = True
 
-    # Retain the gradients and perform backward pass
+    # Apply RMSNorm to the inputs
+    normalized_inputs = final_logits_norm(inputs)
+
+    # Pass the normalized inputs through the final logits layer
+    logits = final_logits_layer(normalized_inputs)
     logits.retain_grad()
-    logits.backward(error.to(device), retain_graph=True)
+
+    # Ensure the shapes of error and logits match
+    if error.shape != logits.shape:
+        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and logits has shape {logits.shape}")
+
+    # Perform backward pass on logits
+    logits.backward(error, retain_graph=True)
 
     if inputs.grad is None:
-        raise ValueError(f"Gradient for inputs is None after backward pass for final logits layer")
+        raise ValueError(f"Gradient for inputs is None after backward pass")
 
-    check_for_nans(inputs.grad, "Gradient for inputs in final logits layer")
+    # Extract gradients for RMSNorm and ColumnParallelLinear layers
+    final_logits_grads = [param.grad.to(device) for param in final_logits_layer.parameters() if param.grad is not None]
+    norm_grads = [param.grad.to(device) for param in final_logits_norm.parameters() if param.grad is not None]
 
-    # Collect gradients for both final_logits_layer and final_logits_norm
-    grads = [param.grad.to(device) for group in [final_logits_norm.parameters(), final_logits_layer.parameters()] for param in group if param.grad is not None]
-    
-    logging.debug(f"Gradients for final logits layer: {grads}")
+    # Check for NaNs in gradients
+    for i, grad in enumerate(final_logits_grads):
+        check_for_nans(grad, f"Final logits gradient {i}")
 
-    for i, grad in enumerate(grads):
-        check_for_nans(grad, f"Gradient {i} for final logits layer")
+    for i, grad in enumerate(norm_grads):
+        check_for_nans(grad, f"RMSNorm gradient {i}")
 
-    # Apply AdamW updates
-    apply_adamw(-1, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
-    tensors['error_output'] = (inputs.grad, grads)
-    tensors['grads'] = grads
+    # Concatenate gradients for AdamW optimization
+    combined_grads = final_logits_grads + norm_grads
+
+    # Apply AdamW optimization to both RMSNorm and ColumnParallelLinear layers
+    apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+
+    print(f'Shape of inputs: {inputs.shape}, shape of error_output: {inputs.grad.shape} for final_logits_backward')
+
+    # Store the error output (gradients of inputs) in the tensors dictionary
+    tensors['error_output'] = inputs.grad
+    tensors['grads'] = combined_grads
+
 
 def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global embedding, tensors
@@ -590,7 +613,13 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
         raise ValueError(f"Failed to load tensor for {tensor_name}")
 
     # Ensure tensor is on the correct device
-    device = tensor.device
+    if isinstance(tensor, torch.Tensor):
+        tensor = tensor.to(device)
+    elif isinstance(tensor, TransformerBlock):
+        # Flatten the parameters of the TransformerBlock
+        tensor = block_to_tensor(tensor).to(device)
+    else:
+        raise TypeError("Unsupported tensor type")
 
     # Flatten gradients to match the flattened tensor
     grads_flat = torch.cat([grad.view(-1).to(device) for grad in grads])
@@ -599,13 +628,13 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     v = adam_v[tensor_name]
 
     if m is None:
-        m = torch.zeros_like(tensor, device=device)
+        m = torch.zeros_like(tensor)
         adam_m[tensor_name] = m
     else:
         m = m.to(device)
 
     if v is None:
-        v = torch.zeros_like(tensor, device=device)
+        v = torch.zeros_like(tensor)
         adam_v[tensor_name] = v
     else:
         v = v.to(device)
@@ -727,18 +756,23 @@ def update_tensor(tensor_name):
                 return
 
         gradient_update = torch.load(BytesIO(response.content)).to(device)  # Ensure gradient_update is on the same device
-        logging.debug(f"Gradient update tensor for {tensor_name} is on device: {gradient_update.device}")
 
-        current_tensor = tensors.get(tensor_name, torch.zeros(gradient_update.size(), device=device))  # Ensure current_tensor is on the same device
-        logging.debug(f"Current tensor for {tensor_name} is on device: {current_tensor.device}")
+        current_tensor = tensors[tensor_name]
 
-        current_tensor.add_(gradient_update)
+        if "layer_" in tensor_name:
+            # Convert TransformerBlock to tensor, perform add_, and convert back to TransformerBlock
+            layer_idx = int(tensor_name.split('_')[1])
+            current_tensor_tensor = block_to_tensor(current_tensor)
+            current_tensor_tensor.add_(gradient_update)
+            current_tensor = tensor_to_block(current_tensor_tensor, layer_idx)
+        else:
+            current_tensor.add_(gradient_update)
 
         tensors[tensor_name] = current_tensor
         last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
 
         if tensor_name == 'embed':
-            vocab_size = tokenizer.get_vocab_size()
+            vocab_size = model_args.vocab_size
             embedding_dim = model_args.dim
             reshaped_tensor = current_tensor.view(vocab_size, embedding_dim)
             state_dict = {'weight': reshaped_tensor}
@@ -748,11 +782,6 @@ def update_tensor(tensor_name):
         elif tensor_name == 'final_logits':
             final_logits_norm, final_logits_layer = tensor_to_final_logits(current_tensor)
             logging.info("Final logits layer and RMSNorm initialized and loaded")
-
-        elif tensor_name.startswith('layer_'):
-            layer_idx = int(tensor_name.split('_')[1])
-            tensors[tensor_name] = tensor_to_block(current_tensor, layer_idx)
-            logging.info(f"Transformer block {layer_idx} initialized and loaded")
 
         logging.info(f"Successfully updated tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:

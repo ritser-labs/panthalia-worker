@@ -353,10 +353,8 @@ class Master:
             tensor_name = 'embed'
         elif task_type == 'final_logits_backward':
             tensor_name = 'final_logits'
-        elif task_type == 'backward':
-            tensor_name = f'layer_{layer_idx}'
         else:
-            raise ValueError(f"Unsupported task type: {task_type}")
+            tensor_name = f'layer_{layer_idx}'
         self.update_sot(tensor_name, result, block_number)
         self.update_adam_state(tensor_name, result['adam_m_url'], result['adam_v_url'], block_number)
 
