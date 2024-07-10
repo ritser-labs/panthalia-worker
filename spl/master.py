@@ -258,6 +258,8 @@ class Master:
         logging.info("Starting embed backward task")
         self.handle_embed_backward(error_url, batch_url)
 
+        logging.info(f'Iteration done, loss: {loss_result["loss"]}')
+
     def get_latest_model_params(self):
         response = requests.get(f"{self.sot_url}/latest_model_params")
         return response.json()
