@@ -305,16 +305,16 @@ def handle_event(event):
         result['result_url'] = upload_tensor(tensors['outputs'])
     elif task_type == 'backward':
         backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], layer_idx)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
     elif task_type == 'final_logits':
         final_logits_task(inputs)
         result['result_url'] = upload_tensor(tensors['logits'])
     elif task_type == 'final_logits_backward':
         final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -1)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], -1)
     elif task_type == 'embed_backward':
         embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result = upload_tensors_and_grads(None, tensors['grads'], -2)
+        result = upload_tensors_and_grads(None, tensors['updates'], -2)
     elif task_type == 'loss':
         loss_task(logits, targets)
         result['loss'] = tensors['loss'].item()
@@ -472,7 +472,6 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     if error.shape != inputs.shape:
         raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and inputs has shape {inputs.shape}")
 
-
     outputs.retain_grad()
     outputs.backward(error.to(device), retain_graph=True)
 
@@ -487,9 +486,9 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     for i, grad in enumerate(grads):
         check_for_nans(grad, f"Gradient {i} for layer {layer_idx}")
 
-    apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    updates = apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
     tensors['error_output'] = inputs.grad
-    tensors['grads'] = grads
+    tensors['updates'] = updates
 
 def final_logits_task(inputs):
     global final_logits_layer, final_logits_norm, tensors
@@ -544,13 +543,13 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     combined_grads = final_logits_grads + norm_grads
 
     # Apply AdamW optimization to both RMSNorm and ColumnParallelLinear layers
-    apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    updates = apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
     print(f'Shape of inputs: {inputs.shape}, shape of error_output: {inputs.grad.shape} for final_logits_backward')
 
     # Store the error output (gradients of inputs) in the tensors dictionary
     tensors['error_output'] = inputs.grad
-    tensors['grads'] = combined_grads
+    tensors['updates'] = updates
 
 
 def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t):
@@ -578,10 +577,10 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
     check_for_nans(grads, "embedding gradients")
 
     # Apply AdamW optimizer to the embedding weights
-    apply_adamw(-2, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    updates = apply_adamw(-2, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
     # Store the gradients and error output in tensors dictionary
-    tensors['grads'] = grads
+    tensors['updates'] = updates
 
 def loss_task(logits, targets):
     global tensors
@@ -663,17 +662,22 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     m_hat = m / (1 - beta1 ** t)
     v_hat = v / (1 - beta2 ** t)
 
-    tensor.data -= learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
-    tensor.data -= learning_rate * weight_decay * tensor.data
+    # Gradient update term
+    updates = -learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
+
+    # Weight decay term
+    updates -= learning_rate * weight_decay * tensor
 
     # Clip gradients
-    torch.nn.utils.clip_grad_norm_([tensor], max_grad_norm)
+    torch.nn.utils.clip_grad_norm_([updates], max_grad_norm)
 
     # Update adam_m and adam_v with the new values
     adam_m[tensor_name] = m
     adam_v[tensor_name] = v
 
     logging.info(f"Updated state dict for {tensor_name}")
+
+    return updates
 
 def check_and_finalize_verifications():
     current_time = int(time.time())
