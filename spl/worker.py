@@ -539,6 +539,8 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     # Apply AdamW optimization to both RMSNorm and ColumnParallelLinear layers
     apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
+    print(f'Shape of inputs: {inputs.shape}, shape of error_output: {inputs.grad.shape} for final_logits_backward')
+
     # Store the error output (gradients of inputs) in the tensors dictionary
     tensors['error_output'] = inputs.grad
     tensors['grads'] = combined_grads
@@ -753,10 +755,8 @@ def update_tensor(tensor_name):
                 return
 
         gradient_update = torch.load(BytesIO(response.content)).to(device)  # Ensure gradient_update is on the same device
-        logging.debug(f"Gradient update tensor for {tensor_name} is on device: {gradient_update.device}")
 
-        current_tensor = tensors.get(tensor_name, torch.zeros(gradient_update.size(), device=device))  # Ensure current_tensor is on the same device
-        logging.debug(f"Current tensor for {tensor_name} is on device: {current_tensor.device}")
+        current_tensor = tensors[tensor_name]
 
         current_tensor.add_(gradient_update)
 
