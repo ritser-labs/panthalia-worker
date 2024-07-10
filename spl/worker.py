@@ -317,6 +317,7 @@ def handle_event(event):
         result = upload_tensors_and_grads(None, tensors['grads'], -2)
     elif task_type == 'loss':
         loss_task(logits, targets)
+        result['loss'] = tensors['loss'].item()
         result['result_url'] = upload_tensor(tensors['logits_grad'])
 
     result['last_block'] = latest_block_numbers[task_type]
@@ -612,6 +613,7 @@ def loss_task(logits, targets):
 
     # Store logits gradients in the tensors dictionary
     tensors['logits_grad'] = logits_grad
+    tensors['loss'] = loss
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     max_grad_norm = 1.0
