@@ -229,7 +229,7 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'backward_layer_3' or task_type == 'final_logits_backward':
+        if args.detailed_logs: # or task_type == 'embed_backward':
             worker_processes.append(subprocess.Popen(command))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
@@ -276,3 +276,5 @@ if __name__ == "__main__":
 
     # Print final stage
     print("Test run completed.")
+
+    master_process.terminate()
