@@ -10,6 +10,7 @@ from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from device import device
 import requests
+import time
 
 app = Flask(__name__)
 sync_status = {}
@@ -245,8 +246,9 @@ def update_state():
 
         torch.save(updated_tensor, state_file_path)
 
-        # Save gradient update
-        gradient_update_path = os.path.join(gradients_dir, f'{tensor_name}_update.pt')
+        # Save gradient update with a unique name
+        timestamp = int(time.time())
+        gradient_update_path = os.path.join(gradients_dir, f'{tensor_name}_update_{block_number}_{timestamp}.pt')
         torch.save(tensor, gradient_update_path)
 
         # Store the gradient update along with the block number
