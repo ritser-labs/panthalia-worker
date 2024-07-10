@@ -305,16 +305,16 @@ def handle_event(event):
         result['result_url'] = upload_tensor(tensors['outputs'])
     elif task_type == 'backward':
         backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors[f'layer_{layer_idx}_adam_m'], tensors[f'layer_{layer_idx}_adam_v'], layer_idx)
     elif task_type == 'final_logits':
         final_logits_task(inputs)
         result['result_url'] = upload_tensor(tensors['logits'])
     elif task_type == 'final_logits_backward':
         final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], -1)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors['final_logits_adam_m'], tensors['final_logits_adam_v'], -1)
     elif task_type == 'embed_backward':
         embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result = upload_tensors_and_grads(None, tensors['updates'], -2)
+        result = upload_tensors_and_grads(None, tensors['updates'], tensors['embed_adam_m'], tensors['embed_adam_v'], -2)
     elif task_type == 'loss':
         loss_task(logits, targets)
         result['loss'] = tensors['loss'].item()
@@ -337,10 +337,11 @@ def submit_solution(task_id, result):
         logging.error(f"Error submitting solution for task {task_id}: {e}")
         raise
 
-def upload_tensors_and_grads(error_output, grads, layer_idx):
-    grads_sparse = grads_to_sparse(grads)
+def upload_tensors_and_grads(error_output, grads, adam_m, adam_v, layer_idx):
+    threshold = calculate_threshold(grads)
+    grads_sparse = grads_to_sparse(grads, threshold)
     grads_url = upload_tensor(grads_sparse)
-    adam_m_sparse, adam_v_sparse = extract_sparse_adam_params(grads, layer_idx)
+    adam_m_sparse, adam_v_sparse = extract_sparse_adam_params(grads, adam_m, adam_v, layer_idx, threshold)
     adam_m_url = upload_tensor(adam_m_sparse)
     adam_v_url = upload_tensor(adam_v_sparse)
     block_number = web3.eth.block_number
@@ -352,57 +353,57 @@ def upload_tensors_and_grads(error_output, grads, layer_idx):
         'adam_v_url': adam_v_url,
         'block_number': block_number
     }
-    
+
     if error_output is not None:
         print(f'Error output shape: {error_output.shape}')
         result['error_output_url'] = upload_tensor(error_output)
-    
+
     return result
 
-def extract_sparse_adam_params(grads, layer_idx):
-    indices, values_m, values_v = [], [], []
+def calculate_threshold(grads, percentile=99, sample_size=1000):
+    # Ensure the sample size is not greater than the total number of elements
+    num_elements = grads.numel()
+    sample_size = min(sample_size, num_elements)
     
-    if layer_idx == -1:
-        tensor_name = "final_logits"
-        total_params = model_args.dim + (model_args.vocab_size * model_args.dim)
-    elif layer_idx == -2:
-        tensor_name = "embed"
-        total_params = model_args.vocab_size * model_args.dim
-    else:
-        tensor_name = f"layer_{layer_idx}"
-        if tensor_name not in tensors:
-            raise ValueError(f"Layer {layer_idx} not found or not initialized")
-        layer = tensors[tensor_name]
-        total_params = sum(p.numel() for p in layer.parameters())
+    # Randomly generate sample indices
+    sample_indices = random.sample(range(num_elements), sample_size)
 
-    for grad in grads:
-        if grad is not None:
-            flat_grad = grad.flatten()
-            k = max(1, int(flat_grad.numel() * 0.01))
-            topk = torch.topk(flat_grad.abs(), k)
-            indices.append(topk.indices.to(flat_grad.device))
-            values_m.append(adam_m[tensor_name].flatten().to(flat_grad.device)[topk.indices])
-            values_v.append(adam_v[tensor_name].flatten().to(flat_grad.device)[topk.indices])
-    
-    indices = torch.cat(indices)
-    values_m = torch.cat(values_m)
-    values_v = torch.cat(values_v)
-    
-    return torch.sparse_coo_tensor(indices.unsqueeze(0), values_m, (total_params,), device=device), torch.sparse_coo_tensor(indices.unsqueeze(0), values_v, (total_params,), device=device)
+    # Collect sample values from the selected indices
+    sample_values = grads.view(-1)[sample_indices]
 
-def grads_to_sparse(grads):
-    indices, values = [], []
-    for grad in grads:
-        if grad is not None:
-            flat_grad = grad.flatten()
-            k = max(1, int(flat_grad.numel() * 0.01))
-            topk = torch.topk(flat_grad.abs(), k)
-            indices.append(topk.indices)
-            values.append(flat_grad[topk.indices])
-    indices = torch.cat(indices)
-    values = torch.cat(values)
-    total_params = sum(grad.numel() for grad in grads if grad is not None)
-    return torch.sparse_coo_tensor(indices.unsqueeze(0), values, (total_params,), device=device)
+    # Calculate the threshold value based on the percentile
+    threshold = torch.quantile(sample_values.abs(), percentile / 100.0).item()
+
+    return threshold
+
+def grads_to_sparse(grads, threshold=None, sample_size=1000):
+    if threshold is None:
+        threshold = calculate_threshold(grads, sample_size=sample_size)
+
+    flat_grad = grads.view(-1)
+    mask = flat_grad.abs() >= threshold
+    topk_indices = mask.nonzero(as_tuple=False).squeeze()
+    topk_values = flat_grad[topk_indices]
+
+    total_params = flat_grad.numel()
+
+    return torch.sparse_coo_tensor(topk_indices.unsqueeze(0), topk_values, (total_params,), device=grads.device)
+
+def extract_sparse_adam_params(grads, adam_m, adam_v, layer_idx, threshold=None, sample_size=1000):
+    if threshold is None:
+        threshold = calculate_threshold(grads, sample_size=sample_size)
+
+    flat_grad = grads.view(-1)
+    mask = flat_grad.abs() >= threshold
+    topk_indices = mask.nonzero(as_tuple=False).squeeze()
+
+    total_params = flat_grad.numel()
+
+    values_m = adam_m.view(-1)[topk_indices]
+    values_v = adam_v.view(-1)[topk_indices]
+
+    return torch.sparse_coo_tensor(topk_indices.unsqueeze(0), values_m, (total_params,), device=grads.device), \
+           torch.sparse_coo_tensor(topk_indices.unsqueeze(0), values_v, (total_params,), device=grads.device)
 
 def embed_task(batch):
     global embedding
