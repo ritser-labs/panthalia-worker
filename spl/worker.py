@@ -759,13 +759,20 @@ def update_tensor(tensor_name):
 
         current_tensor = tensors[tensor_name]
 
-        current_tensor.add_(gradient_update)
+        if "layer_" in tensor_name:
+            # Convert TransformerBlock to tensor, perform add_, and convert back to TransformerBlock
+            layer_idx = int(tensor_name.split('_')[1])
+            current_tensor_tensor = block_to_tensor(current_tensor)
+            current_tensor_tensor.add_(gradient_update)
+            current_tensor = tensor_to_block(current_tensor_tensor, layer_idx)
+        else:
+            current_tensor.add_(gradient_update)
 
         tensors[tensor_name] = current_tensor
         last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
 
         if tensor_name == 'embed':
-            vocab_size = tokenizer.get_vocab_size()
+            vocab_size = model_args.vocab_size
             embedding_dim = model_args.dim
             reshaped_tensor = current_tensor.view(vocab_size, embedding_dim)
             state_dict = {'weight': reshaped_tensor}
@@ -775,11 +782,6 @@ def update_tensor(tensor_name):
         elif tensor_name == 'final_logits':
             final_logits_norm, final_logits_layer = tensor_to_final_logits(current_tensor)
             logging.info("Final logits layer and RMSNorm initialized and loaded")
-
-        elif tensor_name.startswith('layer_'):
-            layer_idx = int(tensor_name.split('_')[1])
-            tensors[tensor_name] = tensor_to_block(current_tensor, layer_idx)
-            logging.info(f"Transformer block {layer_idx} initialized and loaded")
 
         logging.info(f"Successfully updated tensor: {tensor_name}")
     except requests.exceptions.RequestException as e:
