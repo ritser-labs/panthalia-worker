@@ -20,6 +20,7 @@ import time
 import os
 import socket
 import tqdm
+import random
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):
@@ -214,7 +215,8 @@ def download_json(url):
         raise
 
 def upload_tensor(tensor):
-    tensor_name = f'{int(time.time())}.pt'
+    random_number = random.randint(1000, 9999)  # Generate a random number
+    tensor_name = f'{int(time.time())}_{random_number}.pt'  # Append the random number to the tensor name
     local_file_path = os.path.join(args.local_storage_dir, tensor_name)
     torch.save(tensor, local_file_path)
     return f'{args.sot_url}/data/{tensor_name}'
@@ -763,12 +765,12 @@ def update_tensor(tensor_name):
             logging.info(f"Skipping update for tensor {tensor_name} as block number {block_number} is not newer than {latest_block_numbers[tensor_name]}")
             return
 
-        current_tensor = tensors[tensor_name]
+        current_tensor = tensors[tensor_name].to(device)  # Ensure current_tensor is on the same device
 
         if "layer_" in tensor_name:
             # Convert TransformerBlock to tensor, perform add_, and convert back to TransformerBlock
             layer_idx = int(tensor_name.split('_')[1])
-            current_tensor_tensor = block_to_tensor(current_tensor)
+            current_tensor_tensor = block_to_tensor(current_tensor).to(device)
             current_tensor_tensor.add_(gradient_update)
             current_tensor = tensor_to_block(current_tensor_tensor, layer_idx)
         else:
