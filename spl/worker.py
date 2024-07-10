@@ -335,6 +335,7 @@ def submit_solution(task_id, result):
         raise
 
 def upload_tensors_and_grads(error_output, grads, layer_idx):
+    print(f'Error output shape: {error_output.shape}')
     error_output_url = upload_tensor(error_output)
     grads_sparse = grads_to_sparse(grads)
     grads_url = upload_tensor(grads_sparse)
@@ -461,9 +462,9 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
 
     inputs.requires_grad = True
     
-    # Ensure the shapes of error and outputs match
-    if error.shape != outputs.shape:
-        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and outputs has shape {outputs.shape}")
+    # Ensure the shapes of error and inputs match
+    if error.shape != inputs.shape:
+        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and inputs has shape {inputs.shape}")
 
 
     outputs.retain_grad()
@@ -481,7 +482,7 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
         check_for_nans(grad, f"Gradient {i} for layer {layer_idx}")
 
     apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
-    tensors['error_output'] = (inputs.grad, grads)
+    tensors['error_output'] = inputs.grad
     tensors['grads'] = grads
 
 def final_logits_task(inputs):
