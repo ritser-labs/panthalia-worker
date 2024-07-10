@@ -177,24 +177,11 @@ def initialize_distributed_environment_and_globals():
 def initialize_relevant_tensors(task_type, layer_idx=None):
     logging.info(f"Initializing tensors relevant to the task_type: {task_type}")
 
-    if task_type in ['embed', 'embed_backward']:
-        initialize_tensor('embed')
-        initialize_tensor('embed_adam_m')
-        initialize_tensor('embed_adam_v')
-    elif task_type in ['final_logits', 'final_logits_backward']:
-        initialize_tensor('final_logits')
-        initialize_tensor('final_logits_adam_m')
-        initialize_tensor('final_logits_adam_v')
-    elif task_type in ['forward', 'backward']:
-        if layer_idx is None:
-            raise ValueError("layer_idx must be specified for forward and backward tasks")
-        initialize_tensor(f'layer_{layer_idx}')
-        initialize_tensor(f'layer_{layer_idx}_adam_m')
-        initialize_tensor(f'layer_{layer_idx}_adam_v')
-    elif task_type == 'loss':
-        pass
-    else:
-        raise ValueError(f"Unknown task_type: {task_type}")
+    relevant_tensors = get_relevant_tensors_for_task(task_type)
+    
+    for tensor_name in relevant_tensors:
+        initialize_tensor(tensor_name)
+
 
 def check_for_nans(tensor, name):
     if torch.isnan(tensor).any():
