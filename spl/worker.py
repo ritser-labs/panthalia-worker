@@ -314,7 +314,7 @@ def handle_event(event):
         result = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -1)
     elif task_type == 'embed_backward':
         embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['grads'], -2)
+        result = upload_tensors_and_grads(None, tensors['grads'], -2)
     elif task_type == 'loss':
         loss_task(logits, targets)
         result['result_url'] = upload_tensor(tensors['logits_grad'])
@@ -337,8 +337,6 @@ def submit_solution(task_id, result):
         raise
 
 def upload_tensors_and_grads(error_output, grads, layer_idx):
-    print(f'Error output shape: {error_output.shape}')
-    error_output_url = upload_tensor(error_output)
     grads_sparse = grads_to_sparse(grads)
     grads_url = upload_tensor(grads_sparse)
     adam_m_sparse, adam_v_sparse = extract_sparse_adam_params(grads, layer_idx)
@@ -347,13 +345,18 @@ def upload_tensors_and_grads(error_output, grads, layer_idx):
     block_number = web3.eth.block_number
     if adam_m_sparse.shape != grads_sparse.shape or adam_v_sparse.shape != grads_sparse.shape:
         raise ValueError(f"Shapes of Adam parameters do not match the gradients: {adam_m_sparse.shape} vs {grads_sparse.shape}")
-    return {
-        'error_output_url': error_output_url,
+    result = {
         'grads_url': grads_url,
         'adam_m_url': adam_m_url,
         'adam_v_url': adam_v_url,
         'block_number': block_number
     }
+    
+    if error_output is not None:
+        print(f'Error output shape: {error_output.shape}')
+        result['error_output_url'] = upload_tensor(error_output)
+    
+    return result
 
 def extract_sparse_adam_params(grads, layer_idx):
     indices, values_m, values_v = [], [], []
@@ -551,22 +554,32 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
 
 def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global embedding, tensors
-    logging.info(f"Error tensor shape: {error.shape}")
 
-    embeddings = embedding(batch.to(device))
+    if error is None:
+        raise ValueError("Error tensor is None")
 
-    error = error.view(embeddings.shape).to(device)
-    logging.info(f"Reshaped error tensor shape: {error.shape}")
+    # Ensure error tensor is on the correct device
+    error = error.to(device)
 
-    embeddings.retain_grad()
+    # Forward pass through the embedding layer
+    inputs = embedding(batch.to(device))
 
-    embeddings.backward(error.to(device), retain_graph=True)
+    # Ensure the shapes of error and inputs match
+    if error.shape != inputs.shape:
+        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and inputs has shape {inputs.shape}")
 
-    grads = [param.grad.to(device) for param in embedding.parameters() if param.grad is not None]
-    logging.info(f"Gradients for embedding: {grads}")
+    # Perform backward pass
+    inputs.backward(error)
 
+    # Extract gradients for the embedding weights
+    grads = embedding.weight.grad.to(device)
+
+    check_for_nans(grads, "embedding gradients")
+
+    # Apply AdamW optimizer to the embedding weights
     apply_adamw(-2, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
-    tensors['error_output'] = grads
+
+    # Store the gradients and error output in tensors dictionary
     tensors['grads'] = grads
 
 def loss_task(logits, targets):
@@ -606,7 +619,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     if layer_idx == -1:
         tensor_name = "final_logits"
     elif layer_idx == -2:
-        tensor_name = "embedding"
+        tensor_name = "embed"
     else:
         tensor_name = f"layer_{layer_idx}"
 
