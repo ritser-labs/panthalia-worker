@@ -101,6 +101,13 @@ dataset_iter = iter(dataset)
 
 preloaded_batch = None
 
+def truncate_tokens(tokens, max_seq_len, pad_token=tokenizer.pad_id):
+    if len(tokens) < max_seq_len:
+        tokens += [pad_token] * (max_seq_len - len(tokens))
+    elif len(tokens) > max_seq_len:
+        tokens = tokens[:max_seq_len]
+    return tokens
+
 def preload_batch():
     global preloaded_batch, dataset_iter
     batch_size = 2
@@ -118,14 +125,15 @@ def preload_batch():
                 allowed_special=set(), 
                 disallowed_special=(), 
             )
-            if len(tokens) < max_seq_len:
-                tokens += [tokenizer.pad_id] * (max_seq_len - len(tokens))
-            elif len(tokens) > max_seq_len:
-                tokens = tokens[:max_seq_len]
-            batch.append(tokens)
-            
-            # Shift tokens to create targets
-            target_tokens = tokens[1:] + [tokenizer.pad_id]
+
+            # Make a copy of tokens for target creation
+            inputs = truncate_tokens(tokens, max_seq_len)
+
+            batch.append(inputs)
+
+            # Create targets from tokens
+            target_tokens = truncate_tokens(tokens[1:], max_seq_len, tokenizer.eos_id)
+
             targets.append(target_tokens)
         except StopIteration:
             break
