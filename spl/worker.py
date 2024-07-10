@@ -93,7 +93,7 @@ embedding_initialized = False
 tensors = defaultdict(lambda: None)
 adam_m = defaultdict(lambda: None)
 adam_v = defaultdict(lambda: None)
-last_gradient_update = defaultdict(lambda: None)
+latest_block_numbers = defaultdict(lambda: 0)  # To store the latest block number processed for each tensor
 gradient_update_paused = False
 stake_deposited = False
 processed_tasks = set()
@@ -317,7 +317,7 @@ def handle_event(event):
         loss_task(logits, targets)
         result['result_url'] = upload_tensor(tensors['logits_grad'])
 
-    result['last_block'] = last_gradient_update[task_type]
+    result['last_block'] = latest_block_numbers[task_type]
     submit_solution(task_id, result)
 
     processed_tasks.add(task_id)
@@ -710,7 +710,7 @@ def initialize_tensor(tensor_name):
         else:
             tensors[tensor_name] = tensor
 
-        last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
+        latest_block_numbers[tensor_name] = int(response.headers.get('block_number', 0))
         logging.info(f"Successfully initialized tensor: {tensor_name}")
 
         if tensor_name == 'embed':
@@ -756,6 +756,12 @@ def update_tensor(tensor_name):
                 return
 
         gradient_update = torch.load(BytesIO(response.content)).to(device)  # Ensure gradient_update is on the same device
+        block_number = int(response.headers.get('block_number', 0))
+
+        # Skip processing if the block number of the update is less than or equal to the latest block number processed
+        if block_number <= latest_block_numbers[tensor_name]:
+            logging.info(f"Skipping update for tensor {tensor_name} as block number {block_number} is not newer than {latest_block_numbers[tensor_name]}")
+            return
 
         current_tensor = tensors[tensor_name]
 
@@ -769,7 +775,7 @@ def update_tensor(tensor_name):
             current_tensor.add_(gradient_update)
 
         tensors[tensor_name] = current_tensor
-        last_gradient_update[tensor_name] = response.headers.get('block_number', 0)
+        latest_block_numbers[tensor_name] = block_number
 
         if tensor_name == 'embed':
             vocab_size = model_args.vocab_size
