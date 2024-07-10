@@ -365,7 +365,7 @@ def extract_sparse_adam_params(grads, layer_idx):
         tensor_name = "final_logits"
         total_params = model_args.dim + (model_args.vocab_size * model_args.dim)
     elif layer_idx == -2:
-        tensor_name = "embedding"
+        tensor_name = "embed"
         total_params = model_args.vocab_size * model_args.dim
     else:
         tensor_name = f"layer_{layer_idx}"
