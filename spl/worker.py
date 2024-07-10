@@ -337,16 +337,19 @@ def submit_solution(task_id, result):
         logging.error(f"Error submitting solution for task {task_id}: {e}")
         raise
 
-def upload_tensors_and_grads(error_output, grads, adam_m, adam_v, layer_idx):
+def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates, layer_idx):
     threshold = calculate_threshold(grads)
-    grads_sparse = grads_to_sparse(grads, threshold)
+    grads_sparse, topk_indices = grads_to_sparse(grads, threshold)
     grads_url = upload_tensor(grads_sparse)
-    adam_m_sparse, adam_v_sparse = extract_sparse_adam_params(grads, adam_m, adam_v, layer_idx, threshold)
+    
+    adam_m_sparse = updates_to_sparse(adam_m_updates, topk_indices)
+    adam_v_sparse = updates_to_sparse(adam_v_updates, topk_indices)
+    
     adam_m_url = upload_tensor(adam_m_sparse)
     adam_v_url = upload_tensor(adam_v_sparse)
+    
     block_number = web3.eth.block_number
-    if adam_m_sparse.shape != grads_sparse.shape or adam_v_sparse.shape != grads_sparse.shape:
-        raise ValueError(f"Shapes of Adam parameters do not match the gradients: {adam_m_sparse.shape} vs {grads_sparse.shape}")
+    
     result = {
         'grads_url': grads_url,
         'adam_m_url': adam_m_url,
@@ -355,10 +358,18 @@ def upload_tensors_and_grads(error_output, grads, adam_m, adam_v, layer_idx):
     }
 
     if error_output is not None:
-        print(f'Error output shape: {error_output.shape}')
         result['error_output_url'] = upload_tensor(error_output)
 
     return result
+
+
+def updates_to_sparse(updates, topk_indices):
+    flat_updates = updates.view(-1)
+    topk_values = flat_updates[topk_indices]
+    
+    total_params = flat_updates.numel()
+    
+    return torch.sparse_coo_tensor(topk_indices.unsqueeze(0), topk_values, (total_params,), device=updates.device)
 
 def calculate_threshold(grads, percentile=99, sample_size=1000):
     # Ensure the sample size is not greater than the total number of elements
@@ -387,7 +398,9 @@ def grads_to_sparse(grads, threshold=None, sample_size=1000):
 
     total_params = flat_grad.numel()
 
-    return torch.sparse_coo_tensor(topk_indices.unsqueeze(0), topk_values, (total_params,), device=grads.device)
+    sparse_tensor = torch.sparse_coo_tensor(topk_indices.unsqueeze(0), topk_values, (total_params,), device=grads.device)
+    
+    return sparse_tensor, topk_indices
 
 def extract_sparse_adam_params(grads, adam_m, adam_v, layer_idx, threshold=None, sample_size=1000):
     if threshold is None:
@@ -487,9 +500,12 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     for i, grad in enumerate(grads):
         check_for_nans(grad, f"Gradient {i} for layer {layer_idx}")
 
-    updates = apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    updates, m_update, v_update = apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
     tensors['error_output'] = inputs.grad
     tensors['updates'] = updates
+    tensors[f'layer_{layer_idx}_adam_m'] = m_update
+    tensors[f'layer_{layer_idx}_adam_v'] = v_update
+
 
 def final_logits_task(inputs):
     global final_logits_layer, final_logits_norm, tensors
@@ -544,14 +560,15 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     combined_grads = final_logits_grads + norm_grads
 
     # Apply AdamW optimization to both RMSNorm and ColumnParallelLinear layers
-    updates = apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    updates, m_update, v_update = apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
     print(f'Shape of inputs: {inputs.shape}, shape of error_output: {inputs.grad.shape} for final_logits_backward')
 
     # Store the error output (gradients of inputs) in the tensors dictionary
     tensors['error_output'] = inputs.grad
     tensors['updates'] = updates
-
+    tensors['final_logits_adam_m'] = m_update
+    tensors['final_logits_adam_v'] = v_update
 
 def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     global embedding, tensors
@@ -578,10 +595,13 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
     check_for_nans(grads, "embedding gradients")
 
     # Apply AdamW optimizer to the embedding weights
-    updates = apply_adamw(-2, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    updates, m_update, v_update = apply_adamw(-2, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
     # Store the gradients and error output in tensors dictionary
     tensors['updates'] = updates
+    tensors['embed_adam_m'] = m_update
+    tensors['embed_adam_v'] = v_update
+
 
 def loss_task(logits, targets):
     global tensors
@@ -657,11 +677,11 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
         v = v.to(device)
 
     # AdamW update rules applied to the flattened tensors
-    m = beta1 * m + (1 - beta1) * grads_flat
-    v = beta2 * v + (1 - beta2) * (grads_flat ** 2)
+    m_update = beta1 * m + (1 - beta1) * grads_flat - m
+    v_update = beta2 * v + (1 - beta2) * (grads_flat ** 2) - v
 
-    m_hat = m / (1 - beta1 ** t)
-    v_hat = v / (1 - beta2 ** t)
+    m_hat = (m + m_update) / (1 - beta1 ** t)
+    v_hat = (v + v_update) / (1 - beta2 ** t)
 
     # Gradient update term
     updates = -learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
@@ -672,13 +692,9 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     # Clip gradients
     torch.nn.utils.clip_grad_norm_([updates], max_grad_norm)
 
-    # Update adam_m and adam_v with the new values
-    adam_m[tensor_name] = m
-    adam_v[tensor_name] = v
+    logging.info(f"Calculated updates for {tensor_name}")
 
-    logging.info(f"Updated state dict for {tensor_name}")
-
-    return updates
+    return updates, m_update, v_update
 
 def check_and_finalize_verifications():
     current_time = int(time.time())
@@ -727,7 +743,11 @@ def initialize_tensor(tensor_name):
         tensor = torch.load(BytesIO(response.content))
         logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}")
 
-        if "layer_" in tensor_name:
+        if "_adam_m" in tensor_name:
+            adam_m[tensor_name] = tensor
+        elif "_adam_v" in tensor_name:
+            adam_v[tensor_name] = tensor
+        elif "layer_" in tensor_name:
             tensors[tensor_name] = tensor_to_block(tensor, args.layer_idx)
         else:
             tensors[tensor_name] = tensor
@@ -785,18 +805,24 @@ def update_tensor(tensor_name):
             logging.info(f"Skipping update for tensor {tensor_name} as block number {block_number} is not newer than {latest_block_numbers[tensor_name]}")
             return
 
-        current_tensor = tensors[tensor_name].to(device)  # Ensure current_tensor is on the same device
-
-        if "layer_" in tensor_name:
-            # Convert TransformerBlock to tensor, perform add_, and convert back to TransformerBlock
-            layer_idx = int(tensor_name.split('_')[1])
-            current_tensor_tensor = block_to_tensor(current_tensor).to(device)
-            current_tensor_tensor.add_(gradient_update)
-            current_tensor = tensor_to_block(current_tensor_tensor, layer_idx)
+        if "_adam_m" in tensor_name:
+            adam_m[tensor_name] = adam_m[tensor_name].to(device) + gradient_update
+        elif "_adam_v" in tensor_name:
+            adam_v[tensor_name] = adam_v[tensor_name].to(device) + gradient_update
         else:
-            current_tensor.add_(gradient_update)
+            current_tensor = tensors[tensor_name].to(device)  # Ensure current_tensor is on the same device
 
-        tensors[tensor_name] = current_tensor
+            if "layer_" in tensor_name:
+                # Convert TransformerBlock to tensor, perform add_, and convert back to TransformerBlock
+                layer_idx = int(tensor_name.split('_')[1])
+                current_tensor_tensor = block_to_tensor(current_tensor).to(device)
+                current_tensor_tensor.add_(gradient_update)
+                current_tensor = tensor_to_block(current_tensor_tensor, layer_idx)
+            else:
+                current_tensor.add_(gradient_update)
+
+            tensors[tensor_name] = current_tensor
+
         latest_block_numbers[tensor_name] = block_number
 
         if tensor_name == 'embed':
@@ -816,6 +842,7 @@ def update_tensor(tensor_name):
         logging.error(f"Failed to update tensor {tensor_name} with new grads due to request exception: {e}")
     except Exception as e:
         logging.error(f"Failed to update tensor {tensor_name} with new grads due to error: {e}")
+
 
 
 def get_relevant_tensors_for_task(task_type):
