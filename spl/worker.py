@@ -183,11 +183,6 @@ def initialize_relevant_tensors(task_type, layer_idx=None):
     for tensor_name in relevant_tensors:
         initialize_tensor(tensor_name)
 
-
-def check_for_nans(tensor, name):
-    if torch.isnan(tensor).any():
-        logging.error(f"NaNs detected in {name}")
-
 def download_file(url):
     response = requests.get(url)
     return torch.load(BytesIO(response.content))
@@ -350,7 +345,6 @@ def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates
 
     return result
 
-
 def updates_to_sparse(updates, topk_indices):
     flat_updates = updates.view(-1)
     topk_values = flat_updates[topk_indices]
@@ -410,7 +404,6 @@ def embed_task(batch):
     global embedding
 
     inputs = embedding(batch)
-    check_for_nans(inputs, "embedding outputs")
     tensors['outputs'] = inputs
 
 def forward_task(layer_idx, inputs):
@@ -446,7 +439,6 @@ def forward_task(layer_idx, inputs):
 
     logging.debug(f"Performing forward pass for layer {layer_idx}")
     outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
-    check_for_nans(outputs, f"layer {layer_idx} outputs")
     tensors['outputs'] = outputs
     logging.debug(f"Forward pass completed for layer {layer_idx}")
 
@@ -466,7 +458,6 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     mask_slice = mask[:seqlen, :seqlen]
 
     outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
-    check_for_nans(outputs, f"layer {layer_idx} outputs")
 
     inputs.requires_grad = True
     
@@ -480,13 +471,8 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     if inputs.grad is None:
         raise ValueError(f"Gradient for inputs is None after backward pass for layer {layer_idx}")
 
-    check_for_nans(inputs.grad, f"Gradient for inputs in layer {layer_idx}")
-
     grads = [param.grad.to(device) for param in layer.parameters() if param.grad is not None]
     logging.debug(f"Gradients for layer {layer_idx}: {grads}")
-
-    for i, grad in enumerate(grads):
-        check_for_nans(grad, f"Gradient {i} for layer {layer_idx}")
 
     updates, m_update, v_update = apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
     tensors['error_output'] = inputs.grad
@@ -494,14 +480,12 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     tensors[f'layer_{layer_idx}_adam_m'] = m_update
     tensors[f'layer_{layer_idx}_adam_v'] = v_update
 
-
 def final_logits_task(inputs):
     global final_logits_layer, final_logits_norm, tensors
 
     # Apply RMSNorm before the final logits layer
     normalized_inputs = final_logits_norm(inputs)
     logits = final_logits_layer(normalized_inputs.to(device))
-    check_for_nans(logits, "final logits outputs")
     tensors['logits'] = logits
 
 def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
@@ -536,13 +520,6 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     # Extract gradients for RMSNorm and ColumnParallelLinear layers
     final_logits_grads = [param.grad.to(device) for param in final_logits_layer.parameters() if param.grad is not None]
     norm_grads = [param.grad.to(device) for param in final_logits_norm.parameters() if param.grad is not None]
-
-    # Check for NaNs in gradients
-    for i, grad in enumerate(final_logits_grads):
-        check_for_nans(grad, f"Final logits gradient {i}")
-
-    for i, grad in enumerate(norm_grads):
-        check_for_nans(grad, f"RMSNorm gradient {i}")
 
     # Concatenate gradients for AdamW optimization
     combined_grads = final_logits_grads + norm_grads
@@ -579,8 +556,6 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
 
     # Extract gradients for the embedding weights
     grads = embedding.weight.grad.to(device)
-
-    check_for_nans(grads, "embedding gradients")
 
     # Apply AdamW optimizer to the embedding weights
     updates, m_update, v_update = apply_adamw(-2, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
@@ -622,7 +597,6 @@ def loss_task(logits, targets):
     loss.backward(retain_graph=True)
 
     # Check for NaNs in gradients
-    check_for_nans(logits.grad, "logits gradients")
     logging.info(f"Logits gradients for loss: {logits.grad.shape}")
 
     # Reshape logits gradients to the original shape
@@ -652,7 +626,6 @@ def loss_task(logits, targets):
         # Store the max probability tokens in the tensors dictionary
         tensors['max_prob_tokens'] = max_prob_tokens
 
-
         # Print and write the entire max_prob_tokens tensor to a text file
         max_prob_tokens_list = max_prob_tokens.cpu().numpy().tolist()
         with open('output_max_prob_tokens.txt', 'w') as f:
@@ -662,8 +635,6 @@ def loss_task(logits, targets):
         logging.info(f"Max probability tokens: {max_prob_tokens}")
         logging.info(f"Max probability tokens shape: {max_prob_tokens.shape}")
         logging.info(f"Loss: {loss.item()}")
-    
-
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     max_grad_norm = 1.0
@@ -872,8 +843,6 @@ def update_tensor(tensor_name):
         logging.error(f"Failed to update tensor {tensor_name} with new grads due to request exception: {e}")
     except Exception as e:
         logging.error(f"Failed to update tensor {tensor_name} with new grads due to error: {e}")
-
-
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
