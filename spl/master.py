@@ -9,6 +9,7 @@ from common import load_contracts, handle_contract_custom_error, TaskStatus, Vot
 from io import BytesIO
 import torch
 import os
+import math
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,6 +21,7 @@ class Master:
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
         self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, subnet_addresses)
+        self.iteration = 0  # Track the number of iterations
 
         if not self.contracts:
             raise ValueError("SubnetManager contracts not found. Please check the subnet_addresses configuration.")
@@ -260,6 +262,8 @@ class Master:
 
         logging.info(f'Iteration done, loss: {loss_result["loss"]}')
 
+        self.iteration += 1  # Increment iteration after each complete training loop
+
     def get_latest_model_params(self):
         response = requests.get(f"{self.sot_url}/latest_model_params")
         return response.json()
@@ -296,7 +300,7 @@ class Master:
         return result
 
     def handle_layer_backward(self, layer_idx, error_url, inputs_url, model_params):
-        learning_params = get_learning_hyperparameters()
+        learning_params = get_learning_hyperparameters(self.iteration)
         task_type = f'backward_layer_{layer_idx}'
         task_params = {
             'layer_idx': layer_idx,
@@ -311,7 +315,7 @@ class Master:
         return result
 
     def handle_final_logits_backward(self, error_url, inputs_url, model_params):
-        learning_params = get_learning_hyperparameters()
+        learning_params = get_learning_hyperparameters(self.iteration)
         task_params = {
             'error_url': error_url,
             'inputs_url': inputs_url,
@@ -324,7 +328,7 @@ class Master:
         return result
 
     def handle_embed_backward(self, error_url, batch_url):
-        learning_params = get_learning_hyperparameters()
+        learning_params = get_learning_hyperparameters(self.iteration)
         task_params = {
             'error_url': error_url,
             'batch_url': batch_url,

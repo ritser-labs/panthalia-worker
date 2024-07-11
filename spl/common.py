@@ -13,6 +13,7 @@ from enum import Enum
 import web3 as Web3Module
 from collections import namedtuple
 from device import device
+import math
 
 # Define the new tokenizer and model arguments
 tokenizer = Tokenizer('r50k_base')
@@ -242,12 +243,36 @@ def transact_with_contract_function(web3, contract, function_name, private_key, 
         logging.error(f"Unexpected error during transaction: {e}")
         raise
 
-def get_learning_hyperparameters():
+def get_learning_hyperparameters(current_iteration):
+    """
+    Calculate the learning rate using cosine annealing with warm restarts.
+
+    Args:
+        current_iteration (int): Current iteration number.
+
+    Returns:
+        dict: A dictionary containing the learning rate and Adam optimizer parameters.
+    """
+    T_0 = 5000  # Initial number of iterations for the first cycle
+    T_mult = 2  # Factor to increase the cycle length after each restart
+    eta_max = 0.001  # Initial learning rate (maximum)
+    eta_min = 0.00001  # Minimum learning rate
+
+    # Determine the current cycle length
+    cycle_length = T_0
+    t = current_iteration
+    while current_iteration >= cycle_length:
+        current_iteration -= cycle_length
+        cycle_length *= T_mult
+
+    # Calculate the learning rate using the cosine annealing formula
+    lr = eta_min + (eta_max - eta_min) * (1 + math.cos(math.pi * current_iteration / cycle_length)) / 2
+
     return {
-        'learning_rate': 0.001,
+        'learning_rate': lr,
         'beta1': 0.9,
         'beta2': 0.999,
         'epsilon': 1e-8,
         'weight_decay': 0.01,
-        't': 1  # This might be dynamically set elsewhere in the code
+        't': t  # Add the current iteration as 't'
     }
