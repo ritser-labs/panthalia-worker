@@ -198,11 +198,17 @@ def download_json(url):
         raise
 
 def upload_tensor(tensor):
-    random_number = random.randint(1000, 9999)  # Generate a random number
-    tensor_name = f'{int(time.time())}_{random_number}.pt'  # Append the random number to the tensor name
-    local_file_path = os.path.join(args.local_storage_dir, tensor_name)
-    torch.save(tensor, local_file_path)
-    return f'{args.sot_url}/data/{tensor_name}'
+    tensor_bytes = BytesIO()
+    torch.save(tensor, tensor_bytes)
+    tensor_bytes.seek(0)
+
+    files = {'tensor': tensor_bytes}
+    response = requests.post(f'{args.sot_url}/upload_tensor', files=files)
+
+    if response.status_code == 200:
+        return response.json().get('tensor_url')
+    else:
+        raise RuntimeError(f"Failed to upload tensor: {response.text}")
 
 def pause_gradient_updates():
     global gradient_update_paused

@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from device import device
 import requests
 import time
+import random
 
 app = Flask(__name__)
 sync_status = {}
@@ -387,6 +388,20 @@ def get_data_file(filename):
     except Exception as e:
         logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
         return jsonify({'error': 'File not found'}), 404
+
+@app.route('/upload_tensor', methods=['POST'])
+def upload_tensor():
+    if 'tensor' not in request.files:
+        return jsonify({'error': 'No tensor file provided'}), 400
+
+    tensor_file = request.files['tensor']
+    tensor_name = f'{int(time.time())}_{random.randint(1000, 9999)}.pt'
+    local_file_path = os.path.join(data_dir, tensor_name)
+
+    tensor = torch.load(BytesIO(tensor_file.read()))
+    torch.save(tensor, local_file_path)
+
+    return jsonify({'tensor_url': f'{BASE_URL}/data/{tensor_name}'})
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")
