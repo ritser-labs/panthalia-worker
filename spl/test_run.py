@@ -87,6 +87,14 @@ def generate_wallets(num_wallets):
         wallets.append({'private_key': account._private_key.hex(), 'address': account.address})
     return wallets
 
+def delete_directory_contents(directory):
+    if os.path.exists(directory):
+        try:
+            shutil.rmtree(directory)
+            print(f"Deleted directory: {directory}")
+        except Exception as e:
+            print(f"Error deleting directory {directory}: {e}")
+
 def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token):
     for wallet in wallets:
         tx = {
@@ -119,16 +127,13 @@ if __name__ == "__main__":
             print(f"Deleted file: {pt_file}")
         except Exception as e:
             print(f"Error deleting file {pt_file}: {e}")
-
-    # Delete the state directory and its contents
+    gradients = os.path.join(args.local_storage_dir, 'gradients')
+    delete_directory_contents(gradients)
+    '''
+    ## Delete the state directory and its contents
     state_dir = os.path.join(args.local_storage_dir, 'state')
-    if os.path.exists(state_dir):
-        try:
-            shutil.rmtree(state_dir)
-            print(f"Deleted directory: {state_dir}")
-        except Exception as e:
-            print(f"Error deleting directory {state_dir}: {e}")
-
+    delete_directory_contents(state_dir)
+    '''
     # Start Flask server in a separate thread
     flask_thread = threading.Thread(target=lambda: app.run(port=5002))
     flask_thread.start()
