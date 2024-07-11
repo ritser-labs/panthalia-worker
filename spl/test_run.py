@@ -234,8 +234,8 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs: # or task_type == 'embed_backward':
-            worker_processes.append(subprocess.Popen(command))
+        if args.detailed_logs or task_type == 'loss': # or task_type == 'embed_backward':
+            worker_processes.append(subprocess.Popen(command + ['--detailed_logs'], stdout=subprocess.PIPE, stderr=subprocess.PIPE))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
