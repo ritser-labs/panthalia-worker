@@ -77,7 +77,9 @@ def initialize_tensor(name, shape, random_init=True):
     if os.path.exists(file_path):
         return
     if random_init:
-        tensor = torch.randn(*shape)
+        fan_in = shape[0] if len(shape) > 0 else 1
+        std = (2 / fan_in) ** 0.5
+        tensor = torch.randn(*shape) * std
     else:
         tensor = torch.zeros(*shape)
     tensor = tensor.flatten()  # Ensure the tensor is 1D
@@ -340,7 +342,7 @@ def stream_gradients():
 
         return jsonify({'status': 'success'})
     except Exception as e:
-        logging.error(f"Error in /stream_gradients: {e}", exc_info=True)
+        logging.error(f"Error in /stream_gradients: {e}")
         return jsonify({'error': 'Could not stream gradients'}), 500
 
 @app.route('/tensor_size', methods=['GET'])
