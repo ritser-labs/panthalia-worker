@@ -274,5 +274,6 @@ def get_learning_hyperparameters(current_iteration):
         'beta2': 0.999,
         'epsilon': 1e-8,
         'weight_decay': 0.01,
-        't': t  # Add the current iteration as 't'
+        't': t,  # Add the current iteration as 't'
+        'accumulation_steps': 1  # Set the accumulation steps to 1
     }

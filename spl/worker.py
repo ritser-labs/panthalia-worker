@@ -286,6 +286,7 @@ def handle_event(event):
     task_type = args.task_type
     layer_idx = args.layer_idx
     result = {}
+    accumulation_steps = task_params.get('accumulation_steps', 1)
     if task_type == 'embed':
         embed_task(batch)
         result['result_url'] = upload_tensor(tensors['outputs'])
@@ -293,16 +294,16 @@ def handle_event(event):
         forward_task(layer_idx, inputs)
         result['result_url'] = upload_tensor(tensors['outputs'])
     elif task_type == 'backward':
-        backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
+        backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
         result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors[f'layer_{layer_idx}_adam_m'], tensors[f'layer_{layer_idx}_adam_v'], layer_idx)
     elif task_type == 'final_logits':
         final_logits_task(inputs)
         result['result_url'] = upload_tensor(tensors['logits'])
     elif task_type == 'final_logits_backward':
-        final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
+        final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
         result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors['final_logits_adam_m'], tensors['final_logits_adam_v'], -1)
     elif task_type == 'embed_backward':
-        embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'])
+        embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
         result = upload_tensors_and_grads(None, tensors['updates'], tensors['embed_adam_m'], tensors['embed_adam_v'], -2)
     elif task_type == 'loss':
         loss_task(logits, targets)
@@ -448,7 +449,7 @@ def forward_task(layer_idx, inputs):
     tensors['outputs'] = outputs
     logging.debug(f"Forward pass completed for layer {layer_idx}")
 
-def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
+def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t, accumulation_steps):
     global freqs_cis, mask, tensors
 
     if error is None:
@@ -463,24 +464,28 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     # Slice the mask to match the sequence length
     mask_slice = mask[:seqlen, :seqlen]
 
-    outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
+    microbatch_size = inputs.shape[0] // accumulation_steps
 
+    grads_accumulated = [torch.zeros_like(param, device=device) for param in layer.parameters()]
     inputs.requires_grad = True
     
-    # Ensure the shapes of error and inputs match
-    if error.shape != inputs.shape:
-        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and inputs has shape {inputs.shape}")
+    for i in range(accumulation_steps):
+        microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size].to(device)
+        microbatch_error = error[i * microbatch_size:(i + 1) * microbatch_size].to(device)
 
-    outputs.retain_grad()
-    outputs.backward(error.to(device), retain_graph=True)
+        outputs = layer(microbatch_inputs, start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
 
-    if inputs.grad is None:
-        raise ValueError(f"Gradient for inputs is None after backward pass for layer {layer_idx}")
+        outputs.retain_grad()
+        outputs.backward(microbatch_error, retain_graph=True)
 
-    grads = [param.grad.to(device) for param in layer.parameters() if param.grad is not None]
-    logging.debug(f"Gradients for layer {layer_idx}: {grads}")
+        for j, param in enumerate(layer.parameters()):
+            grads_accumulated[j] += param.grad
 
-    updates, m_update, v_update = apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+        layer.zero_grad()
+
+    grads_accumulated = [grad / accumulation_steps for grad in grads_accumulated]
+
+    updates, m_update, v_update = apply_adamw(layer_idx, grads_accumulated, learning_rate, beta1, beta2, epsilon, weight_decay, t)
     tensors['error_output'] = inputs.grad
     tensors['updates'] = updates
     tensors[f'layer_{layer_idx}_adam_m'] = m_update
@@ -494,7 +499,7 @@ def final_logits_task(inputs):
     logits = final_logits_layer(normalized_inputs.to(device))
     tensors['logits'] = logits
 
-def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t):
+def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t, accumulation_steps):
     global final_logits_layer, final_logits_norm, tensors
 
     logging.info(f"Error tensor shape: {error.shape}")
@@ -513,35 +518,43 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     logits = final_logits_layer(normalized_inputs)
     logits.retain_grad()
 
-    # Ensure the shapes of error and logits match
-    if error.shape != logits.shape:
-        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and logits has shape {logits.shape}")
+    microbatch_size = inputs.shape[0] // accumulation_steps
 
-    # Perform backward pass on logits
-    logits.backward(error, retain_graph=True)
+    final_logits_grads_accumulated = [torch.zeros_like(param, device=device) for param in final_logits_layer.parameters()]
+    norm_grads_accumulated = [torch.zeros_like(param, device=device) for param in final_logits_norm.parameters()]
 
-    if inputs.grad is None:
-        raise ValueError(f"Gradient for inputs is None after backward pass")
+    for i in range(accumulation_steps):
+        microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size]
+        microbatch_error = error[i * microbatch_size:(i + 1) * microbatch_size]
 
-    # Extract gradients for RMSNorm and ColumnParallelLinear layers
-    final_logits_grads = [param.grad.to(device) for param in final_logits_layer.parameters() if param.grad is not None]
-    norm_grads = [param.grad.to(device) for param in final_logits_norm.parameters() if param.grad is not None]
+        normalized_inputs = final_logits_norm(microbatch_inputs)
+        logits = final_logits_layer(normalized_inputs)
+        logits.retain_grad()
 
-    # Concatenate gradients for AdamW optimization
-    combined_grads = final_logits_grads + norm_grads
+        logits.backward(microbatch_error, retain_graph=True)
 
-    # Apply AdamW optimization to both RMSNorm and ColumnParallelLinear layers
+        for j, param in enumerate(final_logits_layer.parameters()):
+            final_logits_grads_accumulated[j] += param.grad
+
+        for j, param in enumerate(final_logits_norm.parameters()):
+            norm_grads_accumulated[j] += param.grad
+
+        final_logits_layer.zero_grad()
+        final_logits_norm.zero_grad()
+
+    final_logits_grads_accumulated = [grad / accumulation_steps for grad in final_logits_grads_accumulated]
+    norm_grads_accumulated = [grad / accumulation_steps for grad in norm_grads_accumulated]
+
+    combined_grads = final_logits_grads_accumulated + norm_grads_accumulated
+
     updates, m_update, v_update = apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
-    print(f'Shape of inputs: {inputs.shape}, shape of error_output: {inputs.grad.shape} for final_logits_backward')
-
-    # Store the error output (gradients of inputs) in the tensors dictionary
     tensors['error_output'] = inputs.grad
     tensors['updates'] = updates
     tensors['final_logits_adam_m'] = m_update
     tensors['final_logits_adam_v'] = v_update
 
-def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t):
+def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t, accumulation_steps):
     global embedding, tensors
 
     if error is None:
@@ -550,23 +563,25 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
     # Ensure error tensor is on the correct device
     error = error.to(device)
 
-    # Forward pass through the embedding layer
-    inputs = embedding(batch.to(device))
+    microbatch_size = batch.shape[0] // accumulation_steps
 
-    # Ensure the shapes of error and inputs match
-    if error.shape != inputs.shape:
-        raise ValueError(f"Mismatch in shapes: error has shape {error.shape} and inputs has shape {inputs.shape}")
+    grads_accumulated = torch.zeros_like(embedding.weight, device=device)
 
-    # Perform backward pass
-    inputs.backward(error)
+    for i in range(accumulation_steps):
+        microbatch_batch = batch[i * microbatch_size:(i + 1) * microbatch_size].to(device)
+        microbatch_error = error[i * microbatch_size:(i + 1) * microbatch_size].to(device)
 
-    # Extract gradients for the embedding weights
-    grads = embedding.weight.grad.to(device)
+        inputs = embedding(microbatch_batch)
+        inputs.backward(microbatch_error)
 
-    # Apply AdamW optimizer to the embedding weights
-    updates, m_update, v_update = apply_adamw(-2, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+        grads_accumulated += embedding.weight.grad
 
-    # Store the gradients and error output in tensors dictionary
+        embedding.zero_grad()
+
+    grads_accumulated /= accumulation_steps
+
+    updates, m_update, v_update = apply_adamw(-2, grads_accumulated, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+
     tensors['updates'] = updates
     tensors['embed_adam_m'] = m_update
     tensors['embed_adam_v'] = v_update
