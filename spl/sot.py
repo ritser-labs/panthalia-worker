@@ -7,7 +7,7 @@ import torch
 from common import model_args, tokenizer
 from datasets import load_dataset
 from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from device import device
 import requests
 import time
@@ -27,9 +27,9 @@ if not os.path.exists(data_dir):
 
 logging.info("Initializing or loading initial state...")
 state_dir = os.path.join(data_dir, 'state')
-gradients_dir = os.path.join(data_dir, 'gradients')
+#gradients_dir = os.path.join(data_dir, 'gradients')
 os.makedirs(state_dir, exist_ok=True)
-os.makedirs(gradients_dir, exist_ok=True)
+#os.makedirs(gradients_dir, exist_ok=True)
 
 # File to store block numbers
 block_numbers_file = os.path.join(state_dir, 'block_numbers.json')
@@ -46,7 +46,7 @@ def save_block_numbers(block_numbers):
 
 # Load existing block numbers on startup
 block_numbers = load_block_numbers()
-gradient_updates = {tensor_name: {'file_path': os.path.join(gradients_dir, f'{tensor_name}_update_{block_number}.pt'), 'block_number': block_number} for tensor_name, block_number in block_numbers.items()}
+#gradient_updates = {tensor_name: {'file_path': os.path.join(gradients_dir, f'{tensor_name}_update_{block_number}.pt'), 'block_number': block_number} for tensor_name, block_number in block_numbers.items()}
 
 # Dictionary to store gradient updates
 executor = ThreadPoolExecutor(max_workers=10)
@@ -277,18 +277,18 @@ def update_state():
         torch.save(updated_tensor, state_file_path)
 
         # Save gradient update with a unique name
-        timestamp = int(time.time())
-        gradient_update_path = os.path.join(gradients_dir, f'{tensor_name}_update_{block_number}_{timestamp}.pt')
-        torch.save(tensor, gradient_update_path)
+        #timestamp = int(time.time())
+        #gradient_update_path = os.path.join(gradients_dir, f'{tensor_name}_update_{block_number}_{timestamp}.pt')
+        #torch.save(tensor, gradient_update_path)
 
         # Store the gradient update along with the block number
-        gradient_updates[tensor_name] = {'file_path': gradient_update_path, 'block_number': block_number}
+        #gradient_updates[tensor_name] = {'file_path': gradient_update_path, 'block_number': block_number}
         
         # Persist the block number to disk
         block_numbers[tensor_name] = block_number
         save_block_numbers(block_numbers)
 
-        logging.debug(f"Updated state and stored gradient update for {tensor_name}")
+        logging.debug(f"Updated state for {tensor_name}")
         return jsonify({'status': 'success'})
     except requests.RequestException as e:
         logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}")
@@ -322,66 +322,66 @@ def tensor_block_number():
     if not tensor_name:
         return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-    if tensor_name not in gradient_updates:
-        return jsonify({'error': 'No updates available for tensor'}), 404
+    #if tensor_name not in gradient_updates:
+    #    return jsonify({'error': 'No updates available for tensor'}), 404
 
-    block_number = gradient_updates[tensor_name]['block_number']
+    block_number = block_numbers.get(tensor_name, 0)
     return jsonify({'block_number': block_number})
 
-@app.route('/gradient_update', methods=['GET'])
-def gradient_update():
-    logging.info("Accessing /gradient_update endpoint")
-    tensor_name = request.args.get('tensor_name')
-    logging.debug(f"Received tensor_name: {tensor_name}")
+#@app.route('/gradient_update', methods=['GET'])
+#def gradient_update():
+#    logging.info("Accessing /gradient_update endpoint")
+#    tensor_name = request.args.get('tensor_name')
+#    logging.debug(f"Received tensor_name: {tensor_name}")
 
-    logging.debug(f"Available gradient updates: {list(gradient_updates.keys())}")
+#    logging.debug(f"Available gradient updates: {list(gradient_updates.keys())}")
 
-    if not tensor_name:
-        logging.error("Missing tensor_name parameter")
-        return jsonify({'error': 'Missing tensor_name parameter'}), 400
+#    if not tensor_name:
+#        logging.error("Missing tensor_name parameter")
+#        return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-    if tensor_name not in gradient_updates:
-        logging.warning(f"No updates available for tensor {tensor_name}")
-        return jsonify({'status': 'no_updates', 'message': f'No updates available for tensor {tensor_name}'}), 200
+#    if tensor_name not in gradient_updates:
+#        logging.warning(f"No updates available for tensor {tensor_name}")
+#        return jsonify({'status': 'no_updates', 'message': f'No updates available for tensor {tensor_name}'}), 200
 
-    try:
-        gradient_update_path = gradient_updates[tensor_name]['file_path']
-        block_number = gradient_updates[tensor_name]['block_number']
-        response = send_file(gradient_update_path, mimetype='application/octet-stream')
-        response.headers['block_number'] = block_number
-        return response
-    except Exception as e:
-        logging.error(f"Error in /gradient_update: {e}", exc_info=True)
-        return jsonify({'error': 'Could not retrieve gradient update'}), 500
+#    try:
+#        gradient_update_path = gradient_updates[tensor_name]['file_path']
+#        block_number = gradient_updates[tensor_name]['block_number']
+#        response = send_file(gradient_update_path, mimetype='application/octet-stream')
+#        response.headers['block_number'] = block_number
+#        return response
+#    except Exception as e:
+#        logging.error(f"Error in /gradient_update: {e}", exc_info=True)
+#        return jsonify({'error': 'Could not retrieve gradient update'}), 500
 
-@app.route('/stream_gradients', methods=['POST'])
-def stream_gradients():
-    logging.info("Accessing /stream_gradients endpoint")
-    data = request.get_json()
-    logging.debug(f"Received data: {data}")
+#@app.route('/stream_gradients', methods=['POST'])
+#def stream_gradients():
+#    logging.info("Accessing /stream_gradients endpoint")
+#    data = request.get_json()
+#    logging.debug(f"Received data: {data}")
 
-    if not data:
-        logging.error("Empty request data in /stream_gradients")
-        return jsonify({'error': 'Empty request data'}), 400
+#    if not data:
+#        logging.error("Empty request data in /stream_gradients")
+#        return jsonify({'error': 'Empty request data'}), 400
 
-    task_id = data.get('task_id')
-    gradients = data.get('gradients')
-    block_number = data.get('block_number', 0)
+#    task_id = data.get('task_id')
+#    gradients = data.get('gradients')
+#    block_number = data.get('block_number', 0)
 
-    if not task_id or not gradients:
-        logging.error("Missing task_id or gradients in /stream_gradients request")
-        return jsonify({'error': 'Missing task_id or gradients'}), 400
+#    if not task_id or not gradients:
+#        logging.error("Missing task_id or gradients in /stream_gradients request")
+#        return jsonify({'error': 'Missing task_id or gradients'}), 400
 
-    try:
-        gradient_file_path = os.path.join(gradients_dir, f'{task_id}.pt')
-        tensor_data = BytesIO(json.dumps(gradients).encode())
-        tensor = torch.load(tensor_data)
-        torch.save(tensor, gradient_file_path)
+#    try:
+#        gradient_file_path = os.path.join(gradients_dir, f'{task_id}.pt')
+#        tensor_data = BytesIO(json.dumps(gradients).encode())
+#        tensor = torch.load(tensor_data)
+#        torch.save(tensor, gradient_file_path)
 
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        logging.error(f"Error in /stream_gradients: {e}")
-        return jsonify({'error': 'Could not stream gradients'}), 500
+#        return jsonify({'status': 'success'})
+#    except Exception as e:
+#        logging.error(f"Error in /stream_gradients: {e}")
+#        return jsonify({'error': 'Could not stream gradients'}), 500
 
 @app.route('/tensor_size', methods=['GET'])
 def get_tensor_size():
