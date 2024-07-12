@@ -311,7 +311,7 @@ class Master:
         task_id, block_number = self.submit_task(task_type, task_params)
         result = self.wait_for_result(task_type, task_id)
         result['block_number'] = block_number
-        self.update_sot_with_sparse(task_type, result, block_number, layer_idx)
+        self.update_sot_all(task_type, result, block_number, layer_idx)
         return result
 
     def handle_final_logits_backward(self, error_url, inputs_url, model_params):
@@ -324,7 +324,7 @@ class Master:
         task_id, block_number = self.submit_task('final_logits_backward', task_params)
         result = self.wait_for_result('final_logits_backward', task_id)
         result['block_number'] = block_number
-        self.update_sot_with_sparse('final_logits_backward', result, block_number)
+        self.update_sot_all('final_logits_backward', result, block_number)
         return result
 
     def handle_embed_backward(self, error_url, batch_url):
@@ -337,7 +337,7 @@ class Master:
         task_id, block_number = self.submit_task('embed_backward', task_params)
         result = self.wait_for_result('embed_backward', task_id)
         result['block_number'] = block_number
-        self.update_sot_with_sparse('embed_backward', result, block_number)
+        self.update_sot_all('embed_backward', result, block_number)
         return result
 
     def wait_for_result(self, task_type, task_id):
@@ -354,7 +354,7 @@ class Master:
         else:
             logging.info(f"Updated SOT for {tensor_name} with result: {result}")
 
-    def update_sot_with_sparse(self, task_type, result, block_number, layer_idx=None):
+    def update_sot_all(self, task_type, result, block_number, layer_idx=None):
         if task_type == 'embed_backward':
             tensor_name = 'embed'
         elif task_type == 'final_logits_backward':

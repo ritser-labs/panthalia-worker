@@ -12,6 +12,8 @@ from device import device
 import requests
 import time
 import random
+from werkzeug.utils import secure_filename
+from tqdm import tqdm
 
 app = Flask(__name__)
 sync_status = {}
@@ -29,9 +31,24 @@ gradients_dir = os.path.join(data_dir, 'gradients')
 os.makedirs(state_dir, exist_ok=True)
 os.makedirs(gradients_dir, exist_ok=True)
 
-# Dictionary to store gradient updates
-gradient_updates = {}
+# File to store block numbers
+block_numbers_file = os.path.join(state_dir, 'block_numbers.json')
 
+def load_block_numbers():
+    if os.path.exists(block_numbers_file):
+        with open(block_numbers_file, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_block_numbers(block_numbers):
+    with open(block_numbers_file, 'w') as f:
+        json.dump(block_numbers, f)
+
+# Load existing block numbers on startup
+block_numbers = load_block_numbers()
+gradient_updates = {tensor_name: {'file_path': os.path.join(gradients_dir, f'{tensor_name}_update_{block_number}.pt'), 'block_number': block_number} for tensor_name, block_number in block_numbers.items()}
+
+# Dictionary to store gradient updates
 executor = ThreadPoolExecutor(max_workers=10)
 
 # Replace hardcoded URL with a variable
@@ -85,6 +102,9 @@ def initialize_tensor(name, shape, random_init=True):
         tensor = torch.zeros(*shape)
     tensor = tensor.flatten()  # Ensure the tensor is 1D
     torch.save(tensor, file_path)
+
+    block_numbers[name] = 0
+    save_block_numbers(block_numbers)
 
 def initialize_all_tensors():
     initialize_tensor('embed', tensor_sizes['embed'])
@@ -227,7 +247,6 @@ def get_targets():
         logging.error(f"Error in /get_targets: {e}", exc_info=True)
         return jsonify({'error': 'Could not get targets'}), 500
 
-
 @app.route('/update_state', methods=['POST'])
 def update_state():
     logging.info("Accessing /update_state endpoint")
@@ -264,6 +283,10 @@ def update_state():
 
         # Store the gradient update along with the block number
         gradient_updates[tensor_name] = {'file_path': gradient_update_path, 'block_number': block_number}
+        
+        # Persist the block number to disk
+        block_numbers[tensor_name] = block_number
+        save_block_numbers(block_numbers)
 
         logging.debug(f"Updated state and stored gradient update for {tensor_name}")
         return jsonify({'status': 'success'})
@@ -272,7 +295,6 @@ def update_state():
     except Exception as e:
         logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
     return jsonify({'error': 'Could not update state'}), 500
-
 
 @app.route('/latest_state', methods=['GET'])
 def latest_state():
@@ -286,10 +308,25 @@ def latest_state():
         return jsonify({'error': 'Tensor not found'}), 404
 
     try:
-        return send_file(state_file_path, mimetype='application/octet-stream')
+        response = send_file(state_file_path, mimetype='application/octet-stream')
+        response.headers['block_number'] = block_numbers.get(tensor_name, 0)
+        return response
     except Exception as e:
         logging.error(f"Error in /latest_state: {e}", exc_info=True)
         return jsonify({'error': 'Could not retrieve latest state'}), 500
+
+@app.route('/tensor_block_number', methods=['GET'])
+def tensor_block_number():
+    logging.info("Accessing /tensor_block_number endpoint")
+    tensor_name = request.args.get('tensor_name')
+    if not tensor_name:
+        return jsonify({'error': 'Missing tensor_name parameter'}), 400
+
+    if tensor_name not in gradient_updates:
+        return jsonify({'error': 'No updates available for tensor'}), 404
+
+    block_number = gradient_updates[tensor_name]['block_number']
+    return jsonify({'block_number': block_number})
 
 @app.route('/gradient_update', methods=['GET'])
 def gradient_update():
@@ -361,25 +398,6 @@ def get_tensor_size():
     size = tensor.numel()
     return jsonify({'size': size})
 
-@app.route('/report_stake', methods=['POST'])
-def report_stake():
-    data = request.get_json()
-    worker_address = data.get('worker_address')
-    if worker_address:
-        sync_status[worker_address] = 'staked'
-        return jsonify({'status': 'success'})
-    else:
-        return jsonify({'status': 'error', 'message': 'Missing worker_address'}), 400
-
-@app.route('/check_stake', methods=['GET'])
-def check_stake():
-    total_workers = int(request.args.get('total_workers', 0))
-    staked_workers = len(sync_status)
-    if staked_workers >= total_workers:
-        return jsonify({'status': 'all_staked'})
-    else:
-        return jsonify({'status': 'waiting', 'staked_workers': staked_workers, 'total_workers': total_workers})
-
 @app.route('/data/<path:filename>', methods=['GET'])
 def get_data_file(filename):
     logging.info(f"Accessing file: {filename}")
@@ -395,13 +413,20 @@ def upload_tensor():
         return jsonify({'error': 'No tensor file provided'}), 400
 
     tensor_file = request.files['tensor']
-    tensor_name = f'{int(time.time())}_{random.randint(1000, 9999)}.pt'
-    local_file_path = os.path.join(data_dir, tensor_name)
+    filename = secure_filename(f'{int(time.time())}_{random.randint(1000, 9999)}.pt')
+    local_file_path = os.path.join(data_dir, filename)
 
-    tensor = torch.load(BytesIO(tensor_file.read()))
-    torch.save(tensor, local_file_path)
+    logging.debug("Receiving tensor upload...")
+    total_size = request.content_length
+    chunk_size = 1024 * 1024  # 1MB
 
-    return jsonify({'tensor_url': f'{BASE_URL}/data/{tensor_name}'})
+    with open(local_file_path, 'wb') as f:
+        for chunk in tqdm(tensor_file.stream, total=total_size//chunk_size, unit='MB', desc='Receiving'):
+            if chunk:
+                f.write(chunk)
+    logging.debug("Tensor upload completed.")
+
+    return jsonify({'tensor_url': f'{BASE_URL}/data/{filename}'})
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")

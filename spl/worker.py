@@ -18,9 +18,8 @@ from typing import Optional, Tuple
 from io import BytesIO
 import time
 import os
-import socket
-import tqdm
-import random
+from tqdm import tqdm
+from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):
@@ -197,13 +196,34 @@ def download_json(url):
         logging.error(f"Failed to download JSON from {url}: {e}")
         raise
 
+def create_callback(encoder, pbar):
+    def callback(monitor):
+        pbar.update(monitor.bytes_read - pbar.n)
+    return callback
+
 def upload_tensor(tensor):
     tensor_bytes = BytesIO()
     torch.save(tensor, tensor_bytes)
     tensor_bytes.seek(0)
 
-    files = {'tensor': tensor_bytes}
-    response = requests.post(f'{args.sot_url}/upload_tensor', files=files)
+    encoder = MultipartEncoder(
+        fields={'tensor': ('tensor.pt', tensor_bytes, 'application/octet-stream')}
+    )
+
+    pbar = tqdm(total=encoder.len, unit='B', unit_scale=True, desc='Uploading')
+    monitor = MultipartEncoderMonitor(encoder, create_callback(encoder, pbar))
+
+    headers = {'Content-Type': monitor.content_type}
+    logging.debug("Starting tensor upload...")
+
+    try:
+        response = requests.post(f'{args.sot_url}/upload_tensor', data=monitor, headers=headers, timeout=300)
+        pbar.close()
+        logging.debug("Upload completed.")
+    except requests.exceptions.Timeout:
+        logging.error("Upload request timed out.")
+        pbar.close()
+        raise RuntimeError("Failed to upload tensor: request timed out")
 
     if response.status_code == 200:
         return response.json().get('tensor_url')
@@ -229,23 +249,12 @@ def deposit_stake():
             logging.info(f"depositStake transaction receipt: {receipt}")
 
             stake_deposited = True
-            report_stake_status()
         except ContractCustomError as e:
             error_selectors = load_error_selectors(web3)
             handle_contract_custom_error(web3, error_selectors, e)
         except Exception as e:
             logging.error(f"Failed to deposit stake: {e}")
             raise
-
-def report_stake_status():
-    try:
-        response = requests.post(f"{args.sot_url}/report_stake", json={'worker_address': worker_address})
-        if response.status_code == 200:
-            logging.info(f"Reported staking status for worker {worker_address}")
-        else:
-            logging.error(f"Failed to report staking status for worker {worker_address}: {response.text}")
-    except requests.RequestException as e:
-        logging.error(f"Exception while reporting staking status: {e}")
 
 def handle_event(event):
     task_id = event['args']['taskId']
@@ -307,8 +316,11 @@ def handle_event(event):
         result = upload_tensors_and_grads(None, tensors['updates'], tensors['embed_adam_m'], tensors['embed_adam_v'], -2)
     elif task_type == 'loss':
         loss_task(logits, targets)
+        logging.info(1)
         result['loss'] = tensors['loss'].item()
+        logging.info(2)
         result['result_url'] = upload_tensor(tensors['logits_grad'])
+        logging.info(3)
 
     result['last_block'] = latest_block_numbers[task_type]
     submit_solution(task_id, result)
@@ -328,15 +340,10 @@ def submit_solution(task_id, result):
         raise
 
 def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates, layer_idx):
-    threshold = calculate_threshold(grads)
-    grads_sparse, topk_indices = grads_to_sparse(grads, threshold)
-    grads_url = upload_tensor(grads_sparse)
+    grads_url = upload_tensor(grads)
     
-    adam_m_sparse = updates_to_sparse(adam_m_updates, topk_indices)
-    adam_v_sparse = updates_to_sparse(adam_v_updates, topk_indices)
-    
-    adam_m_url = upload_tensor(adam_m_sparse)
-    adam_v_url = upload_tensor(adam_v_sparse)
+    adam_m_url = upload_tensor(adam_m_updates)
+    adam_v_url = upload_tensor(adam_v_updates)
     
     block_number = web3.eth.block_number
     
@@ -352,60 +359,6 @@ def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates
 
     return result
 
-def updates_to_sparse(updates, topk_indices):
-    flat_updates = updates.view(-1)
-    topk_values = flat_updates[topk_indices]
-    
-    total_params = flat_updates.numel()
-    
-    return torch.sparse_coo_tensor(topk_indices.unsqueeze(0), topk_values, (total_params,), device=updates.device)
-
-def calculate_threshold(grads, percentile=99, sample_size=1000):
-    # Ensure the sample size is not greater than the total number of elements
-    num_elements = grads.numel()
-    sample_size = min(sample_size, num_elements)
-    
-    # Randomly generate sample indices
-    sample_indices = random.sample(range(num_elements), sample_size)
-
-    # Collect sample values from the selected indices
-    sample_values = grads.view(-1)[sample_indices]
-
-    # Calculate the threshold value based on the percentile
-    threshold = torch.quantile(sample_values.abs(), percentile / 100.0).item()
-
-    return threshold
-
-def grads_to_sparse(grads, threshold=None, sample_size=1000):
-    if threshold is None:
-        threshold = calculate_threshold(grads, sample_size=sample_size)
-
-    flat_grad = grads.view(-1)
-    mask = flat_grad.abs() >= threshold
-    topk_indices = mask.nonzero(as_tuple=False).squeeze()
-    topk_values = flat_grad[topk_indices]
-
-    total_params = flat_grad.numel()
-
-    sparse_tensor = torch.sparse_coo_tensor(topk_indices.unsqueeze(0), topk_values, (total_params,), device=grads.device)
-    
-    return sparse_tensor, topk_indices
-
-def extract_sparse_adam_params(grads, adam_m, adam_v, layer_idx, threshold=None, sample_size=1000):
-    if threshold is None:
-        threshold = calculate_threshold(grads, sample_size=sample_size)
-
-    flat_grad = grads.view(-1)
-    mask = flat_grad.abs() >= threshold
-    topk_indices = mask.nonzero(as_tuple=False).squeeze()
-
-    total_params = flat_grad.numel()
-
-    values_m = adam_m.view(-1)[topk_indices]
-    values_v = adam_v.view(-1)[topk_indices]
-
-    return torch.sparse_coo_tensor(topk_indices.unsqueeze(0), values_m, (total_params,), device=grads.device), \
-           torch.sparse_coo_tensor(topk_indices.unsqueeze(0), values_v, (total_params,), device=grads.device)
 
 def embed_task(batch):
     global embedding
@@ -586,8 +539,6 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
     tensors['embed_adam_m'] = m_update
     tensors['embed_adam_v'] = v_update
 
-import numpy as np
-
 def loss_task(logits, targets):
     global tensors
 
@@ -751,12 +702,24 @@ def report_sync_status(status):
     except requests.RequestException as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-def initialize_tensor(tensor_name):
+def initialize_tensor(tensor_name, force=False):
     global embedding
     global final_logits_layer
     global final_logits_norm
 
     try:
+        url = os.path.join(args.sot_url, 'tensor_block_number')
+        logging.info(f"Checking block number for tensor {tensor_name} from {url}")
+        response = requests.get(url, params={'tensor_name': tensor_name})
+        response.raise_for_status()
+        block_number_info = response.json()
+        remote_block_number = block_number_info.get('block_number', 0)
+        local_block_number = latest_block_numbers.get(tensor_name, 0)
+
+        if not force and local_block_number >= remote_block_number:
+            logging.info(f"Tensor {tensor_name} is already up-to-date with block number {local_block_number}")
+            return
+
         url = os.path.join(args.sot_url, 'latest_state')
         logging.info(f"Loading tensor {tensor_name} from {url}")
         response = requests.get(url, params={'tensor_name': tensor_name})
@@ -774,7 +737,7 @@ def initialize_tensor(tensor_name):
         else:
             tensors[tensor_name] = tensor
 
-        latest_block_numbers[tensor_name] = int(response.headers.get('block_number', 0))
+        latest_block_numbers[tensor_name] = remote_block_number
         logging.info(f"Successfully initialized tensor: {tensor_name}")
 
         if tensor_name == 'embed':
@@ -802,68 +765,7 @@ def initialize_tensor(tensor_name):
         logging.error(f"Failed to initialize tensor {tensor_name} due to error: {e}")
         raise
 
-def update_tensor(tensor_name):
-    global embedding
-    global final_logits_layer
-    global final_logits_norm
 
-    try:
-        url = os.path.join(args.sot_url, 'gradient_update')
-        logging.debug(f"Requesting gradient update for tensor: {tensor_name} from URL: {url}")
-        response = requests.get(url, params={'tensor_name': tensor_name})
-        response.raise_for_status()  # Raise an error for bad status codes
-
-        if response.headers['Content-Type'] == 'application/json':
-            json_data = response.json()
-            if json_data.get('status') == 'no_updates':
-                logging.info(f"No updates available for tensor {tensor_name}")
-                return
-
-        gradient_update = torch.load(BytesIO(response.content)).to(device)  # Ensure gradient_update is on the same device
-        block_number = int(response.headers.get('block_number', 0))
-
-        # Skip processing if the block number of the update is less than or equal to the latest block number processed
-        if block_number <= latest_block_numbers[tensor_name]:
-            logging.info(f"Skipping update for tensor {tensor_name} as block number {block_number} is not newer than {latest_block_numbers[tensor_name]}")
-            return
-
-        if "_adam_m" in tensor_name:
-            adam_m[tensor_name] = adam_m[tensor_name].to(device) + gradient_update
-        elif "_adam_v" in tensor_name:
-            adam_v[tensor_name] = adam_v[tensor_name].to(device) + gradient_update
-        else:
-            current_tensor = tensors[tensor_name].to(device)  # Ensure current_tensor is on the same device
-
-            if "layer_" in tensor_name:
-                # Convert TransformerBlock to tensor, perform add_, and convert back to TransformerBlock
-                layer_idx = int(tensor_name.split('_')[1])
-                current_tensor_tensor = block_to_tensor(current_tensor).to(device)
-                current_tensor_tensor.add_(gradient_update)
-                current_tensor = tensor_to_block(current_tensor_tensor, layer_idx)
-            else:
-                current_tensor.add_(gradient_update)
-
-            tensors[tensor_name] = current_tensor
-
-        latest_block_numbers[tensor_name] = block_number
-
-        if tensor_name == 'embed':
-            vocab_size = model_args.vocab_size
-            embedding_dim = model_args.dim
-            reshaped_tensor = current_tensor.view(vocab_size, embedding_dim)
-            state_dict = {'weight': reshaped_tensor}
-            embedding.load_state_dict(state_dict)
-            logging.info("VocabParallelEmbedding initialized and loaded")
-
-        elif tensor_name == 'final_logits':
-            final_logits_norm, final_logits_layer = tensor_to_final_logits(current_tensor)
-            logging.info("Final logits layer and RMSNorm initialized and loaded")
-
-        logging.info(f"Successfully updated tensor: {tensor_name}")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to update tensor {tensor_name} with new grads due to request exception: {e}")
-    except Exception as e:
-        logging.error(f"Failed to update tensor {tensor_name} with new grads due to error: {e}")
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
@@ -892,14 +794,16 @@ def main():
     logging.info("Starting tensor synchronization...")
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
     for tensor_name in relevant_tensors:
-        initialize_tensor(tensor_name)
-    report_sync_status('synced')
-
+        initialize_tensor(tensor_name, force=True)
+    reported = False
     while True:
         if not gradient_update_paused:
             for tensor_name in relevant_tensors:
-                update_tensor(tensor_name)
+                initialize_tensor(tensor_name)
         deposit_stake()
+        if not reported:
+            report_sync_status('synced')
+            reported = True
         for event in event_filter.get_new_entries():
             handle_event(event)
         check_and_finalize_verifications()
