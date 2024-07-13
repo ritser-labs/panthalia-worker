@@ -21,7 +21,7 @@ class Master:
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
         self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, subnet_addresses)
-        self.iteration = 0  # Track the number of iterations
+        self.iteration = 1  # Track the number of iterations
 
         if not self.contracts:
             raise ValueError("SubnetManager contracts not found. Please check the subnet_addresses configuration.")
