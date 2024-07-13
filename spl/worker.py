@@ -631,6 +631,35 @@ def loss_task(logits, targets):
         logging.info(f"Max probability tokens shape: {max_prob_tokens.shape}")
         logging.info(f"Loss: {loss.item()}")
 
+def stable_adamw_update(param, grad, m, v, learning_rate, beta1, beta2, epsilon, weight_decay, t, max_grad_norm=1.0):
+    # Update biased first moment estimate
+    m = beta1 * m + (1 - beta1) * grad
+
+    # Update biased second raw moment estimate
+    v = beta2 * v + (1 - beta2) * (grad ** 2)
+
+    # Compute bias-corrected first moment estimate
+    m_hat = m / (1 - beta1 ** t)
+
+    # Compute bias-corrected second raw moment estimate
+    v_hat = v / (1 - beta2 ** t)
+
+    # RMS calculation
+    RMS_t = torch.sqrt(v_hat / torch.maximum(v_hat, torch.tensor(epsilon, device=v_hat.device)))
+    
+    # Learning rate scaling factor
+    eta_t = learning_rate / torch.maximum(torch.tensor(1.0, device=RMS_t.device), RMS_t)
+
+    # Compute the parameter update
+    param_update = -eta_t * (m_hat / (torch.sqrt(v_hat) + epsilon) + weight_decay * param)
+
+    # Clip the parameter update if necessary
+    param_update_norm = param_update.norm(2)
+    if param_update_norm > max_grad_norm:
+        param_update.mul_(max_grad_norm / param_update_norm)
+
+    return param_update, m, v
+
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     max_weight_norm = 1.0
     eps = 1e-8  # To avoid division by zero
@@ -676,79 +705,16 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     logging.debug(f"m before AdamW: {m}")
     logging.debug(f"v before AdamW: {v}")
 
-    # Apply weight decay
-    if weight_decay != 0:
-        grads_flat += tensor * weight_decay
-
-    logging.debug(f"Grads after weight decay: {grads_flat}")
-
-    # Update biased first moment estimate
-    m = beta1 * m + (1 - beta1) * grads_flat
-
-    # Update biased second raw moment estimate
-    v = beta2 * v + (1 - beta2) * (grads_flat ** 2)
-
-    logging.debug(f"Updated m: {m}")
-    logging.debug(f"Updated v: {v}")
-
-    # Compute bias-corrected first moment estimate
-    beta1_pow_t = beta1 ** t
-    beta2_pow_t = beta2 ** t
-    logging.debug(f"beta1_pow_t: {beta1_pow_t}")
-    logging.debug(f"beta2_pow_t: {beta2_pow_t}")
-
-    # Adding eps for numerical stability
-    m_hat = m / (1 - beta1_pow_t + eps)
-    v_hat = v / (1 - beta2_pow_t + eps)
-
-    logging.debug(f"m_hat: {m_hat}")
-    logging.debug(f"v_hat: {v_hat}")
-
-    # Check for NaNs or Infs after bias correction
-    if torch.isnan(m_hat).any() or torch.isinf(m_hat).any():
-        logging.error(f"NaNs or Infs detected in m_hat for {tensor_name}")
-        raise ValueError(f"NaNs or Infs detected in m_hat for {tensor_name}")
-
-    if torch.isnan(v_hat).any() or torch.isinf(v_hat).any():
-        logging.error(f"NaNs or Infs detected in v_hat for {tensor_name}")
-        raise ValueError(f"NaNs or Infs detected in v_hat for {tensor_name}")
-
-    # Compute parameter update
-    update = -learning_rate * m_hat / (v_hat.sqrt() + epsilon)
-
-    logging.debug(f"Update before clipping: {update}")
-
-    # Save original tensor for restoration
-    original_tensor = tensor.clone()
-
-    # Apply update to the tensor
-    tensor += update
-
-    # Clip the tensor weights
-    tensor_norm = torch.norm(tensor, p=2)
-    if tensor_norm > max_weight_norm:
-        tensor = tensor * (max_weight_norm / tensor_norm)
-
-    # Calculate the difference as the update
-    clipped_update = tensor - original_tensor
-
-    # Restore the original tensor
-    tensor.copy_(original_tensor)
-
-    logging.debug(f"Clipped update: {clipped_update}")
-
-    # Check for NaNs or Infs in update
-    if torch.isnan(clipped_update).any() or torch.isinf(clipped_update).any():
-        logging.error(f"NaNs or Infs detected in clipped update for {tensor_name}")
-        raise ValueError(f"NaNs or Infs detected in clipped update for {tensor_name}")
+    # Get the StableAdamW updates
+    param_update, m, v = stable_adamw_update(tensor, grads_flat, m, v, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
     # Store updated moments
     adam_m[tensor_name] = m
     adam_v[tensor_name] = v
 
-    logging.debug(f"Updates after applying AdamW: {clipped_update}")
+    logging.debug(f"Updates after applying StableAdamW: {param_update}")
 
-    return clipped_update.view(-1), m.view(-1), v.view(-1)
+    return param_update.view(-1), m.view(-1), v.view(-1)
 
 def check_and_finalize_verifications():
     current_time = int(time.time())
