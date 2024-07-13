@@ -4,7 +4,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import model_args, tokenizer
+from common import model_args, tokenizer, batch_size
 from datasets import load_dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
@@ -133,7 +133,6 @@ def truncate_tokens(tokens, max_seq_len, pad_token=tokenizer.pad_id):
 
 def preload_batch():
     global preloaded_batch, dataset_iter
-    batch_size = 2
     max_seq_len = 512
     batch = []
     targets = []

@@ -30,6 +30,8 @@ model_args = ModelArgs(
     max_seq_len=2048
 )
 
+batch_size = 32
+
 # Define Enums
 class TaskStatus(Enum):
     SelectingSolver = 0
@@ -275,5 +277,5 @@ def get_learning_hyperparameters(current_iteration):
         'epsilon': 1e-8,
         'weight_decay': 0.01,
         't': t,  # Add the current iteration as 't'
-        'accumulation_steps': 1  # Set the accumulation steps to 1
+        'accumulation_steps': 4  # Set the accumulation steps to 1
     }
