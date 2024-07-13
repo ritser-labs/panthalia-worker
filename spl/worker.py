@@ -105,6 +105,9 @@ embedding = None  # Define the global embedding variable
 final_logits_layer = None
 final_logits_norm = None
 
+# Global variable for TransformerBlock layer
+transformer_layer = None
+
 def block_to_tensor(block: TransformerBlock) -> torch.Tensor:
     params = list(block.parameters())
     return torch.cat([p.view(-1) for p in params])
@@ -366,20 +369,12 @@ def embed_task(batch):
     tensors['outputs'] = inputs
 
 def forward_task(layer_idx, inputs):
-    global freqs_cis, mask, tensors
+    global freqs_cis, mask, tensors, transformer_layer
 
     logging.debug(f"Entering forward_task for layer {layer_idx} with inputs shape {inputs.shape}")
 
     if torch.isnan(inputs).any() or torch.isinf(inputs).any():
         raise ValueError(f"NaNs or Infs detected in inputs for layer {layer_idx}")
-
-    layer_key = f'layer_{layer_idx}'
-    if layer_key not in tensors or tensors[layer_key] is None:
-        logging.error(f"Layer {layer_idx} not found or not initialized")
-        raise ValueError(f"Layer {layer_idx} not found or not initialized")
-
-    layer = tensors[layer_key]
-    logging.debug(f"Layer {layer_idx} successfully retrieved")
 
     start_pos = 0
     seqlen = inputs.shape[1]
@@ -389,25 +384,23 @@ def forward_task(layer_idx, inputs):
     mask_slice = mask[:seqlen, :seqlen]
 
     bsz = inputs.shape[0]
-    if layer.attention.cache_k is not None and layer.attention.cache_k.shape[0] != bsz:
+    if transformer_layer.attention.cache_k is not None and transformer_layer.attention.cache_k.shape[0] != bsz:
         logging.debug(f"Resizing cache_k for layer {layer_idx}")
-        layer.attention.cache_k = torch.zeros(bsz, layer.attention.cache_k.shape[1], layer.attention.cache_k.shape[2], layer.attention.cache_k.shape[3], device=device)
-    if layer.attention.cache_v is not None and layer.attention.cache_v.shape[0] != bsz:
+        transformer_layer.attention.cache_k = torch.zeros(bsz, transformer_layer.attention.cache_k.shape[1], transformer_layer.attention.cache_k.shape[2], transformer_layer.attention.cache_k.shape[3], device=device)
+    if transformer_layer.attention.cache_v is not None and transformer_layer.attention.cache_v.shape[0] != bsz:
         logging.debug(f"Resizing cache_v for layer {layer_idx}")
-        layer.attention.cache_v = torch.zeros(bsz, layer.attention.cache_v.shape[1], layer.attention.cache_v.shape[2], layer.attention.cache_v.shape[3], device=device)
+        transformer_layer.attention.cache_v = torch.zeros(bsz, transformer_layer.attention.cache_v.shape[1], transformer_layer.attention.cache_v.shape[2], transformer_layer.attention.cache_v.shape[3], device=device)
 
     logging.debug(f"Performing forward pass for layer {layer_idx}")
-    outputs = layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
+    outputs = transformer_layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
     tensors['outputs'] = outputs
     logging.debug(f"Forward pass completed for layer {layer_idx}")
 
 def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t, accumulation_steps):
-    global freqs_cis, mask, tensors
+    global freqs_cis, mask, tensors, transformer_layer
 
     if error is None:
         raise ValueError("Error tensor is None")
-
-    layer = tensors[f'layer_{layer_idx}']
 
     start_pos = 0
     seqlen = inputs.shape[1]
@@ -418,7 +411,7 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
 
     microbatch_size = inputs.shape[0] // accumulation_steps
 
-    grads_accumulated = [torch.zeros_like(param, device=device) for param in layer.parameters()]
+    grads_accumulated = [torch.zeros_like(param, device=device) for param in transformer_layer.parameters()]
     inputs = inputs.clone().detach().requires_grad_(True)
 
     # List to store gradients for each microbatch
@@ -431,18 +424,18 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
         # Clone microbatch_inputs to make them leaf tensors
         microbatch_inputs = microbatch_inputs.clone().detach().requires_grad_(True)
 
-        outputs = layer(microbatch_inputs, start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
+        outputs = transformer_layer(microbatch_inputs, start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
 
         outputs.retain_grad()
         outputs.backward(microbatch_error, retain_graph=True)
 
-        for j, param in enumerate(layer.parameters()):
+        for j, param in enumerate(transformer_layer.parameters()):
             grads_accumulated[j] += param.grad
 
         # Store the input gradients for this microbatch
         error_output_list.append(microbatch_inputs.grad.clone())
 
-        layer.zero_grad()
+        transformer_layer.zero_grad()
 
     grads_accumulated = [grad / accumulation_steps for grad in grads_accumulated]
 
@@ -676,13 +669,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
         raise ValueError(f"Failed to load tensor for {tensor_name}")
 
     # Ensure tensor is on the correct device and convert to flat tensor if necessary
-    if isinstance(tensor, torch.Tensor):
-        tensor = tensor.to(device)
-    elif isinstance(tensor, TransformerBlock):
-        # Flatten the parameters of the TransformerBlock
-        tensor = block_to_tensor(tensor).to(device)
-    else:
-        raise TypeError("Unsupported tensor type")
+    tensor = tensor.to(device)
 
     logging.debug(f"Tensor before AdamW: {tensor}")
 
@@ -750,9 +737,7 @@ def report_sync_status(status):
         logging.error(f"Exception while reporting sync status: {e}")
 
 def initialize_tensor(tensor_name, force=False):
-    global embedding
-    global final_logits_layer
-    global final_logits_norm
+    global embedding, final_logits_layer, final_logits_norm, transformer_layer
 
     try:
         url = os.path.join(args.sot_url, 'tensor_block_number')
@@ -779,8 +764,6 @@ def initialize_tensor(tensor_name, force=False):
             adam_m[tensor_name] = tensor
         elif "_adam_v" in tensor_name:
             adam_v[tensor_name] = tensor
-        elif "layer_" in tensor_name:
-            tensors[tensor_name] = tensor_to_block(tensor, args.layer_idx)
         else:
             tensors[tensor_name] = tensor
 
@@ -804,6 +787,10 @@ def initialize_tensor(tensor_name, force=False):
         if tensor_name == 'final_logits':
             final_logits_norm, final_logits_layer = tensor_to_final_logits(tensor)
             logging.info("Final logits layer and RMSNorm initialized and loaded")
+        elif "layer_" in tensor_name and "adam_m" not in tensor_name and "adam_v" not in tensor_name:
+            layer_idx = int(tensor_name.split('_')[1])
+            transformer_layer = tensor_to_block(tensor, layer_idx)
+            logging.info(f"TransformerBlock layer {layer_idx} initialized and loaded")
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
