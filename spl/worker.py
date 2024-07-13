@@ -359,7 +359,6 @@ def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates
 
     return result
 
-
 def embed_task(batch):
     global embedding
 
@@ -406,7 +405,7 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     global freqs_cis, mask, tensors
 
     if error is None:
-        raise ValueError(f"Error tensor is None")
+        raise ValueError("Error tensor is None")
 
     layer = tensors[f'layer_{layer_idx}']
 
@@ -420,11 +419,17 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     microbatch_size = inputs.shape[0] // accumulation_steps
 
     grads_accumulated = [torch.zeros_like(param, device=device) for param in layer.parameters()]
-    inputs.requires_grad = True
-    
+    inputs = inputs.clone().detach().requires_grad_(True)
+
+    # List to store gradients for each microbatch
+    error_output_list = []
+
     for i in range(accumulation_steps):
         microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size].to(device)
         microbatch_error = error[i * microbatch_size:(i + 1) * microbatch_size].to(device)
+
+        # Clone microbatch_inputs to make them leaf tensors
+        microbatch_inputs = microbatch_inputs.clone().detach().requires_grad_(True)
 
         outputs = layer(microbatch_inputs, start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
 
@@ -434,12 +439,17 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
         for j, param in enumerate(layer.parameters()):
             grads_accumulated[j] += param.grad
 
+        # Store the input gradients for this microbatch
+        error_output_list.append(microbatch_inputs.grad.clone())
+
         layer.zero_grad()
 
     grads_accumulated = [grad / accumulation_steps for grad in grads_accumulated]
 
     updates, m_update, v_update = apply_adamw(layer_idx, grads_accumulated, learning_rate, beta1, beta2, epsilon, weight_decay, t)
-    tensors['error_output'] = inputs.grad
+
+    # Concatenate the gradients for all microbatches
+    tensors['error_output'] = torch.cat(error_output_list, dim=0)
     tensors['updates'] = updates
     tensors[f'layer_{layer_idx}_adam_m'] = m_update
     tensors[f'layer_{layer_idx}_adam_v'] = v_update
@@ -461,8 +471,8 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     inputs = inputs.to(device)
     error = error.to(device)
 
-    # Ensure the inputs require gradients
-    inputs.requires_grad = True
+    # Clone inputs to make them leaf tensors
+    inputs = inputs.clone().detach().requires_grad_(True)
 
     # Apply RMSNorm to the inputs
     normalized_inputs = final_logits_norm(inputs)
@@ -476,9 +486,15 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     final_logits_grads_accumulated = [torch.zeros_like(param, device=device) for param in final_logits_layer.parameters()]
     norm_grads_accumulated = [torch.zeros_like(param, device=device) for param in final_logits_norm.parameters()]
 
+    # List to store gradients for each microbatch
+    error_output_list = []
+
     for i in range(accumulation_steps):
         microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size]
         microbatch_error = error[i * microbatch_size:(i + 1) * microbatch_size]
+
+        # Clone microbatch_inputs to make them leaf tensors
+        microbatch_inputs = microbatch_inputs.clone().detach().requires_grad_(True)
 
         normalized_inputs = final_logits_norm(microbatch_inputs)
         logits = final_logits_layer(normalized_inputs)
@@ -492,6 +508,9 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
         for j, param in enumerate(final_logits_norm.parameters()):
             norm_grads_accumulated[j] += param.grad
 
+        # Store the input gradients for this microbatch
+        error_output_list.append(microbatch_inputs.grad.clone())
+
         final_logits_layer.zero_grad()
         final_logits_norm.zero_grad()
 
@@ -502,7 +521,8 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
 
     updates, m_update, v_update = apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
-    tensors['error_output'] = inputs.grad
+    # Concatenate the gradients for all microbatches
+    tensors['error_output'] = torch.cat(error_output_list, dim=0)
     tensors['updates'] = updates
     tensors['final_logits_adam_m'] = m_update
     tensors['final_logits_adam_v'] = v_update
@@ -533,11 +553,14 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
 
     grads_accumulated /= accumulation_steps
 
+    logging.debug(f"Accumulated gradients for embedding before AdamW: {grads_accumulated}")
+
     updates, m_update, v_update = apply_adamw(-2, grads_accumulated, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
     tensors['updates'] = updates
     tensors['embed_adam_m'] = m_update
     tensors['embed_adam_v'] = v_update
+
 
 def loss_task(logits, targets):
     global tensors
@@ -609,7 +632,8 @@ def loss_task(logits, targets):
         logging.info(f"Loss: {loss.item()}")
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
-    max_grad_norm = 1.0
+    max_weight_norm = 1.0
+    eps = 1e-8  # To avoid division by zero
 
     if layer_idx == -1:
         tensor_name = "final_logits"
@@ -622,7 +646,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     if tensor is None:
         raise ValueError(f"Failed to load tensor for {tensor_name}")
 
-    # Ensure tensor is on the correct device
+    # Ensure tensor is on the correct device and convert to flat tensor if necessary
     if isinstance(tensor, torch.Tensor):
         tensor = tensor.to(device)
     elif isinstance(tensor, TransformerBlock):
@@ -631,43 +655,100 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     else:
         raise TypeError("Unsupported tensor type")
 
+    logging.debug(f"Tensor before AdamW: {tensor}")
+
     # Flatten gradients to match the flattened tensor
     grads_flat = torch.cat([grad.view(-1).to(device) for grad in grads])
+
+    logging.debug(f"Flattened gradients: {grads_flat}")
+
+    if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
+        logging.error(f"NaNs or Infs detected in gradients before AdamW update for {tensor_name}")
+        raise ValueError(f"NaNs or Infs detected in gradients for {tensor_name}")
 
     m = adam_m[tensor_name]
     v = adam_v[tensor_name]
 
-    if m is None:
-        m = torch.zeros_like(tensor)
-        adam_m[tensor_name] = m
-    else:
-        m = m.to(device)
+    if m is None or v is None:
+        m = torch.zeros_like(tensor, device=device)
+        v = torch.zeros_like(tensor, device=device)
 
-    if v is None:
-        v = torch.zeros_like(tensor)
-        adam_v[tensor_name] = v
-    else:
-        v = v.to(device)
+    logging.debug(f"m before AdamW: {m}")
+    logging.debug(f"v before AdamW: {v}")
 
-    # AdamW update rules applied to the flattened tensors
-    m_update = beta1 * m + (1 - beta1) * grads_flat - m
-    v_update = beta2 * v + (1 - beta2) * (grads_flat ** 2) - v
+    # Apply weight decay
+    if weight_decay != 0:
+        grads_flat += tensor * weight_decay
 
-    m_hat = (m + m_update) / (1 - beta1 ** t)
-    v_hat = (v + v_update) / (1 - beta2 ** t)
+    logging.debug(f"Grads after weight decay: {grads_flat}")
 
-    # Gradient update term
-    updates = -learning_rate * m_hat / (torch.sqrt(v_hat) + epsilon)
+    # Update biased first moment estimate
+    m = beta1 * m + (1 - beta1) * grads_flat
 
-    # Weight decay term
-    updates -= learning_rate * weight_decay * tensor
+    # Update biased second raw moment estimate
+    v = beta2 * v + (1 - beta2) * (grads_flat ** 2)
 
-    # Clip gradients
-    torch.nn.utils.clip_grad_norm_([updates], max_grad_norm)
+    logging.debug(f"Updated m: {m}")
+    logging.debug(f"Updated v: {v}")
 
-    logging.info(f"Calculated updates for {tensor_name}")
+    # Compute bias-corrected first moment estimate
+    beta1_pow_t = beta1 ** t
+    beta2_pow_t = beta2 ** t
+    logging.debug(f"beta1_pow_t: {beta1_pow_t}")
+    logging.debug(f"beta2_pow_t: {beta2_pow_t}")
 
-    return updates, m_update, v_update
+    # Adding eps for numerical stability
+    m_hat = m / (1 - beta1_pow_t + eps)
+    v_hat = v / (1 - beta2_pow_t + eps)
+
+    logging.debug(f"m_hat: {m_hat}")
+    logging.debug(f"v_hat: {v_hat}")
+
+    # Check for NaNs or Infs after bias correction
+    if torch.isnan(m_hat).any() or torch.isinf(m_hat).any():
+        logging.error(f"NaNs or Infs detected in m_hat for {tensor_name}")
+        raise ValueError(f"NaNs or Infs detected in m_hat for {tensor_name}")
+
+    if torch.isnan(v_hat).any() or torch.isinf(v_hat).any():
+        logging.error(f"NaNs or Infs detected in v_hat for {tensor_name}")
+        raise ValueError(f"NaNs or Infs detected in v_hat for {tensor_name}")
+
+    # Compute parameter update
+    update = -learning_rate * m_hat / (v_hat.sqrt() + epsilon)
+
+    logging.debug(f"Update before clipping: {update}")
+
+    # Save original tensor for restoration
+    original_tensor = tensor.clone()
+
+    # Apply update to the tensor
+    tensor += update
+
+    # Clip the tensor weights
+    tensor_norm = torch.norm(tensor, p=2)
+    if tensor_norm > max_weight_norm:
+        tensor = tensor * (max_weight_norm / tensor_norm)
+
+    # Calculate the difference as the update
+    clipped_update = tensor - original_tensor
+
+    # Restore the original tensor
+    tensor.copy_(original_tensor)
+
+    logging.debug(f"Clipped update: {clipped_update}")
+
+    # Check for NaNs or Infs in update
+    if torch.isnan(clipped_update).any() or torch.isinf(clipped_update).any():
+        logging.error(f"NaNs or Infs detected in clipped update for {tensor_name}")
+        raise ValueError(f"NaNs or Infs detected in clipped update for {tensor_name}")
+
+    # Store updated moments
+    adam_m[tensor_name] = m
+    adam_v[tensor_name] = v
+
+    logging.debug(f"Updates after applying AdamW: {clipped_update}")
+
+    return clipped_update.view(-1), m.view(-1), v.view(-1)
 
 def check_and_finalize_verifications():
     current_time = int(time.time())
@@ -764,8 +845,6 @@ def initialize_tensor(tensor_name, force=False):
     except Exception as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to error: {e}")
         raise
-
-
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
