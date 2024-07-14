@@ -208,10 +208,23 @@ def preload_batch():
         
         return batch_filename, targets_filename
 
+def clean_up_state_directory():
+    logging.info("Cleaning up state directory...")
+    for filename in os.listdir(state_dir):
+        if filename.startswith("batch_") or filename.startswith("targets_"):
+            file_path = os.path.join(state_dir, filename)
+            try:
+                if os.path.isfile(file_path):
+                    os.unlink(file_path)
+                    logging.info(f"Deleted {file_path}")
+            except Exception as e:
+                logging.error(f"Error deleting file {file_path}: {e}")
+
 def initialize_service():
     logging.info("Initializing distributed environment and tensors")
     initialize_distributed_environment_and_globals()
     initialize_all_tensors()
+    clean_up_state_directory()
     preload_batch()
 
 @app.route('/health', methods=['GET'])
