@@ -30,7 +30,7 @@ model_args = ModelArgs(
     max_seq_len=2048
 )
 
-batch_size = 32
+batch_size = 1
 
 # Define Enums
 class TaskStatus(Enum):
@@ -257,7 +257,7 @@ def get_learning_hyperparameters(current_iteration):
     """
     T_0 = 5000  # Initial number of iterations for the first cycle
     T_mult = 2  # Factor to increase the cycle length after each restart
-    eta_max = 0.001  # Initial learning rate (maximum)
+    eta_max = 0.002  # Initial learning rate (maximum)
     eta_min = 0.00001  # Minimum learning rate
 
     # Determine the current cycle length
@@ -277,5 +277,5 @@ def get_learning_hyperparameters(current_iteration):
         'epsilon': 1e-8,
         'weight_decay': 0.01,
         't': t,  # Add the current iteration as 't'
-        'accumulation_steps': 4  # Set the accumulation steps to 1
+        'accumulation_steps': 1  # Set the accumulation steps to 1
     }

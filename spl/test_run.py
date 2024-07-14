@@ -183,6 +183,9 @@ if __name__ == "__main__":
     fund_wallets(web3, wallets, deployer_address, token_contract, 1, 10000 * 10**18)
 
     worker_processes = []
+    os.environ['RANK'] = '0'
+    os.environ['WORLD_SIZE'] = '1'
+
 
     # Print SOT service initialization stage
     print("Starting SOT service...")
@@ -214,9 +217,6 @@ if __name__ == "__main__":
             base_task_type = task_type  # Use the full task type as is
             layer_idx = None
 
-        os.environ['RANK'] = '0'
-        os.environ['WORLD_SIZE'] = '1'
-
         # Select the corresponding wallet for each worker
         wallet = wallets[index]
 
@@ -234,7 +234,7 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'embed': # or task_type == 'embed_backward':
+        if args.detailed_logs or task_type == 'forward_layer_1': # or task_type == 'embed_backward':
             worker_processes.append(subprocess.Popen(command + ['--detailed_logs']))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))

@@ -4,7 +4,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import model_args, tokenizer, batch_size
+from common import model_args, tokenizer, batch_size, initialize_distributed_environment
 from datasets import load_dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +14,9 @@ import time
 import random
 from werkzeug.utils import secure_filename
 from tqdm import tqdm
+import torch.nn.init as init
+from fairscale.nn.model_parallel.initialize import initialize_model_parallel
+from model import VocabParallelEmbedding, RMSNorm, ColumnParallelLinear, TransformerBlock
 
 app = Flask(__name__)
 sync_status = {}
@@ -90,33 +93,67 @@ for i in range(model_args.n_layers):
     tensor_sizes[f'layer_{i}_adam_m'] = (block_size,)
     tensor_sizes[f'layer_{i}_adam_v'] = (block_size,)
 
-def initialize_tensor(name, shape, random_init=True):
+def initialize_distributed_environment_and_globals():
+    logging.info("Initializing distributed environment")
+    initialize_distributed_environment('gloo')
+    initialize_model_parallel(model_parallel_size_=1)
+    logging.info("Environment and global variables initialized")
+
+def initialize_tensor(name, random_init=True):
     file_path = os.path.join(state_dir, f'{name}.pt')
     if os.path.exists(file_path):
         return
-    if random_init:
-        fan_in = shape[0] if len(shape) > 0 else 1
-        std = (2 / fan_in) ** 0.5
-        tensor = torch.randn(*shape) * std
-    else:
-        tensor = torch.zeros(*shape)
-    tensor = tensor.flatten()  # Ensure the tensor is 1D
-    torch.save(tensor, file_path)
 
+    if "embed" in name:
+        module = VocabParallelEmbedding(model_args.vocab_size, model_args.dim).to(device)
+    elif "final_logits" in name:
+        norm = RMSNorm(model_args.dim, eps=model_args.norm_eps).to(device)
+        linear = ColumnParallelLinear(model_args.dim, model_args.vocab_size, bias=False).to(device)
+        module = [norm, linear]
+    elif "layer_" in name:
+        layer_idx = int(name.split('_')[1])
+        module = TransformerBlock(layer_idx, model_args).to(device)
+    else:
+        raise ValueError(f"Unsupported tensor name: {name}")
+
+    if random_init:
+        if isinstance(module, list):  # final_logits case
+            for submodule in module:
+                for param in submodule.parameters():
+                    if param.dim() > 1:
+                        init.xavier_uniform_(param)
+        else:
+            for param in module.parameters():
+                if param.dim() > 1:
+                    init.xavier_uniform_(param)
+
+    if isinstance(module, list):  # final_logits case
+        tensors = [param.data for submodule in module for param in submodule.parameters()]
+        tensor = torch.cat([tensor.view(-1) for tensor in tensors])
+    else:
+        tensors = [param.data for param in module.parameters()]
+        tensor = torch.cat([tensor.view(-1) for tensor in tensors])
+
+    torch.save(tensor, file_path)
     block_numbers[name] = 0
     save_block_numbers(block_numbers)
 
 def initialize_all_tensors():
-    initialize_tensor('embed', tensor_sizes['embed'])
-    initialize_tensor('embed_adam_m', tensor_sizes['embed_adam_m'], random_init=False)
-    initialize_tensor('embed_adam_v', tensor_sizes['embed_adam_v'], random_init=False)
+    # Initialize the embedding tensor
+    initialize_tensor('embed')
+    initialize_tensor('embed_adam_m', random_init=False)
+    initialize_tensor('embed_adam_v', random_init=False)
+
+    # Initialize the layer tensors
     for i in range(model_args.n_layers):
-        initialize_tensor(f'layer_{i}', tensor_sizes[f'layer_{i}'])
-        initialize_tensor(f'layer_{i}_adam_m', tensor_sizes[f'layer_{i}_adam_m'], random_init=False)
-        initialize_tensor(f'layer_{i}_adam_v', tensor_sizes[f'layer_{i}_adam_v'], random_init=False)
-    initialize_tensor('final_logits', tensor_sizes['final_logits'])
-    initialize_tensor('final_logits_adam_m', tensor_sizes['final_logits'], random_init=False)
-    initialize_tensor('final_logits_adam_v', tensor_sizes['final_logits'], random_init=False)
+        initialize_tensor(f'layer_{i}')
+        initialize_tensor(f'layer_{i}_adam_m', random_init=False)
+        initialize_tensor(f'layer_{i}_adam_v', random_init=False)
+    
+    # Initialize the final logits tensor
+    initialize_tensor('final_logits')
+    initialize_tensor('final_logits_adam_m', random_init=False)
+    initialize_tensor('final_logits_adam_v', random_init=False)
 
 logging.info("Loading Wikipedia dataset...")
 dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
@@ -168,7 +205,8 @@ def preload_batch():
             file.write(json.dumps(targets))
 
 def initialize_service():
-    logging.info("Initializing tensors")
+    logging.info("Initializing distributed environment and tensors")
+    initialize_distributed_environment_and_globals()
     initialize_all_tensors()
     preload_batch()
 
