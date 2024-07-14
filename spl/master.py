@@ -228,7 +228,7 @@ class Master:
         logging.info("Starting main process")
         model_params = self.get_latest_model_params()
 
-        batch_url = self.get_batch_url()
+        batch_url, targets_url = self.get_batch_and_targets_url()
 
         logging.info("Starting embed forward task")
         embed_result = self.handle_embed_forward(model_params, batch_url)
@@ -243,7 +243,7 @@ class Master:
         final_logits_result = self.handle_final_logits_forward(layer_inputs_url[-1])
 
         logging.info("Starting loss computation task")
-        loss_result = self.handle_loss_computation(final_logits_result['result_url'])
+        loss_result = self.handle_loss_computation(final_logits_result['result_url'], targets_url)
 
         error_url = loss_result['result_url']
 
@@ -291,8 +291,7 @@ class Master:
         result['block_number'] = block_number
         return result
 
-    def handle_loss_computation(self, logits_url):
-        targets_url = self.get_targets_url()
+    def handle_loss_computation(self, logits_url, targets_url):
         task_params = {'logits_url': logits_url, 'targets_url': targets_url}
         task_id, block_number = self.submit_task('loss', task_params)
         result = self.wait_for_result('loss', task_id)
@@ -376,15 +375,11 @@ class Master:
         else:
             logging.info(f"Updated Adam state for {tensor_name}")
 
-    def get_batch_url(self):
+    def get_batch_and_targets_url(self):
         url = os.path.join(self.sot_url, 'get_batch')
         response = requests.post(url)
-        return response.json()['batch_url']
-
-    def get_targets_url(self):
-        url = os.path.join(self.sot_url, 'get_targets')
-        response = requests.get(url)
-        return response.json()['targets_url']
+        response_json = response.json()
+        return response_json['batch_url'], response_json['targets_url']
 
 if __name__ == "__main__":
     import argparse
