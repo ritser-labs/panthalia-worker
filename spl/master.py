@@ -378,7 +378,7 @@ class Master:
 
     def get_batch_url(self):
         url = os.path.join(self.sot_url, 'get_batch')
-        response = requests.get(url)
+        response = requests.post(url)
         return response.json()['batch_url']
 
     def get_targets_url(self):

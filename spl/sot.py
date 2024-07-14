@@ -254,7 +254,7 @@ def publish_result():
         logging.error(f"Error in /publish_result: {e}", exc_info=True)
         return jsonify({'error': 'Could not publish result'}), 500
 
-@app.route('/get_batch', methods=['GET'])
+@app.route('/get_batch', methods=['POST'])
 def get_batch():
     logging.info("Accessing /get_batch endpoint")
     global preloaded_batch
