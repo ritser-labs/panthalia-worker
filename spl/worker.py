@@ -631,7 +631,7 @@ def stable_adamw_update(params, grads, m, v, lr, beta1, beta2, eps, weight_decay
     eta_t = lr / torch.max(1.0, RMS_t)
     
     # Parameter update
-    params_update = - eta_t * (m_hat / (torch.sqrt(v_hat) + eps) + weight_decay * params)
+    params_update = -eta_t * (m_hat / (torch.sqrt(v_hat) + eps)) + (weight_decay * params)
     
     return params_update, m, v
 
