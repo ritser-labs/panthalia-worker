@@ -587,53 +587,25 @@ def loss_task(logits: torch.Tensor, targets: torch.Tensor):
     # Store the logits gradient in the tensors dictionary
     tensors['logits_grad'] = logits_grad
 
-def stable_adamw_update(params, grads, m, v, lr, beta1, beta2, eps, weight_decay, t):
-    """
-    Perform an AdamW update with stability adjustments.
+def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
+    beta1hat = beta1 * (1 - beta1**(step - 1)) / (1 - beta1**step)
+    beta2hat = beta2 * (1 - beta2**(step - 1)) / (1 - beta2**step)
     
-    Args:
-        params (torch.Tensor): Parameters to be updated.
-        grads (torch.Tensor): Gradients computed at this step.
-        m (torch.Tensor): First moment vector (moving average of the gradient).
-        v (torch.Tensor): Second moment vector (moving average of the squared gradient).
-        lr (float): Learning rate.
-        beta1 (float): Exponential decay rate for the first moment estimates.
-        beta2 (float): Exponential decay rate for the second moment estimates.
-        eps (float): Term added to the denominator to improve numerical stability.
-        weight_decay (float): Weight decay coefficient.
-        t (int): Time step (iteration number).
+    m = beta1hat * m + (1 - beta1hat) * grads
+    v = beta2hat * v + (1 - beta2hat) * grads ** 2
     
-    Returns:
-        torch.Tensor: Updated parameters.
-        torch.Tensor: Updated first moment vector.
-        torch.Tensor: Updated second moment vector.
-    """
+    m_hat = m / (1 - beta1 ** step)
+    v_hat = v / (1 - beta2 ** step)
     
-    # Compute g_t: Gradient of the loss function
-    g_t = grads
+    denominator = torch.sqrt(v_hat) + eps
     
-    # Update the moving averages of the gradient
-    m = beta1 * m + (1 - beta1) * g_t
+    rms = torch.sqrt(torch.mean(grads * grads / torch.max(v, (eps * eps) * torch.ones_like(v))))
     
-    # Update the moving averages of the squared gradient
-    v = beta2 * v + (1 - beta2) * g_t ** 2
+    new_lr = lr * (1. / max(1., rms / clip_thresh))
     
-    # Bias correction
-    m_hat = m / (1 - beta1 ** t)
-    v_hat = v / (1 - beta2 ** t)
+    params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
     
-    print(f'v: {v}')
-    
-    # Compute RMS
-    RMS_t = torch.sqrt(torch.mean(g_t * g_t / torch.max(v, eps * eps)))
-    
-    # Compute learning rate
-    eta_t = lr / torch.max(1.0, RMS_t)
-    
-    # Parameter update
-    params_update = -eta_t * (m_hat / (torch.sqrt(v_hat) + eps)) + (weight_decay * params)
-    
-    return params_update, m, v
+    return params, m, v
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     max_weight_norm = 1.0
@@ -675,11 +647,24 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     logging.debug(f"v before AdamW: {v}")
 
     # Get the StableAdamW updates
-    param_update, m_update, v_update = stable_adamw_update(tensor, grads_flat, m, v, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    param_update, m_update, v_update = stable_adamw_update(
+        tensor.clone(),
+        grads_flat,
+        m.clone(),
+        v.clone(),
+        learning_rate,
+        beta1,
+        beta2,
+        epsilon,
+        weight_decay,
+        t
+    )
 
     # Calculate the update deltas for m and v
     m_delta = m_update - m
     v_delta = v_update - v
+
+    param_delta = param_update - tensor
 
     # Store updated moments
     adam_m[tensor_name] = m_update
@@ -687,7 +672,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
     logging.debug(f"Updates after applying StableAdamW: {param_update}")
 
-    return param_update.view(-1), m_delta.view(-1), v_delta.view(-1)
+    return param_delta.view(-1), m_delta.view(-1), v_delta.view(-1)
 
 
 def check_and_finalize_verifications():
