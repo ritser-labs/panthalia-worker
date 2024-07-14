@@ -587,34 +587,53 @@ def loss_task(logits: torch.Tensor, targets: torch.Tensor):
     # Store the logits gradient in the tensors dictionary
     tensors['logits_grad'] = logits_grad
 
-def stable_adamw_update(param, grad, m, v, learning_rate, beta1, beta2, epsilon, weight_decay, t, max_grad_norm=1.0):
-    # Update biased first moment estimate
-    m = beta1 * m + (1 - beta1) * grad
-
-    # Update biased second raw moment estimate
-    v = beta2 * v + (1 - beta2) * (grad ** 2)
-
-    # Compute bias-corrected first moment estimate
-    m_hat = m / (1 - beta1 ** t)
-
-    # Compute bias-corrected second raw moment estimate
-    v_hat = v / (1 - beta2 ** t)
-
-    # RMS calculation
-    RMS_t = torch.sqrt(v_hat / torch.maximum(v_hat, torch.tensor(epsilon, device=v_hat.device)))
+def stable_adamw_update(params, grads, m, v, lr, beta1, beta2, eps, weight_decay, t):
+    """
+    Perform an AdamW update with stability adjustments.
     
-    # Learning rate scaling factor
-    eta_t = learning_rate / torch.maximum(torch.tensor(1.0, device=RMS_t.device), RMS_t)
-
-    # Compute the parameter update
-    param_update = -eta_t * (m_hat / (torch.sqrt(v_hat) + epsilon) + weight_decay * param)
-
-    # Clip the parameter update if necessary
-    param_update_norm = param_update.norm(2)
-    if param_update_norm > max_grad_norm:
-        param_update.mul_(max_grad_norm / param_update_norm)
-
-    return param_update, m, v
+    Args:
+        params (torch.Tensor): Parameters to be updated.
+        grads (torch.Tensor): Gradients computed at this step.
+        m (torch.Tensor): First moment vector (moving average of the gradient).
+        v (torch.Tensor): Second moment vector (moving average of the squared gradient).
+        lr (float): Learning rate.
+        beta1 (float): Exponential decay rate for the first moment estimates.
+        beta2 (float): Exponential decay rate for the second moment estimates.
+        eps (float): Term added to the denominator to improve numerical stability.
+        weight_decay (float): Weight decay coefficient.
+        t (int): Time step (iteration number).
+    
+    Returns:
+        torch.Tensor: Updated parameters.
+        torch.Tensor: Updated first moment vector.
+        torch.Tensor: Updated second moment vector.
+    """
+    
+    # Compute g_t: Gradient of the loss function
+    g_t = grads
+    
+    # Update the moving averages of the gradient
+    m = beta1 * m + (1 - beta1) * g_t
+    
+    # Update the moving averages of the squared gradient
+    v = beta2 * v + (1 - beta2) * g_t ** 2
+    
+    # Bias correction
+    m_hat = m / (1 - beta1 ** t)
+    v_hat = v / (1 - beta2 ** t)
+    
+    print(f'v: {v}')
+    
+    # Compute RMS
+    RMS_t = torch.sqrt(torch.mean(g_t * g_t / torch.max(v, eps * eps)))
+    
+    # Compute learning rate
+    eta_t = lr / torch.max(1.0, RMS_t)
+    
+    # Parameter update
+    params_update = - eta_t * (m_hat / (torch.sqrt(v_hat) + eps) + weight_decay * params)
+    
+    return params_update, m, v
 
 def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
     max_weight_norm = 1.0
@@ -656,15 +675,20 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     logging.debug(f"v before AdamW: {v}")
 
     # Get the StableAdamW updates
-    param_update, m, v = stable_adamw_update(tensor, grads_flat, m, v, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    param_update, m_update, v_update = stable_adamw_update(tensor, grads_flat, m, v, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+
+    # Calculate the update deltas for m and v
+    m_delta = m_update - m
+    v_delta = v_update - v
 
     # Store updated moments
-    adam_m[tensor_name] = m
-    adam_v[tensor_name] = v
+    adam_m[tensor_name] = m_update
+    adam_v[tensor_name] = v_update
 
     logging.debug(f"Updates after applying StableAdamW: {param_update}")
 
-    return param_update.view(-1), m.view(-1), v.view(-1)
+    return param_update.view(-1), m_delta.view(-1), v_delta.view(-1)
+
 
 def check_and_finalize_verifications():
     current_time = int(time.time())
