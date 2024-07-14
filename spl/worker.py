@@ -555,74 +555,37 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
     tensors['embed_adam_v'] = v_update
 
 
-def loss_task(logits, targets):
+def loss_task(logits: torch.Tensor, targets: torch.Tensor):
+    """
+    Compute the cross-entropy loss and the gradient of the logits.
+
+    Args:
+        logits (torch.Tensor): The predicted logits with shape [batch_size, seq_len, vocab_size].
+        targets (torch.Tensor): The target tokens with shape [batch_size, seq_len].
+    """
     global tensors
 
-    logging.info(f"Logits for loss: {logits.shape}")
-    logging.info(f"Targets for loss: {targets.shape}")
+    # Ensure logits and targets are on the correct device
+    logits = logits.to(device)
+    targets = targets.to(device)
 
-    pad_id = tokenizer.pad_id
-
+    # Flatten the tensors to match the shape requirements for F.cross_entropy
     batch_size, seq_len, vocab_size = logits.shape
-
-    # Print initial logits before reshaping
-    logging.info(f"Initial logits (before reshaping): {logits}")
-
-    logits = logits.reshape(batch_size * seq_len, vocab_size)
-
-    # Print logits after reshaping
-    logging.info(f"Logits (after reshaping): {logits.shape}")
-
-    targets = targets.reshape(-1)
+    logits_flat = logits.view(batch_size * seq_len, vocab_size)
+    targets_flat = targets.view(batch_size * seq_len)
 
     # Compute the loss
-    loss = F.cross_entropy(logits.to(device), targets.to(device), ignore_index=pad_id)
+    loss = F.cross_entropy(logits_flat, targets_flat, reduction='mean')
 
-    # Ensure logits require gradients
-    logits.retain_grad()
-
-    # Perform backward pass to compute gradients with respect to logits
-    loss.backward(retain_graph=True)
-
-    # Check for NaNs in gradients
-    logging.info(f"Logits gradients for loss: {logits.grad.shape}")
-
-    # Reshape logits gradients to the original shape
-    logits_grad = logits.grad.reshape(batch_size, seq_len, vocab_size)
-    tensors['logits_grad'] = logits_grad
+    # Store the loss in the tensors dictionary
     tensors['loss'] = loss
-    
-    if args.detailed_logs:
-        # Print logits gradients after reshaping
-        logging.info(f"Logits gradients (after reshaping): {logits_grad.shape}")
 
-        # Compute the softmax probabilities from the logits, not from logits_grad
-        softmax_probs = F.softmax(logits.reshape(batch_size, seq_len, vocab_size), dim=-1)
+    # Compute the gradient of the logits w.r.t the loss
+    loss.backward()
+    logits_grad = logits.grad
 
-        torch.set_printoptions(profile="full")
-        logits_for_one_index = str(softmax_probs[0][0])
-        with open('output_logits_for_one_index.txt', 'w') as f:
-            f.write(logits_for_one_index)
-        torch.set_printoptions(profile="default")
-
-        # Print softmax probabilities
-        logging.info(f"Softmax probabilities (for first token of first sequence): {softmax_probs[0, 0]}")
-
-        # Identify the token with the highest probability for each position in the sequence
-        max_prob_values, max_prob_tokens = torch.max(softmax_probs, dim=-1)
-
-        # Store the max probability tokens in the tensors dictionary
-        tensors['max_prob_tokens'] = max_prob_tokens
-
-        # Print and write the entire max_prob_tokens tensor to a text file
-        max_prob_tokens_list = max_prob_tokens.cpu().numpy().tolist()
-        with open('output_max_prob_tokens.txt', 'w') as f:
-            for item in max_prob_tokens_list:
-                f.write("%s\n" % item)
-
-        logging.info(f"Max probability tokens: {max_prob_tokens}")
-        logging.info(f"Max probability tokens shape: {max_prob_tokens.shape}")
-        logging.info(f"Loss: {loss.item()}")
+    # Store the logits gradient in the tensors dictionary
+    tensors['logits_grad'] = logits_grad
 
 def stable_adamw_update(param, grad, m, v, learning_rate, beta1, beta2, epsilon, weight_decay, t, max_grad_norm=1.0):
     # Update biased first moment estimate
