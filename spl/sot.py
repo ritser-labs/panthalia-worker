@@ -36,21 +36,21 @@ os.makedirs(state_dir, exist_ok=True)
 temp_dir = os.path.join(state_dir, 'temp')
 os.makedirs(temp_dir, exist_ok=True)
 
-# File to store block numbers
-block_numbers_file = os.path.join(state_dir, 'block_numbers.json')
+# File to store block timestamps
+block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
 
-def load_block_numbers():
-    if os.path.exists(block_numbers_file):
-        with open(block_numbers_file, 'r') as f:
+def load_block_timestamps():
+    if os.path.exists(block_timestamps_file):
+        with open(block_timestamps_file, 'r') as f:
             return json.load(f)
     return {}
 
-def save_block_numbers(block_numbers):
-    with open(block_numbers_file, 'w') as f:
-        json.dump(block_numbers, f)
+def save_block_timestamps(block_timestamps):
+    with open(block_timestamps_file, 'w') as f:
+        json.dump(block_timestamps, f)
 
-# Load existing block numbers on startup
-block_numbers = load_block_numbers()
+# Load existing block timestamps on startup
+block_timestamps = load_block_timestamps()
 
 # Dictionary to store gradient updates
 executor = ThreadPoolExecutor(max_workers=10)
@@ -130,8 +130,8 @@ def initialize_tensor(name, random_init=True):
         tensor = torch.cat([tensor.view(-1) for tensor in tensors])
 
     torch.save(tensor, file_path)
-    block_numbers[name] = 0
-    save_block_numbers(block_numbers)
+    block_timestamps[name] = 0
+    save_block_timestamps(block_timestamps)
 
 def initialize_all_tensors():
     # Initialize the embedding tensor
@@ -276,13 +276,13 @@ def update_state():
     data = request.get_json()
     tensor_name = data.get('tensor_name')
     result_url = data.get('result_url')
-    block_number = data.get('block_number')
+    timestamp = data.get('timestamp')
 
-    logging.debug(f"Received tensor_name: {tensor_name}, result_url: {result_url}, block_number: {block_number}")
+    logging.debug(f"Received tensor_name: {tensor_name}, result_url: {result_url}, timestamp: {timestamp}")
 
-    if not tensor_name or not result_url or block_number is None:
-        logging.error("Missing tensor_name, result_url, or block_number in /update_state request")
-        return jsonify({'error': 'Missing tensor_name, result_url, or block_number'}), 400
+    if not tensor_name or not result_url or timestamp is None:
+        logging.error("Missing tensor_name, result_url, or timestamp in /update_state request")
+        return jsonify({'error': 'Missing tensor_name, result_url, or timestamp'}), 400
 
     try:
         with requests.Session() as session:
@@ -299,8 +299,8 @@ def update_state():
 
         torch.save(updated_tensor, state_file_path)
 
-        block_numbers[tensor_name] = block_number
-        save_block_numbers(block_numbers)
+        block_timestamps[tensor_name] = timestamp
+        save_block_timestamps(block_timestamps)
 
         logging.debug(f"Updated state for {tensor_name}")
         return jsonify({'status': 'success'})
@@ -323,21 +323,21 @@ def latest_state():
 
     try:
         response = send_file(state_file_path, mimetype='application/octet-stream')
-        response.headers['block_number'] = block_numbers.get(tensor_name, 0)
+        response.headers['timestamp'] = block_timestamps.get(tensor_name, 0)
         return response
     except Exception as e:
         logging.error(f"Error in /latest_state: {e}", exc_info=True)
         return jsonify({'error': 'Could not retrieve latest state'}), 500
 
-@app.route('/tensor_block_number', methods=['GET'])
-def tensor_block_number():
-    logging.info("Accessing /tensor_block_number endpoint")
+@app.route('/tensor_block_timestamp', methods=['GET'])
+def tensor_block_timestamp():
+    logging.info("Accessing /tensor_block_timestamp endpoint")
     tensor_name = request.args.get('tensor_name')
     if not tensor_name:
         return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-    block_number = block_numbers.get(tensor_name, 0)
-    return jsonify({'block_number': block_number})
+    timestamp = block_timestamps.get(tensor_name, 0)
+    return jsonify({'timestamp': timestamp})
 
 @app.route('/tensor_size', methods=['GET'])
 def get_tensor_size():
@@ -391,19 +391,19 @@ def upload_tensor():
     tensor_name = filename.split('.')[0]
 
     try:
-        block_number = int(filename.split('_')[2])
+        block_timestamp = int(filename.split('_')[1])
     except (IndexError, ValueError):
-        block_number = 0
+        block_timestamp = 0
 
     # Save the tensor state
     tensor_state = torch.load(local_file_path)
     torch.save(tensor_state, os.path.join(temp_dir, filename))  # Use filename directly
 
-    # Update block number
-    block_numbers[tensor_name] = block_number
-    save_block_numbers(block_numbers)
+    # Update block timestamp
+    block_timestamps[tensor_name] = block_timestamp
+    save_block_timestamps(block_timestamps)
 
-    logging.debug(f"Tensor {tensor_name} uploaded and saved with block number {block_number}")
+    logging.debug(f"Tensor {tensor_name} uploaded and saved with block timestamp {block_timestamp}")
 
     return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'{BASE_URL}/data/state/temp/{filename}'}), 200
 

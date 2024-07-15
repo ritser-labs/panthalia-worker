@@ -134,6 +134,9 @@ if __name__ == "__main__":
     state_dir = os.path.join(args.local_storage_dir, 'state')
     delete_directory_contents(state_dir)
     '''
+    state_dir = os.path.join(args.local_storage_dir, 'state')
+    temp_dir = os.path.join(state_dir, 'temp')
+    delete_directory_contents(temp_dir)
     # Start Flask server in a separate thread
     flask_thread = threading.Thread(target=lambda: app.run(port=5002))
     flask_thread.start()
@@ -234,7 +237,7 @@ if __name__ == "__main__":
         ]
         if layer_idx is not None:
             command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'forward_layer_1': # or task_type == 'embed_backward':
+        if args.detailed_logs or task_type == 'embed': # or task_type == 'embed_backward':
             worker_processes.append(subprocess.Popen(command + ['--detailed_logs']))
         else:
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))

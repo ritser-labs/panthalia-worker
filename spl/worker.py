@@ -94,7 +94,7 @@ embedding_initialized = False
 tensors = defaultdict(lambda: None)
 adam_m = defaultdict(lambda: None)
 adam_v = defaultdict(lambda: None)
-latest_block_numbers = defaultdict(lambda: 0)  # To store the latest block number processed for each tensor
+latest_block_timestamps = defaultdict(lambda: 0)  # To store the latest block timestamp processed for each tensor
 gradient_update_paused = False
 stake_deposited = False
 processed_tasks = set()
@@ -328,7 +328,7 @@ def handle_event(event):
         result['result_url'] = upload_tensor(tensors['logits_grad'], 'loss_logits_grad')
         logging.info(3)
 
-    result['last_block'] = latest_block_numbers[task_type]
+    result['last_timestamp'] = latest_block_timestamps[task_type]
     submit_solution(task_id, result)
 
     processed_tasks.add(task_id)
@@ -358,13 +358,13 @@ def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates
     adam_m_url = upload_tensor(adam_m_updates, f'{layer_label}_adam_m')
     adam_v_url = upload_tensor(adam_v_updates, f'{layer_label}_adam_v')
     
-    block_number = web3.eth.block_number
+    block_timestamp = web3.eth.get_block('latest')['timestamp']
     
     result = {
         'grads_url': grads_url,
         'adam_m_url': adam_m_url,
         'adam_v_url': adam_v_url,
-        'block_number': block_number
+        'timestamp': block_timestamp
     }
 
     if error_output is not None:
@@ -758,16 +758,16 @@ def initialize_tensor(tensor_name, force=False):
     global embedding, final_logits_layer, final_logits_norm, transformer_layer
 
     try:
-        url = os.path.join(args.sot_url, 'tensor_block_number')
-        logging.info(f"Checking block number for tensor {tensor_name} from {url}")
+        url = os.path.join(args.sot_url, 'tensor_block_timestamp')
+        logging.info(f"Checking block timestamp for tensor {tensor_name} from {url}")
         response = requests.get(url, params={'tensor_name': tensor_name})
         response.raise_for_status()
-        block_number_info = response.json()
-        remote_block_number = block_number_info.get('block_number', 0)
-        local_block_number = latest_block_numbers.get(tensor_name, 0)
+        timestamp_info = response.json()
+        remote_timestamp = timestamp_info.get('timestamp', 0)
+        local_timestamp = latest_block_timestamps.get(tensor_name, 0)
 
-        if not force and local_block_number >= remote_block_number:
-            logging.info(f"Tensor {tensor_name} is already up-to-date with block number {local_block_number}")
+        if not force and local_timestamp >= remote_timestamp:
+            logging.info(f"Tensor {tensor_name} is already up-to-date with timestamp {local_timestamp}")
             return
 
         url = os.path.join(args.sot_url, 'latest_state')
@@ -785,7 +785,7 @@ def initialize_tensor(tensor_name, force=False):
         else:
             tensors[tensor_name] = tensor
 
-        latest_block_numbers[tensor_name] = remote_block_number
+        latest_block_timestamps[tensor_name] = remote_timestamp
         logging.info(f"Successfully initialized tensor: {tensor_name}")
 
         if tensor_name == 'embed':
