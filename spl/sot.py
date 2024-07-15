@@ -102,10 +102,10 @@ def initialize_tensor(name, random_init=True):
         return
 
     if "embed" in name:
-        module = VocabParallelEmbedding(model_args.vocab_size, model_args.dim).to(device)
+        module = VocabParallelEmbedding(model_args.vocab_size, model_args.dim, init_method=lambda x: x).to(device)
     elif "final_logits" in name:
         norm = RMSNorm(model_args.dim, eps=model_args.norm_eps).to(device)
-        linear = ColumnParallelLinear(model_args.dim, model_args.vocab_size, bias=False).to(device)
+        linear = ColumnParallelLinear(model_args.dim, model_args.vocab_size, bias=False, init_method=lambda x: x).to(device)
         module = [norm, linear]
     elif "layer_" in name:
         layer_idx = int(name.split('_')[1])
@@ -113,16 +113,10 @@ def initialize_tensor(name, random_init=True):
     else:
         raise ValueError(f"Unsupported tensor name: {name}")
 
-    if random_init:
-        if isinstance(module, list):  # final_logits case
-            for submodule in module:
-                for param in submodule.parameters():
-                    if param.dim() > 1:
-                        init.xavier_uniform_(param)
-        else:
-            for param in module.parameters():
-                if param.dim() > 1:
-                    init.xavier_uniform_(param)
+    if random_init and 'layer_' in name:
+        for param in module.parameters():
+            if param.dim() > 1:
+                init.xavier_uniform_(param)
 
     if isinstance(module, list):  # final_logits case
         tensors = [param.data for submodule in module for param in submodule.parameters()]
@@ -251,26 +245,6 @@ def get_latest_model_params():
         logging.error(f"Error accessing /latest_model_params: {e}", exc_info=True)
         return jsonify({'error': 'Could not load model parameters'}), 500
 
-@app.route('/publish_result', methods=['POST'])
-def publish_result():
-    logging.info("Accessing /publish_result endpoint")
-    data = request.get_json()
-    task_id = data.get('task_id')
-    result = data.get('result')
-
-    if not task_id or not result:
-        logging.error("Missing task_id or result in /publish_result request")
-        return jsonify({'error': 'Missing task_id or result'}), 400
-
-    try:
-        os.makedirs(os.path.join(data_dir, 'task_results'), exist_ok=True)
-        with open(os.path.join(data_dir, f'task_results/{task_id}.json'), 'w') as file:
-            file.write(json.dumps(result))
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        logging.error(f"Error in /publish_result: {e}", exc_info=True)
-        return jsonify({'error': 'Could not publish result'}), 500
-
 @app.route('/get_batch', methods=['POST'])
 def get_batch():
     logging.info("Accessing /get_batch endpoint")
@@ -390,8 +364,14 @@ def upload_tensor():
     if 'tensor' not in request.files:
         return jsonify({'error': 'No tensor file provided'}), 400
 
+    if 'label' not in request.form:
+        return jsonify({'error': 'No label provided'}), 400
+
     tensor_file = request.files['tensor']
-    filename = secure_filename(f'{int(time.time())}_{random.randint(1000, 9999)}.pt')
+    label = request.form['label']
+    timestamp = int(time.time())
+    random_suffix = random.randint(1000, 9999)
+    filename = secure_filename(f'{label}_{timestamp}_{random_suffix}.pt')
     local_file_path = os.path.join(data_dir, filename)
 
     logging.debug("Receiving tensor upload...")
@@ -399,12 +379,30 @@ def upload_tensor():
     chunk_size = 1024 * 1024  # 1MB
 
     with open(local_file_path, 'wb') as f:
-        for chunk in tqdm(tensor_file.stream, total=total_size//chunk_size, unit='MB', desc='Receiving'):
+        for chunk in tqdm(tensor_file.stream, total=total_size // chunk_size, unit='MB', desc='Receiving'):
             if chunk:
                 f.write(chunk)
     logging.debug("Tensor upload completed.")
 
-    return jsonify({'tensor_url': f'{BASE_URL}/data/{filename}'})
+    tensor_name = filename.split('.')[0]
+
+    try:
+        block_number = int(filename.split('_')[2])
+    except (IndexError, ValueError):
+        block_number = 0
+
+    # Save the tensor state
+    tensor_state = torch.load(local_file_path)
+    torch.save(tensor_state, os.path.join(state_dir, filename))  # Use filename directly
+
+    # Update block number
+    block_numbers[tensor_name] = block_number
+    save_block_numbers(block_numbers)
+
+    logging.debug(f"Tensor {tensor_name} uploaded and saved with block number {block_number}")
+
+    return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'{BASE_URL}/data/{filename}'}), 200
+
 
 if __name__ == "__main__":
     logging.info("Starting SOT service...")

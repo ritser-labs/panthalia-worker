@@ -204,13 +204,16 @@ def create_callback(encoder, pbar):
         pbar.update(monitor.bytes_read - pbar.n)
     return callback
 
-def upload_tensor(tensor):
+def upload_tensor(tensor, tensor_name):
     tensor_bytes = BytesIO()
     torch.save(tensor, tensor_bytes)
     tensor_bytes.seek(0)
 
     encoder = MultipartEncoder(
-        fields={'tensor': ('tensor.pt', tensor_bytes, 'application/octet-stream')}
+        fields={
+            'tensor': (tensor_name, tensor_bytes, 'application/octet-stream'),
+            'label': tensor_name
+        }
     )
 
     pbar = tqdm(total=encoder.len, unit='B', unit_scale=True, desc='Uploading')
@@ -301,16 +304,16 @@ def handle_event(event):
     accumulation_steps = task_params.get('accumulation_steps', 1)
     if task_type == 'embed':
         embed_task(batch)
-        result['result_url'] = upload_tensor(tensors['outputs'])
+        result['result_url'] = upload_tensor(tensors['outputs'], 'embed_outputs')
     elif task_type == 'forward':
         forward_task(layer_idx, inputs)
-        result['result_url'] = upload_tensor(tensors['outputs'])
+        result['result_url'] = upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')
     elif task_type == 'backward':
         backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
         result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors[f'layer_{layer_idx}_adam_m'], tensors[f'layer_{layer_idx}_adam_v'], layer_idx)
     elif task_type == 'final_logits':
         final_logits_task(inputs)
-        result['result_url'] = upload_tensor(tensors['logits'])
+        result['result_url'] = upload_tensor(tensors['logits'], 'final_logits_outputs')
     elif task_type == 'final_logits_backward':
         final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
         result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors['final_logits_adam_m'], tensors['final_logits_adam_v'], -1)
@@ -322,7 +325,7 @@ def handle_event(event):
         logging.info(1)
         result['loss'] = tensors['loss'].item()
         logging.info(2)
-        result['result_url'] = upload_tensor(tensors['logits_grad'])
+        result['result_url'] = upload_tensor(tensors['logits_grad'], 'loss_logits_grad')
         logging.info(3)
 
     result['last_block'] = latest_block_numbers[task_type]
@@ -343,10 +346,17 @@ def submit_solution(task_id, result):
         raise
 
 def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates, layer_idx):
-    grads_url = upload_tensor(grads)
+    if layer_idx == -1:
+        layer_label = "final_logits"
+    elif layer_idx == -2:
+        layer_label = "embed"
+    else:
+        layer_label = f"layer_{layer_idx}"
+
+    grads_url = upload_tensor(grads, f'{layer_label}_grads')
     
-    adam_m_url = upload_tensor(adam_m_updates)
-    adam_v_url = upload_tensor(adam_v_updates)
+    adam_m_url = upload_tensor(adam_m_updates, f'{layer_label}_adam_m')
+    adam_v_url = upload_tensor(adam_v_updates, f'{layer_label}_adam_v')
     
     block_number = web3.eth.block_number
     
@@ -358,7 +368,7 @@ def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates
     }
 
     if error_output is not None:
-        result['error_output_url'] = upload_tensor(error_output)
+        result['error_output_url'] = upload_tensor(error_output, f'{layer_label}_error_output')
 
     return result
 
@@ -554,7 +564,6 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
     tensors['embed_adam_m'] = m_update
     tensors['embed_adam_v'] = v_update
 
-
 def loss_task(logits, targets):
     global tensors
 
@@ -711,7 +720,6 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     logging.debug(f"Updates after applying StableAdamW: {param_update}")
 
     return param_delta.view(-1), m_delta.view(-1), v_delta.view(-1)
-
 
 def check_and_finalize_verifications():
     current_time = int(time.time())
