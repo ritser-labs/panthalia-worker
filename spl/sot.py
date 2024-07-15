@@ -32,6 +32,10 @@ logging.info("Initializing or loading initial state...")
 state_dir = os.path.join(data_dir, 'state')
 os.makedirs(state_dir, exist_ok=True)
 
+# Create the temp directory within state_dir
+temp_dir = os.path.join(state_dir, 'temp')
+os.makedirs(temp_dir, exist_ok=True)
+
 # File to store block numbers
 block_numbers_file = os.path.join(state_dir, 'block_numbers.json')
 
@@ -195,18 +199,18 @@ def preload_batch():
         batch_filename = f'batch_{timestamp}_{random_suffix}.json'
         targets_filename = f'targets_{timestamp}_{random_suffix}.json'
 
-        with open(os.path.join(state_dir, batch_filename), 'w') as file:
+        with open(os.path.join(temp_dir, batch_filename), 'w') as file:
             file.write(json.dumps(batch))
-        with open(os.path.join(state_dir, targets_filename), 'w') as file:
+        with open(os.path.join(temp_dir, targets_filename), 'w') as file:
             file.write(json.dumps(targets))
         
         return batch_filename, targets_filename
 
 def clean_up_state_directory():
     logging.info("Cleaning up state directory...")
-    for filename in os.listdir(state_dir):
+    for filename in os.listdir(temp_dir):
         if filename.startswith("batch_") or filename.startswith("targets_"):
-            file_path = os.path.join(state_dir, filename)
+            file_path = os.path.join(temp_dir, filename)
             try:
                 if os.path.isfile(file_path):
                     os.unlink(file_path)
@@ -259,8 +263,8 @@ def get_batch():
 
     try:
         return jsonify({
-            'batch_url': f'{BASE_URL}/data/state/{batch_filename}',
-            'targets_url': f'{BASE_URL}/data/state/{targets_filename}'
+            'batch_url': f'{BASE_URL}/data/state/temp/{batch_filename}',
+            'targets_url': f'{BASE_URL}/data/state/temp/{targets_filename}'
         })
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
@@ -372,7 +376,7 @@ def upload_tensor():
     timestamp = int(time.time())
     random_suffix = random.randint(1000, 9999)
     filename = secure_filename(f'{label}_{timestamp}_{random_suffix}.pt')
-    local_file_path = os.path.join(data_dir, filename)
+    local_file_path = os.path.join(temp_dir, filename)
 
     logging.debug("Receiving tensor upload...")
     total_size = request.content_length
@@ -393,7 +397,7 @@ def upload_tensor():
 
     # Save the tensor state
     tensor_state = torch.load(local_file_path)
-    torch.save(tensor_state, os.path.join(state_dir, filename))  # Use filename directly
+    torch.save(tensor_state, os.path.join(temp_dir, filename))  # Use filename directly
 
     # Update block number
     block_numbers[tensor_name] = block_number
@@ -401,7 +405,7 @@ def upload_tensor():
 
     logging.debug(f"Tensor {tensor_name} uploaded and saved with block number {block_number}")
 
-    return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'{BASE_URL}/data/{filename}'}), 200
+    return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'{BASE_URL}/data/state/temp/{filename}'}), 200
 
 
 if __name__ == "__main__":
