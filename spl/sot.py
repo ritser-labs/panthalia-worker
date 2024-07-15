@@ -106,10 +106,10 @@ def initialize_tensor(name, random_init=True):
         return
 
     if "embed" in name:
-        module = VocabParallelEmbedding(model_args.vocab_size, model_args.dim, init_method=lambda x: x).to(device)
+        module = VocabParallelEmbedding(model_args.vocab_size, model_args.dim).to(device)
     elif "final_logits" in name:
         norm = RMSNorm(model_args.dim, eps=model_args.norm_eps).to(device)
-        linear = ColumnParallelLinear(model_args.dim, model_args.vocab_size, bias=False, init_method=lambda x: x).to(device)
+        linear = ColumnParallelLinear(model_args.dim, model_args.vocab_size, bias=False).to(device)
         module = [norm, linear]
     elif "layer_" in name:
         layer_idx = int(name.split('_')[1])
@@ -117,10 +117,16 @@ def initialize_tensor(name, random_init=True):
     else:
         raise ValueError(f"Unsupported tensor name: {name}")
 
-    if random_init and 'layer_' in name:
-        for param in module.parameters():
-            if param.dim() > 1:
-                init.xavier_uniform_(param)
+    if random_init:
+        if isinstance(module, list):  # final_logits case
+            for submodule in module:
+                for param in submodule.parameters():
+                    if param.dim() > 1:
+                        init.xavier_uniform_(param)
+        else:
+            for param in module.parameters():
+                if param.dim() > 1:
+                    init.xavier_uniform_(param)
 
     if isinstance(module, list):  # final_logits case
         tensors = [param.data for submodule in module for param in submodule.parameters()]
