@@ -87,6 +87,27 @@ def generate_wallets(num_wallets):
         wallets.append({'private_key': account._private_key.hex(), 'address': account.address})
     return wallets
 
+def delete_old_tensor_files(directory, timestamps_file):
+    if not os.path.exists(directory):
+        return
+
+    if not os.path.exists(timestamps_file):
+        return
+
+    with open(timestamps_file, 'r') as f:
+        block_timestamps = json.load(f)
+
+    tensor_files = glob.glob(os.path.join(directory, '*.pt'))
+    latest_files = {f"{name}_{version}.pt" for name, version in block_timestamps.items()}
+
+    for tensor_file in tensor_files:
+        if os.path.basename(tensor_file) not in latest_files:
+            try:
+                os.remove(tensor_file)
+                print(f"Deleted old tensor file: {tensor_file}")
+            except Exception as e:
+                print(f"Error deleting file {tensor_file}: {e}")
+
 def delete_directory_contents(directory):
     if os.path.exists(directory):
         try:
@@ -119,20 +140,15 @@ def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, am
         web3.eth.wait_for_transaction_receipt(signed_tx.hash)
 
 if __name__ == "__main__":
-    # Delete all .pt files in the data directory
-    pt_files = glob.glob(os.path.join(args.local_storage_dir, '*.pt'))
-    for pt_file in pt_files:
-        try:
-            os.remove(pt_file)
-            print(f"Deleted file: {pt_file}")
-        except Exception as e:
-            print(f"Error deleting file {pt_file}: {e}")
-    gradients = os.path.join(args.local_storage_dir, 'gradients')
-    delete_directory_contents(gradients)
+    # Delete all .pt files in the state directory except for the latest version for each tensor
     state_dir = os.path.join(args.local_storage_dir, 'state')
+    block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
+    delete_old_tensor_files(state_dir, block_timestamps_file)
+
+    # Delete the temp directory
     temp_dir = os.path.join(state_dir, 'temp')
-    #delete_directory_contents(temp_dir)
-    delete_directory_contents(state_dir)
+    delete_directory_contents(temp_dir)
+
     # Start Flask server in a separate thread
     flask_thread = threading.Thread(target=lambda: app.run(port=5002))
     flask_thread.start()
@@ -190,7 +206,6 @@ if __name__ == "__main__":
     print("Starting SOT service...")
 
     # Start the SOT service
-    #sot_process = subprocess.Popen(['python', 'sot.py'])
     sot_process = subprocess.Popen(['python', 'sot.py'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"SOT service started with PID {sot_process.pid}")
 
