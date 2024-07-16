@@ -63,6 +63,7 @@ def parse_args():
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
     parser.add_argument('--sync_url', type=str, required=False, help="URL for reporting sync status", default='http://localhost:5002')
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
+    parser.add_argument('--max_stakes', type=int, default=2, help="Maximum number of stakes to maintain")
     return parser.parse_args()
 
 args = parse_args()
@@ -96,7 +97,6 @@ adam_m = defaultdict(lambda: None)
 adam_v = defaultdict(lambda: None)
 latest_block_timestamps = defaultdict(lambda: 0)  # To store the latest block timestamp processed for each tensor
 gradient_update_paused = False
-stake_deposited = False
 processed_tasks = set()
 
 freqs_cis = None
@@ -261,16 +261,15 @@ def resume_gradient_updates():
     gradient_update_paused = False
 
 def deposit_stake():
-    global stake_deposited
-    if not stake_deposited:
+    stakes_deposited = pool_contract.functions.getStakeIds(subnet_id, args.group, worker_address).call()
+    max_stakes = args.max_stakes
+    if len(stakes_deposited) < max_stakes:
         try:
-            receipt = transact_with_contract_function(web3, token_contract, 'approve', args.private_key, args.pool_address, stake_amount)
-            logging.info(f"Approved token transaction receipt: {receipt}")
-
-            receipt = transact_with_contract_function(web3, pool_contract, 'depositStake', args.private_key, subnet_id, args.group)
-            logging.info(f"depositStake transaction receipt: {receipt}")
-
-            stake_deposited = True
+            for _ in range(max_stakes - len(stakes_deposited)):
+                receipt = transact_with_contract_function(web3, token_contract, 'approve', args.private_key, args.pool_address, stake_amount)
+                logging.info(f"Approved token transaction receipt: {receipt}")
+                receipt = transact_with_contract_function(web3, pool_contract, 'depositStake', args.private_key, subnet_id, args.group)
+                logging.info(f"depositStake transaction receipt: {receipt}")
         except ContractCustomError as e:
             error_selectors = load_error_selectors(web3)
             handle_contract_custom_error(web3, error_selectors, e)
