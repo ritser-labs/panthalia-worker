@@ -260,6 +260,8 @@ def get_batch():
     batch_filename, targets_filename = preloaded_batch
     preloaded_batch = None
 
+    preload_batch()
+
     try:
         return jsonify({
             'batch_url': f'{BASE_URL}/data/state/temp/{batch_filename}',
