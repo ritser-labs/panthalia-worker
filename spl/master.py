@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -5,11 +6,11 @@ import requests
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts, handle_contract_custom_error, TaskStatus, Vote, PoolState, Task, get_learning_hyperparameters, transact_with_contract_function, TENSOR_VERSION_INTERVAL
+from common import load_contracts, handle_contract_custom_error, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL
 from io import BytesIO
-import torch
 import os
 import math
+import aiohttp
 
 logging.basicConfig(level=logging.INFO)
 
@@ -41,12 +42,12 @@ class Master:
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
-    def approve_token(self, token_address, spender_address, amount):
+    async def approve_token(self, token_address, spender_address, amount):
         token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
-        receipt = transact_with_contract_function(self.web3, token_contract, 'approve', self.account._private_key, spender_address, amount, gas=100000)
+        receipt = await async_transact_with_contract_function(self.web3, token_contract, 'approve', self.account._private_key, spender_address, amount, gas=100000)
         logging.info(f"Approved token transaction receipt: {receipt}")
 
-    def submit_task(self, task_type, params):
+    async def submit_task(self, task_type, params):
         try:
             if task_type not in self.contracts:
                 raise ValueError(f"No contract loaded for task type {task_type}")
@@ -57,42 +58,50 @@ class Master:
             fee = self.contracts[task_type].functions.calculateFee(0).call()
             token_address = self.contracts[task_type].functions.token().call()
             spender_address = self.contracts[task_type].address
-            self.approve_token(token_address, spender_address, fee)
+            await self.approve_token(token_address, spender_address, fee)
 
-            receipt = transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.account._private_key, encoded_params, gas=1000000)
-            logging.info(f"submitTaskRequest transaction receipt: {receipt}")
+            for _ in range(5):  # Retry up to 5 times
+                try:
+                    await self.wait_for_state_change(PoolState.Unlocked.value)
+                    receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.account._private_key, encoded_params, gas=1000000)
+                    logging.info(f"submitTaskRequest transaction receipt: {receipt}")
 
-            logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
-            if not logs:
-                raise ValueError("No TaskRequestSubmitted event found in the receipt")
+                    logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
+                    if not logs:
+                        raise ValueError("No TaskRequestSubmitted event found in the receipt")
 
-            task_id = logs[0]['args']['taskId']
-            logging.info(f"Task submitted successfully. Task ID: {task_id}")
+                    task_id = logs[0]['args']['taskId']
+                    logging.info(f"Task submitted successfully. Task ID: {task_id}")
 
-            selection_id = self.submit_selection_req()
-            logging.info(f"Selection ID: {selection_id}")
+                    selection_id = await self.submit_selection_req()
+                    logging.info(f"Selection ID: {selection_id}")
 
-            vrf_request_id = self.pool.functions.vrfRequestId().call()
-            self.fulfill_random_words(vrf_request_id)
-            self.select_solver(task_type, task_id)
-            self.remove_solver_stake(task_type, task_id)
+                    vrf_request_id = self.pool.functions.vrfRequestId().call()
+                    await self.fulfill_random_words(vrf_request_id)
+                    await self.select_solver(task_type, task_id)
+                    await self.remove_solver_stake(task_type, task_id)
 
-            return task_id
+                    return task_id
+                except Exception as e:
+                    logging.error(f"Error submitting task: {e}. Retrying...")
+                    await asyncio.sleep(1)  # Wait for a while before retrying
+
+            raise RuntimeError("Failed to submit task after multiple attempts")
         except ContractCustomError as e:
             handle_contract_custom_error(self.web3, self.error_selectors, e)
         except Exception as e:
             logging.error(f"Error submitting task: {e}")
             raise
 
-    def submit_selection_req(self):
+    async def submit_selection_req(self):
         try:
             if self.pool.functions.state().call() != PoolState.Unlocked.value:
                 return self.pool.functions.currentSelectionId().call()
 
-            self.wait_for_state_change(PoolState.Unlocked.value)
+            await self.wait_for_state_change(PoolState.Unlocked.value)
             logging.info("Submitting selection request")
 
-            receipt = transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.account._private_key, gas=500000)
+            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.account._private_key, gas=500000)
             logging.info(f"submitSelectionReq transaction receipt: {receipt}")
 
             unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
@@ -102,7 +111,7 @@ class Master:
 
             if remaining_time > 0:
                 logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
-                time.sleep(remaining_time)
+                await asyncio.sleep(remaining_time)
 
             logs = self.pool.events.SelectionRequested().process_receipt(receipt)
             if not logs:
@@ -113,7 +122,7 @@ class Master:
             logging.error(f"Error submitting selection request: {e}")
             raise
 
-    def trigger_lock_global_state(self):
+    async def trigger_lock_global_state(self):
         unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
         last_state_change_time = self.pool.functions.lastStateChangeTime().call()
         current_time = time.time()
@@ -121,16 +130,16 @@ class Master:
 
         if remaining_time > 0:
             logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
-            time.sleep(remaining_time)
+            await asyncio.sleep(remaining_time)
 
         try:
-            receipt = transact_with_contract_function(self.web3, self.pool, 'lockGlobalState', self.account._private_key, gas=500000)
+            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'lockGlobalState', self.account._private_key, gas=500000)
             logging.info(f"lockGlobalState transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error triggering lock global state: {e}")
             raise
 
-    def trigger_remove_global_lock(self):
+    async def trigger_remove_global_lock(self):
         selections_finalizing_min_period = self.pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
         last_state_change_time = self.pool.functions.lastStateChangeTime().call()
         current_time = time.time()
@@ -138,67 +147,77 @@ class Master:
 
         if remaining_time > 0:
             logging.info(f"Waiting for {remaining_time} seconds until SELECTIONS_FINALIZING_MIN_PERIOD is over")
-            time.sleep(remaining_time)
+            await asyncio.sleep(remaining_time)
 
         try:
-            receipt = transact_with_contract_function(self.web3, self.pool, 'removeGlobalLock', self.account._private_key, gas=500000)
+            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'removeGlobalLock', self.account._private_key, gas=500000)
             logging.info(f"removeGlobalLock transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error triggering remove global lock: {e}")
             raise
 
+    async def wait_for_state_change(self, target_state):
+        max_retries = 10
+        retries = 0
+        while retries < max_retries:
+            try:
+                current_state = PoolState(self.pool.functions.state().call())
+                logging.info(f"Current pool state: {current_state.name}, target state: {PoolState(target_state).name}")
 
-    def wait_for_state_change(self, target_state):
-        while True:
-            current_state = PoolState(self.pool.functions.state().call())
-            logging.info(f"Current pool state: {current_state.name}, target state: {PoolState(target_state).name}")
+                if current_state == PoolState(target_state):
+                    return
 
-            if current_state == PoolState(target_state):
-                break
+                if current_state == PoolState.Unlocked:
+                    logging.info("Triggering lockGlobalState to change state to Locked")
+                    await self.trigger_lock_global_state()
+                elif current_state == PoolState.Locked:
+                    logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
+                elif current_state == PoolState.SelectionsFinalizing:
+                    logging.info("Triggering removeGlobalLock to change state to Unlocked")
+                    await self.trigger_remove_global_lock()
+                else:
+                    logging.info(f"Waiting for the pool state to change to {PoolState(target_state).name}")
+                    await asyncio.sleep(5)
 
-            if current_state == PoolState.Unlocked:
-                logging.info("Triggering lockGlobalState to change state to Locked")
-                self.trigger_lock_global_state()
-            elif current_state == PoolState.Locked:
-                logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
-            elif current_state == PoolState.SelectionsFinalizing:
-                logging.info("Triggering removeGlobalLock to change state to Unlocked")
-                self.trigger_remove_global_lock()
-            else:
-                logging.info(f"Waiting for the pool state to change to {PoolState(target_state).name}")
-                time.sleep(5)
+                retries += 1
+            except Exception as e:
+                logging.error(f"Error during wait for state change: {e}. Retrying...")
+                retries += 1
+                await asyncio.sleep(1)  # Wait for a while before retrying
 
-    def fulfill_random_words(self, vrf_request_id):
+        raise RuntimeError(f"Failed to change state to {PoolState(target_state).name} after multiple attempts")
+
+    async def fulfill_random_words(self, vrf_request_id):
         try:
-            receipt = transact_with_contract_function(self.web3, self.vrf_coordinator, 'fulfillRandomWords', self.account._private_key, vrf_request_id, gas=500000)
+            receipt = await async_transact_with_contract_function(self.web3, self.vrf_coordinator, 'fulfillRandomWords', self.account._private_key, vrf_request_id, gas=500000)
             logging.info(f"fulfillRandomWords transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error fulfilling random words: {e}")
             raise
 
-    def select_solver(self, task_type, task_id):
+    async def select_solver(self, task_type, task_id):
         try:
             logging.info(f"Selecting solver for task ID: {task_id}")
 
-            self.wait_for_state_change(PoolState.SelectionsFinalizing.value)
-            receipt = transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id, gas=1000000)
+            await self.wait_for_state_change(PoolState.SelectionsFinalizing.value)
+            receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id, gas=1000000)
             logging.info(f"selectSolver transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error selecting solver: {e}")
             raise
 
-    def remove_solver_stake(self, task_type, task_id):
+    async def remove_solver_stake(self, task_type, task_id):
         try:
             logging.info(f"Removing solver stake for task ID: {task_id}")
 
-            self.wait_for_state_change(PoolState.Unlocked.value)
-            receipt = transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.account._private_key, task_id, gas=1000000)
+            await self.wait_for_state_change(PoolState.Unlocked.value)
+            receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.account._private_key, task_id, gas=1000000)
             logging.info(f"removeSolverStake transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error removing solver stake: {e}")
             raise
 
-    def log_transaction_failure(self, receipt):
+    async def log_transaction_failure(self, receipt):
         try:
             tx = self.web3.eth.get_transaction(receipt['transactionHash'])
             error_message = self.web3.eth.call({
@@ -210,7 +229,7 @@ class Master:
         except (TransactionNotFound, ValueError) as e:
             logging.error(f"Error retrieving transaction details: {e}")
 
-    def get_task_result(self, task_type, task_id):
+    async def get_task_result(self, task_type, task_id):
         try:
             task_tuple = self.contracts[task_type].functions.getTask(task_id).call()
             task = Task(*task_tuple)
@@ -223,79 +242,85 @@ class Master:
             logging.error(f"Error getting task result for {task_type} with task ID {task_id}: {e}")
             return None
 
-    def main(self):
+    async def main_iteration(self, iteration_number):
+        logging.info(f"Starting iteration {iteration_number}")
+        current_version_number = int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
+        
+        model_params = await self.get_latest_model_params(current_version_number)
+        batch_url, targets_url = await self.get_batch_and_targets_url()
+
+        logging.info(f"Iteration {iteration_number}: Starting embed forward task")
+        embed_result = await self.handle_embed_forward(model_params, batch_url, current_version_number)
+
+        layer_inputs_url = [embed_result['result_url']]
+        for layer_idx in range(model_params['n_layers']):
+            logging.info(f"Iteration {iteration_number}: Starting forward task for layer {layer_idx}")
+            layer_result = await self.handle_layer_forward(layer_idx, layer_inputs_url[-1], model_params, current_version_number)
+            layer_inputs_url.append(layer_result['result_url'])
+
+        logging.info(f"Iteration {iteration_number}: Starting final logits forward task")
+        final_logits_result = await self.handle_final_logits_forward(layer_inputs_url[-1], current_version_number)
+
+        logging.info(f"Iteration {iteration_number}: Starting loss computation task")
+        loss_result = await self.handle_loss_computation(final_logits_result['result_url'], targets_url, current_version_number)
+
+        error_url = loss_result['result_url']
+
+        logging.info(f"Iteration {iteration_number}: Starting final logits backward task")
+        final_logits_result = await self.handle_final_logits_backward(error_url, layer_inputs_url[-1], model_params, current_version_number)
+
+        error_url = final_logits_result['error_output_url']
+
+        for layer_idx in reversed(range(model_params['n_layers'])):
+            logging.info(f"Iteration {iteration_number}: Starting backward task for layer {layer_idx}")
+            layer_result = await self.handle_layer_backward(layer_idx, error_url, layer_inputs_url[layer_idx], model_params, current_version_number)
+            error_url = layer_result['error_output_url']
+
+        logging.info(f"Iteration {iteration_number}: Starting embed backward task")
+        await self.handle_embed_backward(error_url, batch_url, current_version_number)
+
+        logging.info(f"Iteration {iteration_number} done, loss: {loss_result['loss']}")
+
+    async def main(self, max_simultaneous_iterations):
         logging.info("Starting main process")
-        while self.iteration == 1:
-            current_version_number = int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
-            
-            model_params = self.get_latest_model_params(current_version_number)
-            batch_url, targets_url = self.get_batch_and_targets_url()
+        tasks = []
+        for i in range(max_simultaneous_iterations):
+            tasks.append(asyncio.create_task(self.main_iteration(self.iteration + i)))
+        await asyncio.gather(*tasks)
+        logging.info("All iterations completed")
 
-            logging.info("Starting embed forward task")
-            embed_result = self.handle_embed_forward(model_params, batch_url, current_version_number)
+    async def get_latest_model_params(self, current_version_number):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{self.sot_url}/latest_model_params", params={'version_number': current_version_number}) as response:
+                return await response.json()
 
-            layer_inputs_url = [embed_result['result_url']]
-            for layer_idx in range(model_params['n_layers']):
-                logging.info(f"Starting forward task for layer {layer_idx}")
-                layer_result = self.handle_layer_forward(layer_idx, layer_inputs_url[-1], model_params, current_version_number)
-                layer_inputs_url.append(layer_result['result_url'])
-
-            logging.info("Starting final logits forward task")
-            final_logits_result = self.handle_final_logits_forward(layer_inputs_url[-1], current_version_number)
-
-            logging.info("Starting loss computation task")
-            loss_result = self.handle_loss_computation(final_logits_result['result_url'], targets_url, current_version_number)
-
-            error_url = loss_result['result_url']
-
-            logging.info("Starting final logits backward task")
-            final_logits_result = self.handle_final_logits_backward(error_url, layer_inputs_url[-1], model_params, current_version_number)
-
-            error_url = final_logits_result['error_output_url']
-
-            for layer_idx in reversed(range(model_params['n_layers'])):
-                logging.info(f"Starting backward task for layer {layer_idx}")
-                layer_result = self.handle_layer_backward(layer_idx, error_url, layer_inputs_url[layer_idx], model_params, current_version_number)
-                error_url = layer_result['error_output_url']
-
-            logging.info("Starting embed backward task")
-            self.handle_embed_backward(error_url, batch_url, current_version_number)
-
-            logging.info(f'Iteration done, loss: {loss_result["loss"]}')
-
-            self.iteration += 1
-
-    def get_latest_model_params(self, current_version_number):
-        response = requests.get(f"{self.sot_url}/latest_model_params", params={'version_number': current_version_number})
-        return response.json()
-
-    def handle_embed_forward(self, model_params, batch_url, current_version_number):
+    async def handle_embed_forward(self, model_params, batch_url, current_version_number):
         task_params = {'batch_url': batch_url, 'model_params': model_params, 'version_number': current_version_number}
-        task_id = self.submit_task('embed', task_params)
-        result = self.wait_for_result('embed', task_id)
+        task_id = await self.submit_task('embed', task_params)
+        result = await self.wait_for_result('embed', task_id)
         result['batch_url'] = batch_url
         return result
 
-    def handle_layer_forward(self, layer_idx, inputs_url, model_params, current_version_number):
+    async def handle_layer_forward(self, layer_idx, inputs_url, model_params, current_version_number):
         task_type = f'forward_layer_{layer_idx}'
         task_params = {'layer_idx': layer_idx, 'inputs_url': inputs_url, 'model_params': model_params, 'version_number': current_version_number}
-        task_id = self.submit_task(task_type, task_params)
-        result = self.wait_for_result(task_type, task_id)
+        task_id = await self.submit_task(task_type, task_params)
+        result = await self.wait_for_result(task_type, task_id)
         return result
 
-    def handle_final_logits_forward(self, inputs_url, current_version_number):
+    async def handle_final_logits_forward(self, inputs_url, current_version_number):
         task_params = {'inputs_url': inputs_url, 'version_number': current_version_number}
-        task_id = self.submit_task('final_logits', task_params)
-        result = self.wait_for_result('final_logits', task_id)
+        task_id = await self.submit_task('final_logits', task_params)
+        result = await self.wait_for_result('final_logits', task_id)
         return result
 
-    def handle_loss_computation(self, logits_url, targets_url, current_version_number):
+    async def handle_loss_computation(self, logits_url, targets_url, current_version_number):
         task_params = {'logits_url': logits_url, 'targets_url': targets_url, 'version_number': current_version_number}
-        task_id = self.submit_task('loss', task_params)
-        result = self.wait_for_result('loss', task_id)
+        task_id = await self.submit_task('loss', task_params)
+        result = await self.wait_for_result('loss', task_id)
         return result
 
-    def handle_layer_backward(self, layer_idx, error_url, inputs_url, model_params, current_version_number):
+    async def handle_layer_backward(self, layer_idx, error_url, inputs_url, model_params, current_version_number):
         learning_params = get_learning_hyperparameters(self.iteration)
         task_type = f'backward_layer_{layer_idx}'
         task_params = {
@@ -305,12 +330,12 @@ class Master:
             **learning_params,
             'version_number': current_version_number
         }
-        task_id = self.submit_task(task_type, task_params)
-        result = self.wait_for_result(task_type, task_id)
-        self.update_sot_all(task_type, result, layer_idx)
+        task_id = await self.submit_task(task_type, task_params)
+        result = await self.wait_for_result(task_type, task_id)
+        await self.update_sot_all(task_type, result, layer_idx)
         return result
 
-    def handle_final_logits_backward(self, error_url, inputs_url, model_params, current_version_number):
+    async def handle_final_logits_backward(self, error_url, inputs_url, model_params, current_version_number):
         learning_params = get_learning_hyperparameters(self.iteration)
         task_params = {
             'error_url': error_url,
@@ -318,12 +343,12 @@ class Master:
             **learning_params,
             'version_number': current_version_number
         }
-        task_id = self.submit_task('final_logits_backward', task_params)
-        result = self.wait_for_result('final_logits_backward', task_id)
-        self.update_sot_all('final_logits_backward', result)
+        task_id = await self.submit_task('final_logits_backward', task_params)
+        result = await self.wait_for_result('final_logits_backward', task_id)
+        await self.update_sot_all('final_logits_backward', result)
         return result
 
-    def handle_embed_backward(self, error_url, batch_url, current_version_number):
+    async def handle_embed_backward(self, error_url, batch_url, current_version_number):
         learning_params = get_learning_hyperparameters(self.iteration)
         task_params = {
             'error_url': error_url,
@@ -331,52 +356,55 @@ class Master:
             **learning_params,
             'version_number': current_version_number
         }
-        task_id = self.submit_task('embed_backward', task_params)
-        result = self.wait_for_result('embed_backward', task_id)
-        self.update_sot_all('embed_backward', result)
+        task_id = await self.submit_task('embed_backward', task_params)
+        result = await self.wait_for_result('embed_backward', task_id)
+        await self.update_sot_all('embed_backward', result)
         return result
 
-    def wait_for_result(self, task_type, task_id):
+    async def wait_for_result(self, task_type, task_id):
         while True:
-            result = self.get_task_result(task_type, task_id)
+            result = await self.get_task_result(task_type, task_id)
             if result is not None:
                 return result
-            time.sleep(5)
+            await asyncio.sleep(5)
 
-    def update_sot(self, tensor_name, result):
-        response = requests.post(f"{self.sot_url}/update_state", json={'tensor_name': tensor_name, 'result_url': result['grads_url']})
-        if response.status_code != 200:
-            logging.error(f"Failed to update SOT for {tensor_name}: {response.text}")
-        else:
-            logging.info(f"Updated SOT for {tensor_name} with result: {result}")
+    async def update_sot(self, tensor_name, result):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self.sot_url}/update_state", json={'tensor_name': tensor_name, 'result_url': result['grads_url']}) as response:
+                if response.status_code != 200:
+                    logging.error(f"Failed to update SOT for {tensor_name}: {await response.text()}")
+                else:
+                    logging.info(f"Updated SOT for {tensor_name} with result: {result}")
 
-    def update_sot_all(self, task_type, result, layer_idx=None):
+    async def update_sot_all(self, task_type, result, layer_idx=None):
         if task_type == 'embed_backward':
             tensor_name = 'embed'
         elif task_type == 'final_logits_backward':
             tensor_name = 'final_logits'
         else:
             tensor_name = f'layer_{layer_idx}'
-        self.update_sot(tensor_name, result)
-        self.update_adam_state(tensor_name, result['adam_m_url'], result['adam_v_url'])
+        await self.update_sot(tensor_name, result)
+        await self.update_adam_state(tensor_name, result['adam_m_url'], result['adam_v_url'])
 
-    def update_adam_state(self, tensor_name, adam_m_url, adam_v_url):
-        response = requests.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_m', 'result_url': adam_m_url})
-        if response.status_code != 200:
-            logging.error(f"Failed to update Adam state for {tensor_name}: {response.text}")
-        else:
-            logging.info(f"Updated Adam state for {tensor_name}")
-        response = requests.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_v', 'result_url': adam_v_url})
-        if response.status_code != 200:
-            logging.error(f"Failed to update Adam state for {tensor_name}: {response.text}")
-        else:
-            logging.info(f"Updated Adam state for {tensor_name}")
+    async def update_adam_state(self, tensor_name, adam_m_url, adam_v_url):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_m', 'result_url': adam_m_url}) as response:
+                if response.status_code != 200:
+                    logging.error(f"Failed to update Adam state for {tensor_name}: {await response.text()}")
+                else:
+                    logging.info(f"Updated Adam state for {tensor_name}")
+            async with session.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_v', 'result_url': adam_v_url}) as response:
+                if response.status_code != 200:
+                    logging.error(f"Failed to update Adam state for {tensor_name}: {await response.text()}")
+                else:
+                    logging.info(f"Updated Adam state for {tensor_name}")
 
-    def get_batch_and_targets_url(self):
+    async def get_batch_and_targets_url(self):
         url = os.path.join(self.sot_url, 'get_batch')
-        response = requests.post(url)
-        response_json = response.json()
-        return response_json['batch_url'], response_json['targets_url']
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url) as response:
+                response_json = await response.json()
+                return response_json['batch_url'], response_json['targets_url']
 
 if __name__ == "__main__":
     import argparse
@@ -387,6 +415,7 @@ if __name__ == "__main__":
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
+    parser.add_argument('--max_simultaneous_iterations', type=int, default=2, help="Maximum number of simultaneous iterations")
 
     args = parser.parse_args()
 
@@ -394,4 +423,5 @@ if __name__ == "__main__":
         subnet_addresses = json.load(file)
 
     master = Master(args.rpc_url, args.private_key, args.sot_url, subnet_addresses, detailed_logs=args.detailed_logs)
-    master.main()
+    
+    asyncio.run(master.main(args.max_simultaneous_iterations))

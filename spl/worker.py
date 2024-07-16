@@ -12,13 +12,14 @@ from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
-from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors, transact_with_contract_function, TENSOR_VERSION_INTERVAL
+from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional, Tuple
 from io import BytesIO
 import time
 import os
 from tqdm import tqdm
+import asyncio
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 
 class SuppressTracebackFilter(logging.Filter):
@@ -27,7 +28,7 @@ class SuppressTracebackFilter(logging.Filter):
             return False
         return True
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 logger.addFilter(SuppressTracebackFilter())
 
@@ -260,15 +261,15 @@ def resume_gradient_updates():
     global gradient_update_paused
     gradient_update_paused = False
 
-def deposit_stake():
+async def deposit_stake():
     stakes_deposited = pool_contract.functions.getStakeIds(subnet_id, args.group, worker_address).call()
     max_stakes = args.max_stakes
     if len(stakes_deposited) < max_stakes:
         try:
             for _ in range(max_stakes - len(stakes_deposited)):
-                receipt = transact_with_contract_function(web3, token_contract, 'approve', args.private_key, args.pool_address, stake_amount)
+                receipt = await async_transact_with_contract_function(web3, token_contract, 'approve', args.private_key, args.pool_address, stake_amount)
                 logging.info(f"Approved token transaction receipt: {receipt}")
-                receipt = transact_with_contract_function(web3, pool_contract, 'depositStake', args.private_key, subnet_id, args.group)
+                receipt = await async_transact_with_contract_function(web3, pool_contract, 'depositStake', args.private_key, subnet_id, args.group)
                 logging.info(f"depositStake transaction receipt: {receipt}")
         except ContractCustomError as e:
             error_selectors = load_error_selectors(web3)
@@ -277,7 +278,7 @@ def deposit_stake():
             logging.error(f"Failed to deposit stake: {e}")
             raise
 
-def handle_event(event):
+async def handle_event(event):
     task_id = event['args']['taskId']
     solver = event['args']['solver']
 
@@ -297,9 +298,9 @@ def handle_event(event):
         'version_number': task_params.get('version_number')
     })
 
-    process_tasks()
+    await process_tasks()
 
-def process_tasks():
+async def process_tasks():
     global task_queue
 
     next_task = task_queue.get_next_task()
@@ -308,7 +309,7 @@ def process_tasks():
 
     if (task_queue.current_version is None
         or next_task['version_number'] != task_queue.current_version):
-        sync_tensors(next_task['version_number'])
+        await sync_tensors(next_task['version_number'])
         task_queue.current_version = next_task['version_number']
 
     task_id = next_task['task_id']
@@ -367,7 +368,7 @@ def process_tasks():
         result['result_url'] = upload_tensor(tensors['logits_grad'], 'loss_logits_grad')
         logging.info(3)
 
-    submit_solution(task_id, result)
+    await submit_solution(task_id, result)
 
     processed_tasks.add(task_id)
 
@@ -375,14 +376,14 @@ def process_tasks():
 
     resume_gradient_updates()
 
-def sync_tensors(sync_version_number):
+async def sync_tensors(sync_version_number):
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
     for tensor_name in relevant_tensors:
-        initialize_tensor(tensor_name, sync_version_number)
+        await initialize_tensor(tensor_name, sync_version_number)
 
-def submit_solution(task_id, result):
+async def submit_solution(task_id, result):
     try:
-        receipt = transact_with_contract_function(web3, contract, 'submitSolution', args.private_key, task_id, json.dumps(result).encode('utf-8'))
+        receipt = await async_transact_with_contract_function(web3, contract, 'submitSolution', args.private_key, task_id, json.dumps(result).encode('utf-8'))
         logging.info(f"submitSolution transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error submitting solution for task {task_id}: {e}")
@@ -764,7 +765,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
 
     return param_delta.view(-1), m_delta.view(-1), v_delta.view(-1)
 
-def check_and_finalize_verifications():
+async def check_and_finalize_verifications():
     current_time = int(time.time())
     for task_id in list(processed_tasks):
         task_tuple = contract.functions.getTask(task_id).call()
@@ -776,14 +777,14 @@ def check_and_finalize_verifications():
         if task_status == 2 and (current_time - time_status_changed) >= max_dispute_time:
             if contract.functions.canVerificationBeFinalized(task_id).call():
                 try:
-                    receipt = transact_with_contract_function(web3, contract, 'finalizeVerification', args.private_key, task_id)
+                    receipt = await async_transact_with_contract_function(web3, contract, 'finalizeVerification', args.private_key, task_id)
                     logging.info(f"finalizeVerification transaction receipt: {receipt}")
                     processed_tasks.remove(task_id)
                 except Exception as e:
                     logging.error(f"Error finalizing verification for task {task_id}: {e}")
                     raise
 
-def report_sync_status(status):
+async def report_sync_status(status):
     try:
         if hasattr(args, 'layer_idx') and args.layer_idx is not None:
             url = f"{args.sync_url}/report_sync?task_type={args.task_type}&layer_idx={args.layer_idx}&status={status}"
@@ -797,7 +798,7 @@ def report_sync_status(status):
     except requests.RequestException as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-def initialize_tensor(tensor_name, sync_version_number=None):
+async def initialize_tensor(tensor_name, sync_version_number=None):
     global embedding, final_logits_layer, final_logits_norm, transformer_layer
 
     try:
@@ -866,7 +867,7 @@ def get_relevant_tensors_for_task(task_type):
         raise ValueError(f"Invalid task type: {task_type}")
     return relevant_tensors
 
-def main():
+async def main():
     logging.info("Starting main process")
     torch.set_default_device(device)
     initialize_distributed_environment_and_globals()
@@ -876,17 +877,17 @@ def main():
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
     reported = False
     while True:
-        deposit_stake()
+        await deposit_stake()
         if not reported:
             for tensor_name in relevant_tensors:
-                initialize_tensor(tensor_name)
-            report_sync_status('synced')
+                await initialize_tensor(tensor_name)
+            await report_sync_status('synced')
             reported = True
         for event in event_filter.get_new_entries():
-            handle_event(event)
-        check_and_finalize_verifications()
-        time.sleep(1)
+            await handle_event(event)
+        await check_and_finalize_verifications()
+        await asyncio.sleep(1)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
-    main()
+    asyncio.run(main())

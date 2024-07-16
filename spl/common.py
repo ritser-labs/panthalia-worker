@@ -14,6 +14,7 @@ import web3 as Web3Module
 from collections import namedtuple
 from device import device
 import math
+import asyncio
 
 # Define the new tokenizer and model arguments
 tokenizer = Tokenizer('r50k_base')
@@ -62,7 +63,6 @@ Task = namedtuple('Task', [
     'selectedStakeId', 'params', 'postedSolution', 'verificationRounds', 'verifierStake', 
     'disputerStake'
 ])
-
 
 def save_to_disk(data, filename):
     torch.save(data, filename)
@@ -173,7 +173,7 @@ def handle_contract_custom_error(web3, error_selectors, e):
             error_info = error_selectors[selector]
             error_name = error_info['name']
             inputs = error_info['inputs']
-            decoded_params = web3.codec.decode([input['type'] for input in inputs], data)
+            decoded_params = web3.codec.decode_abi([input['type'] for input in inputs], data)
             param_str = ', '.join(f"{input['name']}: {value}" for input, value in zip(inputs, decoded_params))
             logging.error(f"Contract Custom Error {error_name}: {param_str}")
             raise ValueError(f"Contract Custom Error {error_name}: {param_str}")
@@ -183,7 +183,6 @@ def handle_contract_custom_error(web3, error_selectors, e):
     except Exception as decode_err:
         logging.error(f"Failed to decode error data: {e.data}. Error: {decode_err}")
         raise
-
 
 def decode_custom_error(web3, error_selectors, error_bytes):
     try:
@@ -203,49 +202,64 @@ def decode_custom_error(web3, error_selectors, error_bytes):
         logging.error(f"Error decoding message chunk: {e}")
         raise
 
-def transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, gas=500000):
+async def log_transaction_failure(web3, tx_hash):
+    try:
+        tx = web3.eth.get_transaction(tx_hash)
+        tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+        
+        if tx_receipt['status'] == 0:
+            error_message = web3.eth.call({
+                'to': tx['to'],
+                'data': tx['input']
+            }, tx_receipt.blockNumber)
+            decoded_error_message = web3.codec.decode_abi(['string'], error_message)
+            logging.error(f"Transaction failed with error message: {decoded_error_message}")
+    except Exception as e:
+        logging.error(f"Failed to log transaction failure: {e}")
+
+
+async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, gas=500000):
     account = web3.eth.account.from_key(private_key)
-    nonce = web3.eth.get_transaction_count(account.address)
     gas_price = web3.eth.gas_price
 
     function = getattr(contract.functions, function_name)(*args)
-    tx_params = {
-        'chainId': web3.eth.chain_id,
-        'gas': gas,
-        'gasPrice': gas_price,
-        'nonce': nonce,
-        'value': value
-    }
 
-    try:
-        tx = function.build_transaction(tx_params)
-        signed_tx = account.sign_transaction(tx)
-        tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+    for _ in range(5):  # Retry up to 5 times
+        try:
+            nonce = web3.eth.get_transaction_count(account.address)
+            tx_params = {
+                'chainId': web3.eth.chain_id,
+                'gas': gas,
+                'gasPrice': gas_price,
+                'nonce': nonce,
+                'value': value
+            }
 
-        if receipt['status'] == 0:
-            # Decode the error message
-            tx = web3.eth.get_transaction(tx_hash)
-            try:
-                error_message = web3.eth.call({
-                    'to': tx['to'],
-                    'data': tx['input']
-                }, tx.blockNumber)
-                decoded_error_message = web3.codec.decode_abi(['string'], error_message)
-                logging.error(f"Transaction failed with error message: {decoded_error_message}")
-                raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}, Error: {decoded_error_message}")
-            except Exception as decode_err:
-                logging.error(f"Failed to decode error message: {decode_err}")
+            tx = function.build_transaction(tx_params)
+            signed_tx = account.sign_transaction(tx)
+            tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+
+            if receipt['status'] == 0:
+                await log_transaction_failure(web3, tx_hash)
                 raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}")
 
-        return receipt
-    except Web3Module.exceptions.ContractCustomError as e:
-        error_selectors = load_error_selectors(web3)
-        handle_contract_custom_error(web3, error_selectors, e)
-        raise
-    except Exception as e:
-        logging.error(f"Unexpected error during transaction: {e}")
-        raise
+            return receipt
+        except Web3Module.exceptions.ContractCustomError as e:
+            error_selectors = load_error_selectors(web3)
+            handle_contract_custom_error(web3, error_selectors, e)
+            raise
+        except ValueError as e:
+            if 'nonce too low' in str(e) or 'replacement transaction underpriced' in str(e):
+                logging.error(f"Nonce too low or replacement transaction underpriced, retrying with higher nonce...")
+                await asyncio.sleep(1)  # Wait for a while before retrying
+            else:
+                await log_transaction_failure(web3, tx_hash)
+                raise
+        except Exception as e:
+            logging.error(f"Unexpected error during transaction: {e}")
+            raise
+    raise RuntimeError("Failed to send transaction after multiple attempts")
 
 def get_learning_hyperparameters(current_iteration):
     """
