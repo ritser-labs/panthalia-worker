@@ -165,6 +165,8 @@ dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True
 dataset_iter = iter(dataset)
 
 preloaded_batch = None
+preloaded_batch_lock = threading.Lock()
+preloaded_batch_condition = threading.Condition(lock=preloaded_batch_lock)
 
 def truncate_tokens(tokens, max_seq_len, pad_token=tokenizer.pad_id):
     if len(tokens) < max_seq_len:
@@ -214,7 +216,9 @@ def preload_batch():
             file.write(json.dumps(targets))
 
         # Set the global preloaded_batch variable here
-        preloaded_batch = (batch_filename, targets_filename)
+        with preloaded_batch_lock:
+            preloaded_batch = (batch_filename, targets_filename)
+            preloaded_batch_condition.notify_all()
 
         return batch_filename, targets_filename
 
@@ -253,12 +257,13 @@ def get_batch():
     logging.info("Accessing /get_batch endpoint")
     global preloaded_batch
 
-    if preloaded_batch is None:
-        logging.error("No preloaded batch available")
-        return jsonify({"error": "No preloaded batch available"}), 404
+    with preloaded_batch_condition:
+        while preloaded_batch is None:
+            logging.info("Waiting for batch to be preloaded...")
+            preloaded_batch_condition.wait()
 
-    batch_filename, targets_filename = preloaded_batch
-    preloaded_batch = None
+        batch_filename, targets_filename = preloaded_batch
+        preloaded_batch = None
 
     preload_batch()
 
