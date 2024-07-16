@@ -4,7 +4,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import model_args, tokenizer, batch_size, initialize_distributed_environment
+from common import model_args, tokenizer, batch_size, initialize_distributed_environment, TENSOR_VERSION_INTERVAL
 from datasets import load_dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
@@ -100,8 +100,11 @@ def initialize_distributed_environment_and_globals():
     initialize_model_parallel(model_parallel_size_=1)
     logging.info("Environment and global variables initialized")
 
-def initialize_tensor(name, random_init=True):
-    file_path = os.path.join(state_dir, f'{name}.pt')
+def initialize_tensor(name, sync_version_number=None, random_init=True):
+    if sync_version_number is None:
+        sync_version_number = int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
+    
+    file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
     if os.path.exists(file_path):
         return
 
@@ -136,7 +139,7 @@ def initialize_tensor(name, random_init=True):
         tensor = torch.cat([tensor.view(-1) for tensor in tensors])
 
     torch.save(tensor, file_path)
-    block_timestamps[name] = 0
+    block_timestamps[name] = sync_version_number
     save_block_timestamps(block_timestamps)
 
 def initialize_all_tensors():
@@ -199,7 +202,6 @@ def preload_batch():
             break
 
     if batch:
-        preloaded_batch = batch
         timestamp = int(time.time())
         random_suffix = random.randint(1000, 9999)
         batch_filename = f'batch_{timestamp}_{random_suffix}.json'
@@ -209,7 +211,10 @@ def preload_batch():
             file.write(json.dumps(batch))
         with open(os.path.join(temp_dir, targets_filename), 'w') as file:
             file.write(json.dumps(targets))
-        
+
+        # Set the global preloaded_batch variable here
+        preloaded_batch = (batch_filename, targets_filename)
+
         return batch_filename, targets_filename
 
 def clean_up_state_directory():
@@ -264,7 +269,7 @@ def get_batch():
         logging.error("No preloaded batch available")
         return jsonify({"error": "No preloaded batch available"}), 404
 
-    batch_filename, targets_filename = preload_batch()
+    batch_filename, targets_filename = preloaded_batch
     preloaded_batch = None
 
     try:
@@ -282,20 +287,21 @@ def update_state():
     data = request.get_json()
     tensor_name = data.get('tensor_name')
     result_url = data.get('result_url')
-    timestamp = data.get('timestamp')
 
-    logging.debug(f"Received tensor_name: {tensor_name}, result_url: {result_url}, timestamp: {timestamp}")
+    logging.debug(f"Received tensor_name: {tensor_name}, result_url: {result_url}")
 
-    if not tensor_name or not result_url or timestamp is None:
-        logging.error("Missing tensor_name, result_url, or timestamp in /update_state request")
-        return jsonify({'error': 'Missing tensor_name, result_url, or timestamp'}), 400
+    if not tensor_name or not result_url:
+        logging.error("Missing tensor_name or result_url in /update_state request")
+        return jsonify({'error': 'Missing tensor_name or result_url'}), 400
+
+    future_version_number = (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
 
     try:
         with requests.Session() as session:
             tensor_data = fetch(session, result_url)
 
         tensor = torch.load(BytesIO(tensor_data), map_location=device)  # Load tensor to the correct device
-        state_file_path = os.path.join(state_dir, f'{tensor_name}.pt')
+        state_file_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
         
         if os.path.exists(state_file_path):
             current_tensor = torch.load(state_file_path, map_location=device)  # Load existing tensor to the correct device
@@ -305,11 +311,11 @@ def update_state():
 
         torch.save(updated_tensor, state_file_path)
 
-        block_timestamps[tensor_name] = timestamp
+        block_timestamps[tensor_name] = future_version_number
         save_block_timestamps(block_timestamps)
 
         logging.debug(f"Updated state for {tensor_name}")
-        return jsonify({'status': 'success'})
+        return jsonify({'status': 'success', 'version_number': future_version_number})
     except requests.RequestException as e:
         logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}")
     except Exception as e:
@@ -323,13 +329,17 @@ def latest_state():
     if not tensor_name:
         return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-    state_file_path = os.path.join(state_dir, f'{tensor_name}.pt')
+    latest_version_number = request.args.get('version_number')
+    if latest_version_number is None:
+        latest_version_number = block_timestamps.get(tensor_name, 0)
+    state_file_path = os.path.join(state_dir, f'{tensor_name}_{latest_version_number}.pt')
+    
     if not os.path.exists(state_file_path):
         return jsonify({'error': 'Tensor not found'}), 404
 
     try:
         response = send_file(state_file_path, mimetype='application/octet-stream')
-        response.headers['timestamp'] = block_timestamps.get(tensor_name, 0)
+        response.headers['version_number'] = block_timestamps.get(tensor_name, 0)
         return response
     except Exception as e:
         logging.error(f"Error in /latest_state: {e}", exc_info=True)
@@ -342,8 +352,8 @@ def tensor_block_timestamp():
     if not tensor_name:
         return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-    timestamp = block_timestamps.get(tensor_name, 0)
-    return jsonify({'timestamp': timestamp})
+    latest_version_number = block_timestamps.get(tensor_name, 0)
+    return jsonify({'version_number': latest_version_number})
 
 @app.route('/tensor_size', methods=['GET'])
 def get_tensor_size():
@@ -379,9 +389,9 @@ def upload_tensor():
 
     tensor_file = request.files['tensor']
     label = request.form['label']
-    timestamp = int(time.time())
+    update_version_number = int(time.time())
     random_suffix = random.randint(1000, 9999)
-    filename = secure_filename(f'{label}_{timestamp}_{random_suffix}.pt')
+    filename = secure_filename(f'{label}_{update_version_number}_{random_suffix}.pt')
     local_file_path = os.path.join(temp_dir, filename)
 
     logging.debug("Receiving tensor upload...")
@@ -396,20 +406,15 @@ def upload_tensor():
 
     tensor_name = filename.split('.')[0]
 
-    try:
-        block_timestamp = int(filename.split('_')[1])
-    except (IndexError, ValueError):
-        block_timestamp = 0
-
     # Save the tensor state
     tensor_state = torch.load(local_file_path)
     torch.save(tensor_state, os.path.join(temp_dir, filename))  # Use filename directly
 
-    # Update block timestamp
-    block_timestamps[tensor_name] = block_timestamp
+    # Update block version_number
+    block_timestamps[tensor_name] = update_version_number
     save_block_timestamps(block_timestamps)
 
-    logging.debug(f"Tensor {tensor_name} uploaded and saved with block timestamp {block_timestamp}")
+    logging.debug(f"Tensor {tensor_name} uploaded and saved with version_number {update_version_number}")
 
     return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'{BASE_URL}/data/state/temp/{filename}'}), 200
 

@@ -129,14 +129,10 @@ if __name__ == "__main__":
             print(f"Error deleting file {pt_file}: {e}")
     gradients = os.path.join(args.local_storage_dir, 'gradients')
     delete_directory_contents(gradients)
-    '''
-    ## Delete the state directory and its contents
-    state_dir = os.path.join(args.local_storage_dir, 'state')
-    delete_directory_contents(state_dir)
-    '''
     state_dir = os.path.join(args.local_storage_dir, 'state')
     temp_dir = os.path.join(state_dir, 'temp')
-    delete_directory_contents(temp_dir)
+    #delete_directory_contents(temp_dir)
+    delete_directory_contents(state_dir)
     # Start Flask server in a separate thread
     flask_thread = threading.Thread(target=lambda: app.run(port=5002))
     flask_thread.start()

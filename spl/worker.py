@@ -12,7 +12,7 @@ from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
-from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors, transact_with_contract_function
+from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors, transact_with_contract_function, TENSOR_VERSION_INTERVAL
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional, Tuple
 from io import BytesIO
@@ -107,6 +107,22 @@ final_logits_norm = None
 
 # Global variable for TransformerBlock layer
 transformer_layer = None
+
+class TaskQueue:
+    def __init__(self):
+        self.queue = []
+        self.current_version = None
+
+    def add_task(self, task):
+        self.queue.append(task)
+        self.queue.sort(key=lambda t: t['version_number'])  # Sort tasks by version_number
+
+    def get_next_task(self):
+        if self.queue and (self.current_version is None or self.queue[0]['version_number'] <= self.current_version):
+            return self.queue.pop(0)
+        return None
+
+task_queue = TaskQueue()
 
 def block_to_tensor(block: TransformerBlock) -> torch.Tensor:
     params = list(block.parameters())
@@ -276,6 +292,30 @@ def handle_event(event):
     task_params_bytes = task.params
     task_params = json.loads(task_params_bytes.decode('utf-8'))
 
+    task_queue.add_task({
+        'task_id': task_id,
+        'task_params': task_params,
+        'version_number': task_params.get('version_number')
+    })
+
+    process_tasks()
+
+def process_tasks():
+    global task_queue
+
+    next_task = task_queue.get_next_task()
+    if not next_task:
+        return
+
+    if (task_queue.current_version is None
+        or next_task['version_number'] != task_queue.current_version):
+        sync_tensors(next_task['version_number'])
+        task_queue.current_version = next_task['version_number']
+
+    task_id = next_task['task_id']
+    task_params = next_task['task_params']
+    
+    # Process the task...
     batch = None
     if 'batch_url' in task_params:
         batch = download_json(task_params['batch_url'])
@@ -328,7 +368,6 @@ def handle_event(event):
         result['result_url'] = upload_tensor(tensors['logits_grad'], 'loss_logits_grad')
         logging.info(3)
 
-    result['last_timestamp'] = latest_block_timestamps[task_type]
     submit_solution(task_id, result)
 
     processed_tasks.add(task_id)
@@ -336,6 +375,11 @@ def handle_event(event):
     logging.info(f"Processed task {task_id} successfully")
 
     resume_gradient_updates()
+
+def sync_tensors(sync_version_number):
+    relevant_tensors = get_relevant_tensors_for_task(args.task_type)
+    for tensor_name in relevant_tensors:
+        initialize_tensor(tensor_name, sync_version_number)
 
 def submit_solution(task_id, result):
     try:
@@ -359,12 +403,13 @@ def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates
     adam_v_url = upload_tensor(adam_v_updates, f'{layer_label}_adam_v')
     
     block_timestamp = web3.eth.get_block('latest')['timestamp']
-    
+    version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
+
     result = {
         'grads_url': grads_url,
         'adam_m_url': adam_m_url,
         'adam_v_url': adam_v_url,
-        'timestamp': block_timestamp
+        'version_number': version_number
     }
 
     if error_output is not None:
@@ -633,7 +678,6 @@ def loss_task(logits, targets):
         logging.info(f"Max probability tokens shape: {max_prob_tokens.shape}")
         logging.info(f"Loss: {loss.item()}")
 
-
 def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
     beta1hat = beta1 * (1 - beta1**(step - 1)) / (1 - beta1**step)
     beta2hat = beta2 * (1 - beta2**(step - 1)) / (1 - beta2**step)
@@ -754,25 +798,13 @@ def report_sync_status(status):
     except requests.RequestException as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-def initialize_tensor(tensor_name, force=False):
+def initialize_tensor(tensor_name, sync_version_number=None):
     global embedding, final_logits_layer, final_logits_norm, transformer_layer
 
     try:
-        url = os.path.join(args.sot_url, 'tensor_block_timestamp')
-        logging.info(f"Checking block timestamp for tensor {tensor_name} from {url}")
-        response = requests.get(url, params={'tensor_name': tensor_name})
-        response.raise_for_status()
-        timestamp_info = response.json()
-        remote_timestamp = timestamp_info.get('timestamp', 0)
-        local_timestamp = latest_block_timestamps.get(tensor_name, 0)
-
-        if not force and local_timestamp >= remote_timestamp:
-            logging.info(f"Tensor {tensor_name} is already up-to-date with timestamp {local_timestamp}")
-            return
-
-        url = os.path.join(args.sot_url, 'latest_state')
+        url = f"{args.sot_url}/latest_state"
         logging.info(f"Loading tensor {tensor_name} from {url}")
-        response = requests.get(url, params={'tensor_name': tensor_name})
+        response = requests.get(url, params={'tensor_name': tensor_name, 'version_number': sync_version_number})
         response.raise_for_status()  # Raise an error for bad status codes
 
         tensor = torch.load(BytesIO(response.content))
@@ -785,7 +817,7 @@ def initialize_tensor(tensor_name, force=False):
         else:
             tensors[tensor_name] = tensor
 
-        latest_block_timestamps[tensor_name] = remote_timestamp
+        latest_block_timestamps[tensor_name] = sync_version_number
         logging.info(f"Successfully initialized tensor: {tensor_name}")
 
         if tensor_name == 'embed':
@@ -843,15 +875,12 @@ def main():
 
     logging.info("Starting tensor synchronization...")
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
-    for tensor_name in relevant_tensors:
-        initialize_tensor(tensor_name, force=True)
     reported = False
     while True:
-        if not gradient_update_paused:
-            for tensor_name in relevant_tensors:
-                initialize_tensor(tensor_name)
         deposit_stake()
         if not reported:
+            for tensor_name in relevant_tensors:
+                initialize_tensor(tensor_name)
             report_sync_status('synced')
             reported = True
         for event in event_filter.get_new_entries():
