@@ -12,7 +12,7 @@ from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
-from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, handle_contract_custom_error, load_error_selectors, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL
+from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional, Tuple
 from io import BytesIO
@@ -28,7 +28,7 @@ class SuppressTracebackFilter(logging.Filter):
             return False
         return True
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger()
 logger.addFilter(SuppressTracebackFilter())
 
@@ -271,9 +271,6 @@ async def deposit_stake():
                 logging.info(f"Approved token transaction receipt: {receipt}")
                 receipt = await async_transact_with_contract_function(web3, pool_contract, 'depositStake', args.private_key, subnet_id, args.group)
                 logging.info(f"depositStake transaction receipt: {receipt}")
-        except ContractCustomError as e:
-            error_selectors = load_error_selectors(web3)
-            handle_contract_custom_error(web3, error_selectors, e)
         except Exception as e:
             logging.error(f"Failed to deposit stake: {e}")
             raise

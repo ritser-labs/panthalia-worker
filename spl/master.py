@@ -6,7 +6,7 @@ import requests
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts, handle_contract_custom_error, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL
+from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, decode_custom_error
 from io import BytesIO
 import os
 import math
@@ -87,8 +87,6 @@ class Master:
                     await asyncio.sleep(1)  # Wait for a while before retrying
 
             raise RuntimeError("Failed to submit task after multiple attempts")
-        except ContractCustomError as e:
-            handle_contract_custom_error(self.web3, self.error_selectors, e)
         except Exception as e:
             logging.error(f"Error submitting task: {e}")
             raise
@@ -216,18 +214,6 @@ class Master:
         except Exception as e:
             logging.error(f"Error removing solver stake: {e}")
             raise
-
-    async def log_transaction_failure(self, receipt):
-        try:
-            tx = self.web3.eth.get_transaction(receipt['transactionHash'])
-            error_message = self.web3.eth.call({
-                'to': tx['to'],
-                'data': tx['input']
-            }, receipt['blockNumber'])
-            decoded_error_message = self.web3.codec.decode_abi(['string'], error_message)
-            logging.error(f"Transaction failed with error message: {decoded_error_message}")
-        except (TransactionNotFound, ValueError) as e:
-            logging.error(f"Error retrieving transaction details: {e}")
 
     async def get_task_result(self, task_type, task_id):
         try:
@@ -371,7 +357,7 @@ class Master:
     async def update_sot(self, tensor_name, result):
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{self.sot_url}/update_state", json={'tensor_name': tensor_name, 'result_url': result['grads_url']}) as response:
-                if response.status_code != 200:
+                if response.status != 200:  # Use 'status' instead of 'status_code'
                     logging.error(f"Failed to update SOT for {tensor_name}: {await response.text()}")
                 else:
                     logging.info(f"Updated SOT for {tensor_name} with result: {result}")
@@ -389,12 +375,12 @@ class Master:
     async def update_adam_state(self, tensor_name, adam_m_url, adam_v_url):
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_m', 'result_url': adam_m_url}) as response:
-                if response.status_code != 200:
+                if response.status != 200:
                     logging.error(f"Failed to update Adam state for {tensor_name}: {await response.text()}")
                 else:
                     logging.info(f"Updated Adam state for {tensor_name}")
             async with session.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_v', 'result_url': adam_v_url}) as response:
-                if response.status_code != 200:
+                if response.status != 200:
                     logging.error(f"Failed to update Adam state for {tensor_name}: {await response.text()}")
                 else:
                     logging.info(f"Updated Adam state for {tensor_name}")

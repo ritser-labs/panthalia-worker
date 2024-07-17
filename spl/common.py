@@ -109,6 +109,7 @@ def load_error_selectors(web3, abi_dir='abis'):
                 with open(contract_path, 'r') as abi_file:
                     abi = json.load(abi_file).get('abi', [])
                     extract_error_selectors(abi, web3, error_selectors)
+    logging.info(f"Loaded error selectors: {error_selectors}")
     return error_selectors
 
 def load_contracts(web3, subnet_addresses):
@@ -163,37 +164,27 @@ def initialize_distributed_environment(backend, master_addr='localhost', master_
     if not dist.is_initialized():
         dist.init_process_group(backend=backend)
 
-def handle_contract_custom_error(web3, error_selectors, e):
+
+def decode_custom_error(web3, error_selectors, error_data):
     try:
-        error_bytes = bytes.fromhex(e.data[2:])
+        if error_data.startswith("0x"):
+            error_data = error_data[2:]
+
+        logging.debug(f"Error data without 0x prefix: {error_data}")
+
+        error_bytes = bytes.fromhex(error_data)
         selector = '0x' + error_bytes[:4].hex().lower()
         data = error_bytes[4:]
+
+        logging.debug(f"Extracted selector: {selector}")
+        logging.debug(f"Extracted data: {data.hex()}")
 
         if selector in error_selectors:
             error_info = error_selectors[selector]
             error_name = error_info['name']
             inputs = error_info['inputs']
+            logging.debug(f"Matched error selector {selector} with error {error_name}")
             decoded_params = web3.codec.decode_abi([input['type'] for input in inputs], data)
-            param_str = ', '.join(f"{input['name']}: {value}" for input, value in zip(inputs, decoded_params))
-            logging.error(f"Contract Custom Error {error_name}: {param_str}")
-            raise ValueError(f"Contract Custom Error {error_name}: {param_str}")
-        else:
-            logging.error(f"Unknown error with selector {selector} and data {data.hex()}")
-            raise ValueError(f"Unknown error with selector {selector} and data {data.hex()}")
-    except Exception as decode_err:
-        logging.error(f"Failed to decode error data: {e.data}. Error: {decode_err}")
-        raise
-
-def decode_custom_error(web3, error_selectors, error_bytes):
-    try:
-        selector = '0x' + error_bytes[:4].hex().lower()
-        data = error_bytes[4:]
-
-        if selector in error_selectors:
-            error_info = error_selectors[selector]
-            error_name = error_info['name']
-            inputs = error_info['inputs']
-            decoded_params = web3.codec.decode([input['type'] for input in inputs], data)
             param_str = ', '.join(f"{input['name']}: {value}" for input, value in zip(inputs, decoded_params))
             return f"Error {error_name}: {param_str}"
         else:
@@ -201,22 +192,6 @@ def decode_custom_error(web3, error_selectors, error_bytes):
     except Exception as e:
         logging.error(f"Error decoding message chunk: {e}")
         raise
-
-async def log_transaction_failure(web3, tx_hash):
-    try:
-        tx = web3.eth.get_transaction(tx_hash)
-        tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-        
-        if tx_receipt['status'] == 0:
-            error_message = web3.eth.call({
-                'to': tx['to'],
-                'data': tx['input']
-            }, tx_receipt.blockNumber)
-            decoded_error_message = web3.codec.decode_abi(['string'], error_message)
-            logging.error(f"Transaction failed with error message: {decoded_error_message}")
-    except Exception as e:
-        logging.error(f"Failed to log transaction failure: {e}")
-
 
 async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, gas=500000):
     account = web3.eth.account.from_key(private_key)
@@ -240,21 +215,19 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
             tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
             receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
 
-            if receipt['status'] == 0:
-                await log_transaction_failure(web3, tx_hash)
-                raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}")
 
             return receipt
         except Web3Module.exceptions.ContractCustomError as e:
             error_selectors = load_error_selectors(web3)
-            handle_contract_custom_error(web3, error_selectors, e)
-            raise
+            decoded_error_message = decode_custom_error(web3, error_selectors, e.data['data'])
+            logging.error(f"Contract Custom Error: {decoded_error_message}")
+            raise ValueError(f"Contract Custom Error: {decoded_error_message}")
         except ValueError as e:
             if 'nonce too low' in str(e) or 'replacement transaction underpriced' in str(e):
                 logging.error(f"Nonce too low or replacement transaction underpriced, retrying with higher nonce...")
                 await asyncio.sleep(1)  # Wait for a while before retrying
             else:
-                await log_transaction_failure(web3, tx_hash)
+                logging.error(f"Transaction error: {e}")
                 raise
         except Exception as e:
             logging.error(f"Unexpected error during transaction: {e}")
