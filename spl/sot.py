@@ -298,6 +298,13 @@ def update_state():
         tensor = torch.load(BytesIO(tensor_data), map_location=device)  # Load tensor to the correct device
         state_file_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
         
+        if not os.path.exists(state_file_path):
+            current_version_number = block_timestamps.get(tensor_name, 0)
+            current_state_file_path = os.path.join(state_dir, f'{tensor_name}_{current_version_number}.pt')
+            if os.path.exists(current_state_file_path):
+                current_tensor = torch.load(current_state_file_path, map_location=device)
+                torch.save(current_tensor, state_file_path)
+
         if os.path.exists(state_file_path):
             current_tensor = torch.load(state_file_path, map_location=device)  # Load existing tensor to the correct device
             updated_tensor = current_tensor + tensor  # Perform addition without in-place operation
