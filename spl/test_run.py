@@ -11,6 +11,7 @@ from web3 import Web3
 from eth_account import Account
 import glob
 import shutil
+import signal
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -139,6 +140,11 @@ def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, am
         web3.eth.send_raw_transaction(signed_tx.rawTransaction)
         web3.eth.wait_for_transaction_receipt(signed_tx.hash)
 
+def terminate_processes(processes):
+    for process in processes:
+        process.terminate()
+        process.wait()
+
 if __name__ == "__main__":
     # Delete all .pt files in the state directory except for the latest version for each tensor
     state_dir = os.path.join(args.local_storage_dir, 'state')
@@ -201,7 +207,6 @@ if __name__ == "__main__":
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
 
-
     # Print SOT service initialization stage
     print("Starting SOT service...")
 
@@ -254,46 +259,46 @@ if __name__ == "__main__":
             worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
         print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
 
-    # Wait for all workers to sync
-    if not wait_for_workers_to_sync(num_wallets):
-        print("Error: Not all workers synced within the timeout period.")
-        for p in worker_processes:
-            p.terminate()
-            p.wait()
+    try:
+        # Wait for all workers to sync
+        if not wait_for_workers_to_sync(num_wallets):
+            print("Error: Not all workers synced within the timeout period.")
+            terminate_processes(worker_processes)
+            sot_process.terminate()
+            exit(1)
+
+        # Print master initialization stage
+        print("Starting master process...")
+
+        # Start master.py
+        master_command = [
+            'python', 'master.py',
+            '--rpc_url', args.rpc_url,
+            '--private_key', args.private_key,
+            '--sot_url', args.sot_url,
+            '--subnet_addresses', args.subnet_addresses,
+        ]
+        if args.detailed_logs:
+            master_command.append('--detailed_logs')
+        master_process = subprocess.Popen(master_command)
+        print(f"Started master process with command: {' '.join(master_command)}")
+
+        # Print master started stage
+        print("Master process started.")
+
+        # Wait for the master process to complete
+        master_process.wait()
+
+    finally:
+        # Terminate all worker processes
+        terminate_processes(worker_processes)
+
+        # Terminate the SOT process
         sot_process.terminate()
-        exit(1)
+        sot_process.wait()
 
-    # Print master initialization stage
-    print("Starting master process...")
+        # Print final stage
+        print("Test run completed.")
 
-    # Start master.py
-    master_command = [
-        'python', 'master.py',
-        '--rpc_url', args.rpc_url,
-        '--private_key', args.private_key,
-        '--sot_url', args.sot_url,
-        '--subnet_addresses', args.subnet_addresses,
-    ]
-    if args.detailed_logs:
-        master_command.append('--detailed_logs')
-    master_process = subprocess.Popen(master_command)
-    print(f"Started master process with command: {' '.join(master_command)}")
-
-    # Print master started stage
-    print("Master process started.")
-
-    # Wait for the master process to complete
-    master_process.wait()
-
-    # Terminate all worker processes
-    for p in worker_processes:
-        p.terminate()
-        p.wait()
-
-    # Terminate the SOT process
-    sot_process.terminate()
-
-    # Print final stage
-    print("Test run completed.")
-
-    master_process.terminate()
+        master_process.terminate()
+        master_process.wait()

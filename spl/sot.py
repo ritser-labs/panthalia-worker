@@ -298,6 +298,13 @@ def update_state():
         tensor = torch.load(BytesIO(tensor_data), map_location=device)  # Load tensor to the correct device
         state_file_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
         
+        if not os.path.exists(state_file_path):
+            current_version_number = block_timestamps.get(tensor_name, 0)
+            current_state_file_path = os.path.join(state_dir, f'{tensor_name}_{current_version_number}.pt')
+            if os.path.exists(current_state_file_path):
+                current_tensor = torch.load(current_state_file_path, map_location=device)
+                torch.save(current_tensor, state_file_path)
+
         if os.path.exists(state_file_path):
             current_tensor = torch.load(state_file_path, map_location=device)  # Load existing tensor to the correct device
             updated_tensor = current_tensor + tensor  # Perform addition without in-place operation
@@ -327,14 +334,38 @@ def latest_state():
     latest_version_number = request.args.get('version_number')
     if latest_version_number is None:
         latest_version_number = block_timestamps.get(tensor_name, 0)
-    state_file_path = os.path.join(state_dir, f'{tensor_name}_{latest_version_number}.pt')
-    
+    else:
+        latest_version_number = int(latest_version_number)
+
+    # Directory where tensor files are stored
+    tensor_files = [f for f in os.listdir(state_dir) if f.startswith(tensor_name)]
+
+    # Extract version numbers from file names
+    version_numbers = []
+    for file in tensor_files:
+        if file.startswith(tensor_name):
+            parts = file.rsplit('_', 1)
+            if len(parts) == 2 and parts[0] == tensor_name:
+                try:
+                    version = int(parts[1].split('.')[0])
+                    if version <= latest_version_number:
+                        version_numbers.append(version)
+                except ValueError:
+                    continue
+
+    if not version_numbers:
+        return jsonify({'error': 'Tensor not found'}), 404
+
+    # Get the latest available version number
+    latest_available_version_number = max(version_numbers)
+    state_file_path = os.path.join(state_dir, f'{tensor_name}_{latest_available_version_number}.pt')
+
     if not os.path.exists(state_file_path):
         return jsonify({'error': 'Tensor not found'}), 404
 
     try:
         response = send_file(state_file_path, mimetype='application/octet-stream')
-        response.headers['version_number'] = block_timestamps.get(tensor_name, 0)
+        response.headers['version_number'] = latest_available_version_number
         return response
     except Exception as e:
         logging.error(f"Error in /latest_state: {e}", exc_info=True)
