@@ -6,7 +6,7 @@ import requests
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, decode_custom_error
+from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, decode_custom_error, wait_for_state_change
 from io import BytesIO
 import os
 import math
@@ -62,7 +62,7 @@ class Master:
 
             for _ in range(5):  # Retry up to 5 times
                 try:
-                    await self.wait_for_state_change(PoolState.Unlocked.value)
+                    await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value)
                     receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.account._private_key, encoded_params, gas=1000000)
                     logging.info(f"submitTaskRequest transaction receipt: {receipt}")
 
@@ -96,7 +96,7 @@ class Master:
             if self.pool.functions.state().call() != PoolState.Unlocked.value:
                 return self.pool.functions.currentSelectionId().call()
 
-            await self.wait_for_state_change(PoolState.Unlocked.value)
+            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value)
             logging.info("Submitting selection request")
 
             receipt = await async_transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.account._private_key, gas=500000)
@@ -120,71 +120,6 @@ class Master:
             logging.error(f"Error submitting selection request: {e}")
             raise
 
-    async def trigger_lock_global_state(self):
-        unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
-        last_state_change_time = self.pool.functions.lastStateChangeTime().call()
-        current_time = time.time()
-        remaining_time = (last_state_change_time + unlocked_min_period) - current_time
-
-        if remaining_time > 0:
-            logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
-            await asyncio.sleep(remaining_time)
-
-        try:
-            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'lockGlobalState', self.account._private_key, gas=500000)
-            logging.info(f"lockGlobalState transaction receipt: {receipt}")
-        except Exception as e:
-            logging.error(f"Error triggering lock global state: {e}")
-            raise
-
-    async def trigger_remove_global_lock(self):
-        selections_finalizing_min_period = self.pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
-        last_state_change_time = self.pool.functions.lastStateChangeTime().call()
-        current_time = time.time()
-        remaining_time = (last_state_change_time + selections_finalizing_min_period) - current_time
-
-        if remaining_time > 0:
-            logging.info(f"Waiting for {remaining_time} seconds until SELECTIONS_FINALIZING_MIN_PERIOD is over")
-            await asyncio.sleep(remaining_time)
-
-        try:
-            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'removeGlobalLock', self.account._private_key, gas=500000)
-            logging.info(f"removeGlobalLock transaction receipt: {receipt}")
-        except Exception as e:
-            logging.error(f"Error triggering remove global lock: {e}")
-            raise
-
-    async def wait_for_state_change(self, target_state):
-        max_retries = 10
-        retries = 0
-        while retries < max_retries:
-            try:
-                current_state = PoolState(self.pool.functions.state().call())
-                logging.info(f"Current pool state: {current_state.name}, target state: {PoolState(target_state).name}")
-
-                if current_state == PoolState(target_state):
-                    return
-
-                if current_state == PoolState.Unlocked:
-                    logging.info("Triggering lockGlobalState to change state to Locked")
-                    await self.trigger_lock_global_state()
-                elif current_state == PoolState.Locked:
-                    logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
-                elif current_state == PoolState.SelectionsFinalizing:
-                    logging.info("Triggering removeGlobalLock to change state to Unlocked")
-                    await self.trigger_remove_global_lock()
-                else:
-                    logging.info(f"Waiting for the pool state to change to {PoolState(target_state).name}")
-                    await asyncio.sleep(5)
-
-                retries += 1
-            except Exception as e:
-                logging.error(f"Error during wait for state change: {e}. Retrying...")
-                retries += 1
-                await asyncio.sleep(1)  # Wait for a while before retrying
-
-        raise RuntimeError(f"Failed to change state to {PoolState(target_state).name} after multiple attempts")
-
     async def fulfill_random_words(self, vrf_request_id):
         try:
             receipt = await async_transact_with_contract_function(self.web3, self.vrf_coordinator, 'fulfillRandomWords', self.account._private_key, vrf_request_id, gas=500000)
@@ -197,7 +132,7 @@ class Master:
         try:
             logging.info(f"Selecting solver for task ID: {task_id}")
 
-            await self.wait_for_state_change(PoolState.SelectionsFinalizing.value)
+            await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value)
             receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id, gas=1000000)
             logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
         except Exception as e:
@@ -208,7 +143,7 @@ class Master:
         try:
             logging.info(f"Removing solver stake for task ID: {task_id}")
 
-            await self.wait_for_state_change(PoolState.Unlocked.value)
+            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value)
             receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.account._private_key, task_id, gas=1000000)
             logging.info(f"Iteration {iteration_number} - removeSolverStake transaction receipt: {receipt}")
         except Exception as e:

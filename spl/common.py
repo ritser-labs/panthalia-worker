@@ -324,3 +324,69 @@ def get_learning_hyperparameters(current_iteration):
         't': t,  # Add the current iteration as 't'
         'accumulation_steps': 1  # Set the accumulation steps to 1
     }
+
+async def wait_for_state_change(web3, pool, target_state):
+    max_retries = 10
+    retries = 0
+    while retries < max_retries:
+        try:
+            current_state = PoolState(pool.functions.state().call())
+            logging.info(f"Current pool state: {current_state.name}, target state: {PoolState(target_state).name}")
+
+            if current_state == PoolState(target_state):
+                return
+
+            if current_state == PoolState.Unlocked:
+                logging.info("Triggering lockGlobalState to change state to Locked")
+                await trigger_lock_global_state(web3, pool)
+            elif current_state == PoolState.Locked:
+                logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
+            elif current_state == PoolState.SelectionsFinalizing:
+                logging.info("Triggering removeGlobalLock to change state to Unlocked")
+                await trigger_remove_global_lock(web3, pool)
+            else:
+                logging.info(f"Waiting for the pool state to change to {PoolState(target_state).name}")
+                await asyncio.sleep(5)
+
+            retries += 1
+        except Exception as e:
+            logging.error(f"Error during wait for state change: {e}. Retrying...")
+            retries += 1
+            await asyncio.sleep(1)  # Wait for a while before retrying
+
+    raise RuntimeError(f"Failed to change state to {PoolState(target_state).name} after multiple attempts")
+
+async def trigger_lock_global_state(web3, pool):
+    unlocked_min_period = pool.functions.UNLOCKED_MIN_PERIOD().call()
+    last_state_change_time = pool.functions.lastStateChangeTime().call()
+    current_time = time.time()
+    remaining_time = (last_state_change_time + unlocked_min_period) - current_time
+
+    if remaining_time > 0:
+        logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
+        await asyncio.sleep(remaining_time)
+
+    try:
+        receipt = await async_transact_with_contract_function(web3, pool, 'lockGlobalState', self.account._private_key, gas=500000)
+        logging.info(f"lockGlobalState transaction receipt: {receipt}")
+    except Exception as e:
+        logging.error(f"Error triggering lock global state: {e}")
+        raise
+
+async def trigger_remove_global_lock(web3, pool):
+    selections_finalizing_min_period = pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
+    last_state_change_time = pool.functions.lastStateChangeTime().call()
+    current_time = time.time()
+    remaining_time = (last_state_change_time + selections_finalizing_min_period) - current_time
+
+    if remaining_time > 0:
+        logging.info(f"Waiting for {remaining_time} seconds until SELECTIONS_FINALIZING_MIN_PERIOD is over")
+        await asyncio.sleep(remaining_time)
+
+    try:
+        receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', self.account._private_key, gas=500000)
+        logging.info(f"removeGlobalLock transaction receipt: {receipt}")
+    except Exception as e:
+        logging.error(f"Error triggering remove global lock: {e}")
+        raise
+

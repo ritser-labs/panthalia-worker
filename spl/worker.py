@@ -12,7 +12,7 @@ from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
-from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL
+from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, PoolState
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional, Tuple
 from io import BytesIO
@@ -267,6 +267,7 @@ async def deposit_stake():
     if len(stakes_deposited) < max_stakes:
         try:
             for _ in range(max_stakes - len(stakes_deposited)):
+                await wait_for_state_change(web3, pool_contract, PoolState.Unlocked.value)
                 receipt = await async_transact_with_contract_function(web3, token_contract, 'approve', args.private_key, args.pool_address, stake_amount)
                 logging.info(f"Approved token transaction receipt: {receipt}")
                 receipt = await async_transact_with_contract_function(web3, pool_contract, 'depositStake', args.private_key, subnet_id, args.group)
