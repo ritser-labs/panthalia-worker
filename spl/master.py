@@ -269,10 +269,23 @@ class Master:
 
     async def main(self, max_simultaneous_iterations):
         logging.info("Starting main process")
-        tasks = []
+        tasks = set()
+
         for i in range(max_simultaneous_iterations):
-            tasks.append(asyncio.create_task(self.main_iteration(self.iteration + i)))
-        await asyncio.gather(*tasks)
+            tasks.add(asyncio.create_task(self.main_iteration(self.iteration + i)))
+
+        while tasks:
+            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            for task in done:
+                try:
+                    await task
+                except Exception as e:
+                    logging.error(f"Iteration ended with error: {e}")
+
+                new_task = asyncio.create_task(self.main_iteration(self.iteration + len(tasks)))
+                tasks.add(new_task)
+
         logging.info("All iterations completed")
 
     async def get_latest_model_params(self, current_version_number):
