@@ -194,8 +194,9 @@ class Master:
         logging.info("Starting main process")
         tasks = set()
 
-        for i in range(max_simultaneous_iterations):
-            tasks.add(asyncio.create_task(self.main_iteration(self.iteration + i)))
+        for _ in range(max_simultaneous_iterations):
+            tasks.add(asyncio.create_task(self.main_iteration(self.iteration)))
+            self.iteration += 1
 
         while tasks:
             done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -206,8 +207,9 @@ class Master:
                 except Exception as e:
                     logging.error(f"Iteration ended with error: {e}")
 
-                new_task = asyncio.create_task(self.main_iteration(self.iteration + len(tasks)))
+                new_task = asyncio.create_task(self.main_iteration(self.iteration))
                 tasks.add(new_task)
+                self.iteration += 1
 
         logging.info("All iterations completed")
 
