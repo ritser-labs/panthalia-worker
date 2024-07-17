@@ -267,9 +267,9 @@ async def deposit_stake():
     if len(stakes_deposited) < max_stakes:
         try:
             for _ in range(max_stakes - len(stakes_deposited)):
-                await wait_for_state_change(web3, pool_contract, PoolState.Unlocked.value)
                 receipt = await async_transact_with_contract_function(web3, token_contract, 'approve', args.private_key, args.pool_address, stake_amount)
                 logging.info(f"Approved token transaction receipt: {receipt}")
+                await wait_for_state_change(web3, pool_contract, PoolState.Unlocked.value, args.private_key)
                 receipt = await async_transact_with_contract_function(web3, pool_contract, 'depositStake', args.private_key, subnet_id, args.group)
                 logging.info(f"depositStake transaction receipt: {receipt}")
         except Exception as e:

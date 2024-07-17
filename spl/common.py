@@ -215,13 +215,13 @@ def decode_revert_reason(return_value):
         return "Could not decode revert reason"
 
 # Async function to transact with contract
-async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, gas=500000):
+async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, gas=500000, attempts=5):
     account = web3.eth.account.from_key(private_key)
     gas_price = web3.eth.gas_price
 
     function = getattr(contract.functions, function_name)(*args)
 
-    for _ in range(5):  # Retry up to 5 times
+    for _ in range(attempts):  # Retry up to 5 times
         try:
             nonce = web3.eth.get_transaction_count(account.address)
             tx_params = {
@@ -325,7 +325,7 @@ def get_learning_hyperparameters(current_iteration):
         'accumulation_steps': 1  # Set the accumulation steps to 1
     }
 
-async def wait_for_state_change(web3, pool, target_state):
+async def wait_for_state_change(web3, pool, target_state, private_key):
     max_retries = 10
     retries = 0
     while retries < max_retries:
@@ -334,16 +334,20 @@ async def wait_for_state_change(web3, pool, target_state):
             logging.info(f"Current pool state: {current_state.name}, target state: {PoolState(target_state).name}")
 
             if current_state == PoolState(target_state):
+                logging.info(f'Pool state changed to {PoolState(target_state).name}')
                 return
 
             if current_state == PoolState.Unlocked:
                 logging.info("Triggering lockGlobalState to change state to Locked")
-                await trigger_lock_global_state(web3, pool)
+                await trigger_lock_global_state(web3, pool, private_key)
             elif current_state == PoolState.Locked:
-                logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
+                #logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
+                # Todo in prod you just wait instead of calling the function
+                logging.info("Triggering finalizeSelections to change state to SelectionsFinalizing")
+                await finalize_selections(web3, pool, private_key)
             elif current_state == PoolState.SelectionsFinalizing:
                 logging.info("Triggering removeGlobalLock to change state to Unlocked")
-                await trigger_remove_global_lock(web3, pool)
+                await trigger_remove_global_lock(web3, pool, private_key)
             else:
                 logging.info(f"Waiting for the pool state to change to {PoolState(target_state).name}")
                 await asyncio.sleep(5)
@@ -356,7 +360,14 @@ async def wait_for_state_change(web3, pool, target_state):
 
     raise RuntimeError(f"Failed to change state to {PoolState(target_state).name} after multiple attempts")
 
-async def trigger_lock_global_state(web3, pool):
+async def finalize_selections(web3, pool, private_key):
+    vrf_coordinator_address = pool.functions.vrfCoordinator().call()
+    vrf_coordinator = web3.eth.contract(address=vrf_coordinator_address, abi=load_abi('MockVRFCoordinator'))
+    vrf_request_id = pool.functions.vrfRequestId().call()
+    receipt = await async_transact_with_contract_function(web3, vrf_coordinator, 'fulfillRandomWords', private_key, vrf_request_id, gas=500000, attempts=1)
+    logging.info(f"fulfillRandomWords transaction receipt: {receipt}")
+
+async def trigger_lock_global_state(web3, pool, private_key):
     unlocked_min_period = pool.functions.UNLOCKED_MIN_PERIOD().call()
     last_state_change_time = pool.functions.lastStateChangeTime().call()
     current_time = time.time()
@@ -367,13 +378,13 @@ async def trigger_lock_global_state(web3, pool):
         await asyncio.sleep(remaining_time)
 
     try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'lockGlobalState', self.account._private_key, gas=500000)
+        receipt = await async_transact_with_contract_function(web3, pool, 'lockGlobalState', private_key, gas=500000)
         logging.info(f"lockGlobalState transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error triggering lock global state: {e}")
         raise
 
-async def trigger_remove_global_lock(web3, pool):
+async def trigger_remove_global_lock(web3, pool, private_key):
     selections_finalizing_min_period = pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
     last_state_change_time = pool.functions.lastStateChangeTime().call()
     current_time = time.time()
@@ -384,9 +395,8 @@ async def trigger_remove_global_lock(web3, pool):
         await asyncio.sleep(remaining_time)
 
     try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', self.account._private_key, gas=500000)
+        receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', private_key, gas=500000)
         logging.info(f"removeGlobalLock transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error triggering remove global lock: {e}")
         raise
-

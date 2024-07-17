@@ -36,8 +36,6 @@ class Master:
             raise ValueError("Pool contract address not found in any of the SubnetManager contracts.")
 
         self.pool = self.web3.eth.contract(address=self.pool_address, abi=self.abis['Pool'])
-        self.vrf_coordinator_address = self.pool.functions.vrfCoordinator().call()
-        self.vrf_coordinator = self.web3.eth.contract(address=self.vrf_coordinator_address, abi=self.abis['MockVRFCoordinator'])
 
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -62,7 +60,7 @@ class Master:
 
             for _ in range(5):  # Retry up to 5 times
                 try:
-                    await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value)
+                    await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
                     receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.account._private_key, encoded_params, gas=1000000)
                     logging.info(f"submitTaskRequest transaction receipt: {receipt}")
 
@@ -76,8 +74,6 @@ class Master:
                     selection_id = await self.submit_selection_req()
                     logging.info(f"Selection ID: {selection_id}")
 
-                    vrf_request_id = self.pool.functions.vrfRequestId().call()
-                    await self.fulfill_random_words(vrf_request_id)
                     await self.select_solver(task_type, task_id, iteration_number)
                     await self.remove_solver_stake(task_type, task_id, iteration_number)
 
@@ -96,7 +92,7 @@ class Master:
             if self.pool.functions.state().call() != PoolState.Unlocked.value:
                 return self.pool.functions.currentSelectionId().call()
 
-            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value)
+            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
             logging.info("Submitting selection request")
 
             receipt = await async_transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.account._private_key, gas=500000)
@@ -120,19 +116,11 @@ class Master:
             logging.error(f"Error submitting selection request: {e}")
             raise
 
-    async def fulfill_random_words(self, vrf_request_id):
-        try:
-            receipt = await async_transact_with_contract_function(self.web3, self.vrf_coordinator, 'fulfillRandomWords', self.account._private_key, vrf_request_id, gas=500000)
-            logging.info(f"fulfillRandomWords transaction receipt: {receipt}")
-        except Exception as e:
-            logging.error(f"Error fulfilling random words: {e}")
-            raise
-
     async def select_solver(self, task_type, task_id, iteration_number):
         try:
             logging.info(f"Selecting solver for task ID: {task_id}")
 
-            await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value)
+            await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.account._private_key)
             receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id, gas=1000000)
             logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
         except Exception as e:
@@ -143,7 +131,7 @@ class Master:
         try:
             logging.info(f"Removing solver stake for task ID: {task_id}")
 
-            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value)
+            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
             receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.account._private_key, task_id, gas=1000000)
             logging.info(f"Iteration {iteration_number} - removeSolverStake transaction receipt: {receipt}")
         except Exception as e:
