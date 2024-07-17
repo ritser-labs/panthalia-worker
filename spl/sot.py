@@ -336,14 +336,15 @@ def latest_state():
     # Extract version numbers from file names
     version_numbers = []
     for file in tensor_files:
-        parts = file.split('_')
-        if len(parts) >= 2 and parts[0] == tensor_name:
-            try:
-                version = int(parts[-1].split('.')[0])
-                if version <= latest_version_number:
-                    version_numbers.append(version)
-            except ValueError:
-                continue
+        if file.startswith(tensor_name):
+            parts = file.rsplit('_', 1)
+            if len(parts) == 2 and parts[0] == tensor_name:
+                try:
+                    version = int(parts[1].split('.')[0])
+                    if version <= latest_version_number:
+                        version_numbers.append(version)
+                except ValueError:
+                    continue
 
     if not version_numbers:
         return jsonify({'error': 'Tensor not found'}), 404
