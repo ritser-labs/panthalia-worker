@@ -193,6 +193,28 @@ def decode_custom_error(web3, error_selectors, error_data):
         logging.error(f"Error decoding message chunk: {e}")
         raise
 
+# Function to get transaction trace
+def get_debug_trace(web3, tx_hash):
+    trace = web3.manager.request_blocking('debug_traceTransaction', [tx_hash])
+    # Convert the trace AttributeDict to a dictionary
+    trace_dict = dict(trace)
+    print(json.dumps(trace_dict, indent=4))
+    return trace_dict
+
+def decode_revert_reason(return_value):
+    try:
+        # Remove the method id (first 4 bytes)
+        hex_string = return_value[8:]
+        # Convert hex to bytes
+        byte_array = bytes.fromhex(hex_string)
+        # Decode bytes to string (utf-8)
+        revert_reason = byte_array.decode('utf-8')
+        return revert_reason
+    except Exception as e:
+        logging.error(f"Error decoding revert reason: {e}")
+        return "Could not decode revert reason"
+
+# Async function to transact with contract
 async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, gas=500000):
     account = web3.eth.account.from_key(private_key)
     gas_price = web3.eth.gas_price
@@ -215,6 +237,29 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
             tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
             receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
 
+            if receipt['status'] == 0:
+                logging.debug(f"Transaction dictionary: {tx}")
+                try:
+                    error_message = web3.eth.call({
+                        'to': tx['to'],
+                        'data': tx.get('input', b'')
+                    }, receipt.blockNumber)
+                except Web3Module.exceptions.ContractLogicError as e:
+                    logging.error(f"Contract Logic Error: {e}")
+                    # Get detailed trace for the ContractLogicError
+                    trace = get_debug_trace(web3, tx_hash)
+                    logging.error(f"Transaction trace: {json.dumps(trace, indent=4)}")
+
+                    # Decode the revert reason
+                    revert_reason = decode_revert_reason(trace['returnValue'])
+                    logging.error(f"Revert reason: {revert_reason}")
+                    raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
+
+                logging.debug(f"Error message: {error_message}")
+                error_selectors = load_error_selectors(web3)
+                decoded_error_message = decode_custom_error(web3, error_selectors, error_message)
+                logging.error(f"Transaction failed with error message: {decoded_error_message}")
+                raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}")
 
             return receipt
         except Web3Module.exceptions.ContractCustomError as e:
@@ -231,8 +276,19 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                 raise
         except Exception as e:
             logging.error(f"Unexpected error during transaction: {e}")
+            # Get detailed trace for the failed transaction
+            tx_hash = signed_tx.hash.hex()
+            trace = get_debug_trace(web3, tx_hash)
+            logging.error(f"Transaction trace: {json.dumps(trace, indent=4)}")
+
+            # Decode the revert reason
+            if 'returnValue' in trace:
+                revert_reason = decode_revert_reason(trace['returnValue'])
+                logging.error(f"Revert reason: {revert_reason}")
             raise
     raise RuntimeError("Failed to send transaction after multiple attempts")
+
+
 
 def get_learning_hyperparameters(current_iteration):
     """
