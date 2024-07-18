@@ -116,16 +116,23 @@ class Master:
             logging.error(f"Error submitting selection request: {e}")
             raise
 
-    async def select_solver(self, task_type, task_id, iteration_number):
-        try:
-            logging.info(f"Selecting solver for task ID: {task_id}")
+    async def select_solver(self, task_type, task_id, iteration_number, max_retries=5, retry_delay=1):
+        for attempt in range(max_retries):
+            try:
+                logging.info(f"Selecting solver for task ID: {task_id}, attempt {attempt + 1}/{max_retries}")
 
-            await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.account._private_key)
-            receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id, gas=1000000)
-            logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
-        except Exception as e:
-            logging.error(f"Error selecting solver: {e}")
-            raise
+                await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.account._private_key)
+                receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id, gas=1000000)
+                logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
+                return
+            except Exception as e:
+                logging.error(f"Error selecting solver on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    logging.info(f"Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logging.error(f"Failed to select solver after {max_retries} attempts")
+                    raise
 
     async def remove_solver_stake(self, task_type, task_id, iteration_number):
         try:
