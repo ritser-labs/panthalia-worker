@@ -113,15 +113,21 @@ class TaskQueue:
     def __init__(self):
         self.queue = []
         self.current_version = None
+        logging.debug("Initialized TaskQueue")
 
     def add_task(self, task):
         self.queue.append(task)
         self.queue.sort(key=lambda t: t['version_number'])  # Sort tasks by version_number
+        logging.debug(f"Added task: {task}. Queue size is now {len(self.queue)}")
 
     def get_next_task(self):
-        if self.queue and (self.current_version is None or self.queue[0]['version_number'] <= self.current_version):
-            return self.queue.pop(0)
+        if self.queue:
+            task = self.queue.pop(0)
+            logging.debug(f"Retrieved task: {task}. Queue size is now {len(self.queue)}")
+            return task
+        logging.debug("No tasks in the queue or all tasks have version numbers greater than the current version.")
         return None
+
 
 task_queue = TaskQueue()
 
@@ -283,12 +289,15 @@ async def handle_event(event):
     logging.info(f"Received event for task {args.task_type} and id {task_id}")
 
     if solver.lower() != worker_address.lower():
+        logging.debug("Solver address does not match worker address. Ignoring event.")
         return
 
     task_tuple = contract.functions.getTask(task_id).call()
     task = Task(*task_tuple)
     task_params_bytes = task.params
     task_params = json.loads(task_params_bytes.decode('utf-8'))
+
+    logging.debug(f"Adding task to queue with ID: {task_id} and params: {task_params}")
 
     task_queue.add_task({
         'task_id': task_id,
@@ -298,40 +307,51 @@ async def handle_event(event):
 
     await process_tasks()
 
+
 async def process_tasks():
     global task_queue
 
+    logging.debug("Processing tasks...")
     next_task = task_queue.get_next_task()
     if not next_task:
+        logging.debug("No tasks in the queue to process.")
         return
 
     if (task_queue.current_version is None
         or next_task['version_number'] != task_queue.current_version):
+        logging.debug(f"Syncing tensors for version number: {next_task['version_number']}")
         await sync_tensors(next_task['version_number'])
         task_queue.current_version = next_task['version_number']
 
     task_id = next_task['task_id']
     task_params = next_task['task_params']
     
+    logging.debug(f"Processing task with ID: {task_id} and params: {task_params}")
+
     # Process the task...
     batch = None
     if 'batch_url' in task_params:
+        logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
         batch = download_json(task_params['batch_url'])
 
     inputs = None
     if 'inputs_url' in task_params:
+        logging.debug(f"Downloading inputs from URL: {task_params['inputs_url']}")
         inputs = download_file(task_params['inputs_url'])
 
     error = None
     if 'error_url' in task_params:
+        logging.debug(f"Downloading error from URL: {task_params['error_url']}")
         error = download_file(task_params['error_url'])
 
     targets = None
     if 'targets_url' in task_params:
+        logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
         targets = download_json(task_params['targets_url'])
 
     logits = None
     if 'logits_url' in task_params:
+        logging.debug(f"Downloading logits from URL: {task_params['logits_url']}")
         logits = download_file(task_params['logits_url'])
 
     pause_gradient_updates()
@@ -341,24 +361,31 @@ async def process_tasks():
     result = {}
     accumulation_steps = task_params.get('accumulation_steps', 1)
     if task_type == 'embed':
+        logging.debug("Executing embed task")
         embed_task(batch)
         result['result_url'] = upload_tensor(tensors['outputs'], 'embed_outputs')
     elif task_type == 'forward':
+        logging.debug(f"Executing forward task for layer {layer_idx}")
         forward_task(layer_idx, inputs)
         result['result_url'] = upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')
     elif task_type == 'backward':
+        logging.debug(f"Executing backward task for layer {layer_idx}")
         backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
         result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors[f'layer_{layer_idx}_adam_m'], tensors[f'layer_{layer_idx}_adam_v'], layer_idx)
     elif task_type == 'final_logits':
+        logging.debug("Executing final_logits task")
         final_logits_task(inputs)
         result['result_url'] = upload_tensor(tensors['logits'], 'final_logits_outputs')
     elif task_type == 'final_logits_backward':
+        logging.debug("Executing final_logits_backward task")
         final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
         result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors['final_logits_adam_m'], tensors['final_logits_adam_v'], -1)
     elif task_type == 'embed_backward':
+        logging.debug("Executing embed_backward task")
         embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
         result = upload_tensors_and_grads(None, tensors['updates'], tensors['embed_adam_m'], tensors['embed_adam_v'], -2)
     elif task_type == 'loss':
+        logging.debug("Executing loss task")
         loss_task(logits, targets)
         logging.info(1)
         result['loss'] = tensors['loss'].item()
