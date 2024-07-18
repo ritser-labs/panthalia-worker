@@ -125,7 +125,7 @@ class TaskQueue:
             task = self.queue.pop(0)
             logging.debug(f"Retrieved task: {task}. Queue size is now {len(self.queue)}")
             return task
-        logging.debug("No tasks in the queue or all tasks have version numbers greater than the current version.")
+        logging.debug("No tasks in the queue.")
         return None
 
 
