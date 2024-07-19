@@ -590,7 +590,7 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     final_logits_grads_accumulated = [grad / accumulation_steps for grad in final_logits_grads_accumulated]
     norm_grads_accumulated = [grad / accumulation_steps for grad in norm_grads_accumulated]
 
-    combined_grads = final_logits_grads_accumulated + norm_grads_accumulated
+    combined_grads = norm_grads_accumulated + final_logits_grads_accumulated
 
     updates, m_update, v_update = apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
@@ -723,7 +723,7 @@ def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0
     
     return params, m, v
 
-def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t):
+def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
     max_weight_norm = 1.0
     eps = 1e-8  # To avoid division by zero
 
@@ -747,6 +747,9 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     grads_flat = torch.cat([grad.view(-1).to(device) for grad in grads])
 
     logging.debug(f"Flattened gradients: {grads_flat}")
+
+    # Clip gradients
+    grads_flat = torch.nn.utils.clip_grad_norm_(grads_flat, clip_grad)
 
     if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
         logging.error(f"NaNs or Infs detected in gradients before AdamW update for {tensor_name}")
