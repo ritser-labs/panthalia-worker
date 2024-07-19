@@ -3,6 +3,11 @@ import json
 import logging
 import time
 import requests
+import torch
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from math import exp
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
@@ -11,6 +16,8 @@ from io import BytesIO
 import os
 import math
 import aiohttp
+import threading
+import queue
 
 logging.basicConfig(level=logging.INFO)
 
@@ -23,6 +30,8 @@ class Master:
         self.subnet_addresses = subnet_addresses
         self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, subnet_addresses)
         self.iteration = 1  # Track the number of iterations
+        self.perplexities = []  # Initialize perplexity list
+        self.perplexity_queue = queue.Queue()
 
         if not self.contracts:
             raise ValueError("SubnetManager contracts not found. Please check the subnet_addresses configuration.")
@@ -39,6 +48,38 @@ class Master:
 
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
+        
+        # Set up the live plot
+        plt.ion()  # Turn on interactive mode
+        self.fig, self.ax = plt.subplots()
+        self.line, = self.ax.plot([], [], label='Perplexity')
+        self.ax.set_xlabel('Iteration')
+        self.ax.set_ylabel('Perplexity')
+        self.ax.set_title('Perplexity over Iterations')
+        self.ax.legend()
+        self.ax.grid(True)
+
+        # Set up the animation
+        self.anim = FuncAnimation(self.fig, self.update_plot, interval=1000)
+        plt.show()
+
+        # Start the worker thread
+        self.worker_thread = threading.Thread(target=self.run_main_iterations)
+        self.worker_thread.start()
+
+    def update_plot(self, frame):
+        while not self.perplexity_queue.empty():
+            perplexity = self.perplexity_queue.get()
+            self.perplexities.append(perplexity)
+        self.line.set_xdata(range(len(self.perplexities)))
+        self.line.set_ydata(self.perplexities)
+        self.ax.relim()
+        self.ax.autoscale_view()
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
+    def run_main_iterations(self):
+        asyncio.run(self.main(args.max_simultaneous_iterations))
 
     async def approve_token(self, token_address, spender_address, amount):
         token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
@@ -179,6 +220,11 @@ class Master:
 
         logging.info(f"Iteration {iteration_number}: Starting loss computation task")
         loss_result = await self.handle_loss_computation(final_logits_result['result_url'], targets_url, current_version_number, iteration_number)
+
+        # Update perplexity list and plot
+        #perplexity = exp(loss_result['loss'])
+        perplexity = loss_result['loss']
+        self.perplexity_queue.put(perplexity)
 
         error_url = loss_result['result_url']
 
@@ -346,7 +392,7 @@ if __name__ == "__main__":
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
-    parser.add_argument('--max_simultaneous_iterations', type=int, default=2, help="Maximum number of simultaneous iterations")
+    parser.add_argument('--max_simultaneous_iterations', type=int, default=1, help="Maximum number of simultaneous iterations")
 
     args = parser.parse_args()
 
@@ -355,4 +401,4 @@ if __name__ == "__main__":
 
     master = Master(args.rpc_url, args.private_key, args.sot_url, subnet_addresses, detailed_logs=args.detailed_logs)
     
-    asyncio.run(master.main(args.max_simultaneous_iterations))
+    plt.show(block=True)
