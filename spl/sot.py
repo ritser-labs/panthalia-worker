@@ -283,7 +283,6 @@ def get_batch():
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
         return jsonify({'error': 'Could not get batch'}), 500
-
 @app.route('/update_state', methods=['POST'])
 def update_state():
     logging.info("Accessing /update_state endpoint")
@@ -304,23 +303,41 @@ def update_state():
             tensor_data = fetch(session, result_url)
 
         tensor = torch.load(BytesIO(tensor_data), map_location=device)  # Load tensor to the correct device
-        state_file_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
-        
-        if not os.path.exists(state_file_path):
-            current_version_number = block_timestamps.get(tensor_name, 0)
-            current_state_file_path = os.path.join(state_dir, f'{tensor_name}_{current_version_number}.pt')
-            if os.path.exists(current_state_file_path):
-                current_tensor = torch.load(current_state_file_path, map_location=device)
-                torch.save(current_tensor, state_file_path)
 
-        if os.path.exists(state_file_path):
-            current_tensor = torch.load(state_file_path, map_location=device)  # Load existing tensor to the correct device
-            updated_tensor = current_tensor + tensor  # Perform addition without in-place operation
+        # Paths for accumulated grads and future tensor
+        accumulated_grads_path = os.path.join(state_dir, f'accumulated_grads_{tensor_name}_{future_version_number}.pt')
+        future_tensor_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
+
+        # Load or initialize the accumulated_grads tensor
+        if os.path.exists(accumulated_grads_path):
+            accumulated_grads = torch.load(accumulated_grads_path, map_location=device)
         else:
-            updated_tensor = tensor
+            accumulated_grads = torch.zeros_like(tensor)
 
-        torch.save(updated_tensor, state_file_path)
+        # Update the accumulated_grads tensor
+        accumulated_grads += tensor
+        torch.save(accumulated_grads, accumulated_grads_path)
 
+        # Calculate the future tensor
+        current_version_number = block_timestamps.get(tensor_name, 0)
+        current_state_file_path = os.path.join(state_dir, f'{tensor_name}_{current_version_number}.pt')
+        if os.path.exists(current_state_file_path):
+            current_tensor = torch.load(current_state_file_path, map_location=device)
+        else:
+            raise ValueError(f"Current state file not found for {tensor_name}")
+
+        num_of_updates = block_timestamps.get(f'{tensor_name}_updates_{future_version_number}', 0) + 1
+        block_timestamps[f'{tensor_name}_updates_{future_version_number}'] = num_of_updates
+        future_tensor = accumulated_grads / num_of_updates + current_tensor
+
+        torch.save(future_tensor, future_tensor_path)
+
+        # Cleanup old accumulated grads tensors
+        for filename in os.listdir(state_dir):
+            if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
+                os.remove(os.path.join(state_dir, filename))
+
+        # Update block timestamps and number of updates
         block_timestamps[tensor_name] = future_version_number
         save_block_timestamps(block_timestamps)
 
