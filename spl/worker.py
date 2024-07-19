@@ -286,7 +286,7 @@ async def handle_event(event):
     task_id = event['args']['taskId']
     solver = event['args']['solver']
 
-    logging.info(f"Received event for task {args.task_type} and id {task_id}")
+    logging.info(f"Received event for task {args.task_type} and id {task_id} and layer {args.layer_idx}")
 
     if solver.lower() != worker_address.lower():
         logging.debug("Solver address does not match worker address. Ignoring event.")
