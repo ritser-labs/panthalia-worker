@@ -132,8 +132,13 @@ def initialize_tensor(name, sync_version_number=None, random_init=True):
                 if param.dim() > 1:
                     init.xavier_uniform_(param)
     else: # Zero initialization for Adam tensors
-        for param in module.parameters():
-            init.zeros_(param)
+        if isinstance(module, list):
+            for submodule in module:
+                for param in submodule.parameters():
+                    param.data.fill_(0)
+        else:
+            for param in module.parameters():
+                param.data.fill_(0)
 
     if isinstance(module, list):  # final_logits case
         tensors = [param.data for submodule in module for param in submodule.parameters()]
