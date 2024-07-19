@@ -371,7 +371,7 @@ async def process_tasks():
     elif task_type == 'backward':
         logging.debug(f"Executing backward task for layer {layer_idx}")
         backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors[f'layer_{layer_idx}_adam_m'], tensors[f'layer_{layer_idx}_adam_v'], layer_idx)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors['m_update'], tensors['v_update'], layer_idx)
     elif task_type == 'final_logits':
         logging.debug("Executing final_logits task")
         final_logits_task(inputs)
@@ -379,11 +379,11 @@ async def process_tasks():
     elif task_type == 'final_logits_backward':
         logging.debug("Executing final_logits_backward task")
         final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors['final_logits_adam_m'], tensors['final_logits_adam_v'], -1)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors['m_update'], tensors['v_update'], -1)
     elif task_type == 'embed_backward':
         logging.debug("Executing embed_backward task")
         embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
-        result = upload_tensors_and_grads(None, tensors['updates'], tensors['embed_adam_m'], tensors['embed_adam_v'], -2)
+        result = upload_tensors_and_grads(None, tensors['updates'], tensors['m_update'], tensors['v_update'], -2)
     elif task_type == 'loss':
         logging.debug("Executing loss task")
         loss_task(logits, targets)
@@ -524,8 +524,8 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
     # Concatenate the gradients for all microbatches
     tensors['error_output'] = torch.cat(error_output_list, dim=0)
     tensors['updates'] = updates
-    tensors[f'layer_{layer_idx}_adam_m'] = m_update
-    tensors[f'layer_{layer_idx}_adam_v'] = v_update
+    tensors['m_update'] = m_update
+    tensors['v_update'] = v_update
 
 def final_logits_task(inputs):
     global final_logits_layer, final_logits_norm, tensors
@@ -597,8 +597,8 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     # Concatenate the gradients for all microbatches
     tensors['error_output'] = torch.cat(error_output_list, dim=0)
     tensors['updates'] = updates
-    tensors['final_logits_adam_m'] = m_update
-    tensors['final_logits_adam_v'] = v_update
+    tensors['m_update'] = m_update
+    tensors['v_update'] = v_update
 
 def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t, accumulation_steps):
     global embedding, tensors
@@ -631,8 +631,8 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
     updates, m_update, v_update = apply_adamw(-2, grads_accumulated, learning_rate, beta1, beta2, epsilon, weight_decay, t)
 
     tensors['updates'] = updates
-    tensors['embed_adam_m'] = m_update
-    tensors['embed_adam_v'] = v_update
+    tensors['m_update'] = m_update
+    tensors['v_update'] = v_update
 
 def loss_task(logits, targets):
     global tensors
@@ -784,11 +784,7 @@ def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_d
     v_delta = v_update - v
 
     param_delta = param_update - tensor
-
-    # Store updated moments
-    adam_m[tensor_name] = m_update
-    adam_v[tensor_name] = v_update
-
+    
     logging.debug(f"Updates after applying StableAdamW: {param_update}")
 
     return param_delta.view(-1), m_delta.view(-1), v_delta.view(-1)
