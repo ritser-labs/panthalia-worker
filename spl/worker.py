@@ -371,7 +371,7 @@ async def process_tasks():
     elif task_type == 'backward':
         logging.debug(f"Executing backward task for layer {layer_idx}")
         backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors['m_update'], tensors['v_update'], layer_idx)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
     elif task_type == 'final_logits':
         logging.debug("Executing final_logits task")
         final_logits_task(inputs)
@@ -379,11 +379,11 @@ async def process_tasks():
     elif task_type == 'final_logits_backward':
         logging.debug("Executing final_logits_backward task")
         final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], tensors['m_update'], tensors['v_update'], -1)
+        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], -1)
     elif task_type == 'embed_backward':
         logging.debug("Executing embed_backward task")
         embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
-        result = upload_tensors_and_grads(None, tensors['updates'], tensors['m_update'], tensors['v_update'], -2)
+        result = upload_tensors_and_grads(None, tensors['updates'], -2)
     elif task_type == 'loss':
         logging.debug("Executing loss task")
         loss_task(logits, targets)
@@ -414,7 +414,7 @@ async def submit_solution(task_id, result):
         logging.error(f"Error submitting solution for task {task_id}: {e}")
         raise
 
-def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates, layer_idx):
+def upload_tensors_and_grads(error_output, grads, layer_idx):
     if layer_idx == -1:
         layer_label = "final_logits"
     elif layer_idx == -2:
@@ -422,18 +422,15 @@ def upload_tensors_and_grads(error_output, grads, adam_m_updates, adam_v_updates
     else:
         layer_label = f"layer_{layer_idx}"
 
-    grads_url = upload_tensor(grads, f'{layer_label}_grads')
-    
-    adam_m_url = upload_tensor(adam_m_updates, f'{layer_label}_adam_m')
-    adam_v_url = upload_tensor(adam_v_updates, f'{layer_label}_adam_v')
+    grads_flat = torch.cat([grad.view(-1).to(device) for grad in grads])
+
+    grads_url = upload_tensor(grads_flat, f'{layer_label}_grads')
     
     block_timestamp = web3.eth.get_block('latest')['timestamp']
     version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
     result = {
         'grads_url': grads_url,
-        'adam_m_url': adam_m_url,
-        'adam_v_url': adam_v_url,
         'version_number': version_number
     }
 
@@ -519,13 +516,9 @@ def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon
 
     grads_accumulated = [grad / accumulation_steps for grad in grads_accumulated]
 
-    updates, m_update, v_update = apply_adamw(layer_idx, grads_accumulated, learning_rate, beta1, beta2, epsilon, weight_decay, t)
-
     # Concatenate the gradients for all microbatches
     tensors['error_output'] = torch.cat(error_output_list, dim=0)
-    tensors['updates'] = updates
-    tensors['m_update'] = m_update
-    tensors['v_update'] = v_update
+    tensors['updates'] = grads_accumulated
 
 def final_logits_task(inputs):
     global final_logits_layer, final_logits_norm, tensors
@@ -591,14 +584,11 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     norm_grads_accumulated = [grad / accumulation_steps for grad in norm_grads_accumulated]
 
     combined_grads = norm_grads_accumulated + final_logits_grads_accumulated
-
-    updates, m_update, v_update = apply_adamw(-1, combined_grads, learning_rate, beta1, beta2, epsilon, weight_decay, t)
+    
 
     # Concatenate the gradients for all microbatches
     tensors['error_output'] = torch.cat(error_output_list, dim=0)
-    tensors['updates'] = updates
-    tensors['m_update'] = m_update
-    tensors['v_update'] = v_update
+    tensors['updates'] = combined_grads
 
 def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t, accumulation_steps):
     global embedding, tensors
@@ -628,11 +618,7 @@ def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weig
 
     logging.debug(f"Accumulated gradients for embedding before AdamW: {grads_accumulated}")
 
-    updates, m_update, v_update = apply_adamw(-2, grads_accumulated, learning_rate, beta1, beta2, epsilon, weight_decay, t)
-
-    tensors['updates'] = updates
-    tensors['m_update'] = m_update
-    tensors['v_update'] = v_update
+    tensors['updates'] = grads_accumulated
 
 def loss_task(logits, targets):
     global tensors
@@ -702,92 +688,6 @@ def loss_task(logits, targets):
         logging.info(f"Max probability tokens: {max_prob_tokens}")
         logging.info(f"Max probability tokens shape: {max_prob_tokens.shape}")
         logging.info(f"Loss: {loss.item()}")
-
-def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
-    beta1hat = beta1 * (1 - beta1**(step - 1)) / (1 - beta1**step)
-    beta2hat = beta2 * (1 - beta2**(step - 1)) / (1 - beta2**step)
-    
-    m = beta1hat * m + (1 - beta1hat) * grads
-    v = beta2hat * v + (1 - beta2hat) * grads ** 2
-    
-    m_hat = m / (1 - beta1 ** step)
-    v_hat = v / (1 - beta2 ** step)
-    
-    denominator = torch.sqrt(v_hat) + eps
-    
-    rms = torch.sqrt(torch.mean(grads * grads / torch.max(v, (eps * eps) * torch.ones_like(v))))
-    
-    new_lr = lr * (1. / max(1., rms / clip_thresh))
-    
-    params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
-    
-    return params, m, v
-
-def apply_adamw(layer_idx, grads, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
-    max_weight_norm = 1.0
-    eps = 1e-8  # To avoid division by zero
-
-    if layer_idx == -1:
-        tensor_name = "final_logits"
-    elif layer_idx == -2:
-        tensor_name = "embed"
-    else:
-        tensor_name = f"layer_{layer_idx}"
-
-    tensor = tensors[tensor_name]
-    if tensor is None:
-        raise ValueError(f"Failed to load tensor for {tensor_name}")
-
-    # Ensure tensor is on the correct device and convert to flat tensor if necessary
-    tensor = tensor.to(device)
-
-    logging.debug(f"Tensor before AdamW: {tensor}")
-
-    # Flatten gradients to match the flattened tensor
-    grads_flat = torch.cat([grad.view(-1).to(device) for grad in grads])
-
-    logging.debug(f"Flattened gradients: {grads_flat}")
-
-    # Clip gradients
-    grads_flat = torch.nn.utils.clip_grad_norm_(grads_flat, clip_grad)
-
-    if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
-        logging.error(f"NaNs or Infs detected in gradients before AdamW update for {tensor_name}")
-        raise ValueError(f"NaNs or Infs detected in gradients for {tensor_name}")
-
-    m = adam_m[tensor_name]
-    v = adam_v[tensor_name]
-
-    if m is None or v is None:
-        m = torch.zeros_like(tensor, device=device)
-        v = torch.zeros_like(tensor, device=device)
-
-    logging.debug(f"m before AdamW: {m}")
-    logging.debug(f"v before AdamW: {v}")
-
-    # Get the StableAdamW updates
-    param_update, m_update, v_update = stable_adamw_update(
-        tensor.clone(),
-        grads_flat,
-        m.clone(),
-        v.clone(),
-        learning_rate,
-        beta1,
-        beta2,
-        epsilon,
-        weight_decay,
-        t
-    )
-
-    # Calculate the update deltas for m and v
-    m_delta = m_update - m
-    v_delta = v_update - v
-
-    param_delta = param_update - tensor
-    
-    logging.debug(f"Updates after applying StableAdamW: {param_update}")
-
-    return param_delta.view(-1), m_delta.view(-1), v_delta.view(-1)
 
 async def check_and_finalize_verifications():
     current_time = int(time.time())
@@ -882,9 +782,9 @@ def get_relevant_tensors_for_task(task_type):
             f'layer_{args.layer_idx}_adam_v'
         ]
     elif task_type in ['embed', 'embed_backward']:
-        relevant_tensors = ['embed', 'embed_adam_m', 'embed_adam_v']
+        relevant_tensors = ['embed']
     elif task_type in ['final_logits', 'final_logits_backward']:
-        relevant_tensors = ['final_logits', 'final_logits_adam_m', 'final_logits_adam_v']
+        relevant_tensors = ['final_logits']
     elif task_type == 'loss':
         relevant_tensors = []
     else:

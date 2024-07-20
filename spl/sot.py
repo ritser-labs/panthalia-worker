@@ -283,6 +283,80 @@ def get_batch():
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
         return jsonify({'error': 'Could not get batch'}), 500
+
+def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
+    beta1hat = beta1 * (1 - beta1**(step - 1)) / (1 - beta1**step)
+    beta2hat = beta2 * (1 - beta2**(step - 1)) / (1 - beta2**step)
+    
+    m = beta1hat * m + (1 - beta1hat) * grads
+    v = beta2hat * v + (1 - beta2hat) * grads ** 2
+    
+    m_hat = m / (1 - beta1 ** step)
+    v_hat = v / (1 - beta2 ** step)
+    
+    denominator = torch.sqrt(v_hat) + eps
+    
+    rms = torch.sqrt(torch.mean(grads * grads / torch.max(v, (eps * eps) * torch.ones_like(v))))
+    
+    new_lr = lr * (1. / max(1., rms / clip_thresh))
+    
+    params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
+    
+    return params, m, v
+
+def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
+    tensor_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
+    tensor = torch.load(tensor_path, map_location=device)
+
+    if tensor is None:
+        raise ValueError(f"Failed to load tensor for {tensor_name}")
+
+    # Ensure tensor is on the correct device and convert to flat tensor if necessary
+    tensor = tensor.to(device)
+
+    logging.debug(f"Tensor before AdamW: {tensor}")
+
+    logging.debug(f"Flattened gradients: {grads_flat}")
+
+    # Clip gradients
+    grads_flat = torch.nn.utils.clip_grad_norm_(grads_flat, clip_grad)
+
+    if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
+        logging.error(f"NaNs or Infs detected in gradients before AdamW update for {tensor_name}")
+        raise ValueError(f"NaNs or Infs detected in gradients for {tensor_name}")
+
+
+    tensor_adam_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
+    tensor_adam_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{version_number}.pt')
+
+    adam_m = torch.load(tensor_adam_m_path, map_location=device)
+    adam_v = torch.load(tensor_adam_v_path, map_location=device)
+
+    if adam_m is None or adam_v is None:
+        adam_m = torch.zeros_like(tensor, device=device)
+        adam_v = torch.zeros_like(tensor, device=device)
+
+    logging.debug(f"m before AdamW: {adam_m}")
+    logging.debug(f"v before AdamW: {adam_v}")
+
+    # Get the StableAdamW updates
+    param_update, m_update, v_update = stable_adamw_update(
+        tensor,
+        grads_flat,
+        adam_m,
+        adam_v,
+        learning_rate,
+        beta1,
+        beta2,
+        epsilon,
+        weight_decay,
+        t
+    )
+
+    logging.debug(f"Updates after applying StableAdamW: {param_update}")
+
+    return param_update.view(-1), m_update.view(-1), v_update.view(-1)
+
 @app.route('/update_state', methods=['POST'])
 def update_state():
     logging.info("Accessing /update_state endpoint")
@@ -307,6 +381,8 @@ def update_state():
         # Paths for accumulated grads and future tensor
         accumulated_grads_path = os.path.join(state_dir, f'accumulated_grads_{tensor_name}_{future_version_number}.pt')
         future_tensor_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
+        future_tensor_adam_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{future_version_number}.pt')
+        future_tensor_adam_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{future_version_number}.pt')
 
         # Load or initialize the accumulated_grads tensor
         if os.path.exists(accumulated_grads_path):
@@ -328,9 +404,24 @@ def update_state():
 
         num_of_updates = block_timestamps.get(f'{tensor_name}_updates_{future_version_number}', 0) + 1
         block_timestamps[f'{tensor_name}_updates_{future_version_number}'] = num_of_updates
-        future_tensor = accumulated_grads / num_of_updates + current_tensor
+        averaged_grads = accumulated_grads / num_of_updates
+        #future_tensor = accumulated_grads / num_of_updates + current_tensor
+        future_tensor, m_update, v_update = apply_adamw(
+            current_version_number,
+            tensor_name,
+            averaged_grads,
+            data.get('learning_rate', 0.002),
+            data.get('beta1', 0.9),
+            data.get('beta2', 0.99),
+            data.get('epsilon', 1e-6),
+            data.get('weight_decay', 0.2),
+            data.get('t', 1)
+        )
+
 
         torch.save(future_tensor, future_tensor_path)
+        torch.save(m_update, future_tensor_adam_m_path)
+        torch.save(v_update, future_tensor_adam_v_path)
 
         # Cleanup old accumulated grads tensors
         for filename in os.listdir(state_dir):

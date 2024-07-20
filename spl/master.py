@@ -346,8 +346,15 @@ class Master:
             await asyncio.sleep(5)
 
     async def update_sot(self, tensor_name, result):
+        learning_params = get_learning_hyperparameters(self.iteration)
+        params = {
+            'result_url': result['grads_url'],
+            'tensor_name': tensor_name,
+            'version_number': result['version_number'],
+            **learning_params
+        }
         async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self.sot_url}/update_state", json={'tensor_name': tensor_name, 'result_url': result['grads_url']}) as response:
+            async with session.post(f"{self.sot_url}/update_state", json=params) as response:
                 if response.status != 200:  # Use 'status' instead of 'status_code'
                     logging.error(f"Failed to update SOT for {tensor_name}: {await response.text()}")
                 else:
@@ -361,20 +368,6 @@ class Master:
         else:
             tensor_name = f'layer_{layer_idx}'
         await self.update_sot(tensor_name, result)
-        await self.update_adam_state(tensor_name, result['adam_m_url'], result['adam_v_url'])
-
-    async def update_adam_state(self, tensor_name, adam_m_url, adam_v_url):
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_m', 'result_url': adam_m_url}) as response:
-                if response.status != 200:
-                    logging.error(f"Failed to update Adam state for {tensor_name}: {await response.text()}")
-                else:
-                    logging.info(f"Updated Adam state for {tensor_name}")
-            async with session.post(f"{self.sot_url}/update_state", json={'tensor_name': f'{tensor_name}_adam_v', 'result_url': adam_v_url}) as response:
-                if response.status != 200:
-                    logging.error(f"Failed to update Adam state for {tensor_name}: {await response.text()}")
-                else:
-                    logging.info(f"Updated Adam state for {tensor_name}")
 
     async def get_batch_and_targets_url(self):
         url = os.path.join(self.sot_url, 'get_batch')
