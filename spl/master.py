@@ -229,13 +229,13 @@ class Master:
         error_url = loss_result['result_url']
 
         logging.info(f"Iteration {iteration_number}: Starting final logits backward task")
-        final_logits_result = await self.handle_final_logits_backward(error_url, layer_inputs_url[-1], model_params, current_version_number, iteration_number)
+        final_logits_result = await self.handle_final_logits_backward(error_url, layer_inputs_url[-1], current_version_number, iteration_number)
 
         error_url = final_logits_result['error_output_url']
 
         for layer_idx in reversed(range(model_params['n_layers'])):
             logging.info(f"Iteration {iteration_number}: Starting backward task for layer {layer_idx}")
-            layer_result = await self.handle_layer_backward(layer_idx, error_url, layer_inputs_url[layer_idx], model_params, current_version_number, iteration_number)
+            layer_result = await self.handle_layer_backward(layer_idx, error_url, layer_inputs_url[layer_idx], current_version_number, iteration_number)
             error_url = layer_result['error_output_url']
 
         logging.info(f"Iteration {iteration_number}: Starting embed backward task")
@@ -297,14 +297,12 @@ class Master:
         result = await self.wait_for_result('loss', task_id, iteration_number)
         return result
 
-    async def handle_layer_backward(self, layer_idx, error_url, inputs_url, model_params, current_version_number, iteration_number):
-        learning_params = get_learning_hyperparameters(self.iteration)
+    async def handle_layer_backward(self, layer_idx, error_url, inputs_url, current_version_number, iteration_number):
         task_type = f'backward_layer_{layer_idx}'
         task_params = {
             'layer_idx': layer_idx,
             'error_url': error_url,
             'inputs_url': inputs_url,
-            **learning_params,
             'version_number': current_version_number
         }
         task_id = await self.submit_task(task_type, task_params, iteration_number)
@@ -312,12 +310,10 @@ class Master:
         await self.update_sot_all(task_type, result, layer_idx, iteration_number)
         return result
 
-    async def handle_final_logits_backward(self, error_url, inputs_url, model_params, current_version_number, iteration_number):
-        learning_params = get_learning_hyperparameters(self.iteration)
+    async def handle_final_logits_backward(self, error_url, inputs_url, current_version_number, iteration_number):
         task_params = {
             'error_url': error_url,
             'inputs_url': inputs_url,
-            **learning_params,
             'version_number': current_version_number
         }
         task_id = await self.submit_task('final_logits_backward', task_params, iteration_number)
@@ -326,11 +322,9 @@ class Master:
         return result
 
     async def handle_embed_backward(self, error_url, batch_url, current_version_number, iteration_number):
-        learning_params = get_learning_hyperparameters(self.iteration)
         task_params = {
             'error_url': error_url,
             'batch_url': batch_url,
-            **learning_params,
             'version_number': current_version_number
         }
         task_id = await self.submit_task('embed_backward', task_params, iteration_number)

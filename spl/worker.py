@@ -128,7 +128,6 @@ class TaskQueue:
         logging.debug("No tasks in the queue.")
         return None
 
-
 task_queue = TaskQueue()
 
 def block_to_tensor(block: TransformerBlock) -> torch.Tensor:
@@ -307,7 +306,6 @@ async def handle_event(event):
 
     await process_tasks()
 
-
 async def process_tasks():
     global task_queue
 
@@ -370,7 +368,7 @@ async def process_tasks():
         result['result_url'] = upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')
     elif task_type == 'backward':
         logging.debug(f"Executing backward task for layer {layer_idx}")
-        backward_task(layer_idx, error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
+        backward_task(layer_idx, error, inputs, accumulation_steps)
         result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
     elif task_type == 'final_logits':
         logging.debug("Executing final_logits task")
@@ -378,11 +376,11 @@ async def process_tasks():
         result['result_url'] = upload_tensor(tensors['logits'], 'final_logits_outputs')
     elif task_type == 'final_logits_backward':
         logging.debug("Executing final_logits_backward task")
-        final_logits_backward_task(error, inputs, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
+        final_logits_backward_task(error, inputs, accumulation_steps)
         result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], -1)
     elif task_type == 'embed_backward':
         logging.debug("Executing embed_backward task")
-        embed_backward_task(error, batch, task_params['learning_rate'], task_params['beta1'], task_params['beta2'], task_params['epsilon'], task_params['weight_decay'], task_params['t'], accumulation_steps)
+        embed_backward_task(error, batch, accumulation_steps)
         result = upload_tensors_and_grads(None, tensors['updates'], -2)
     elif task_type == 'loss':
         logging.debug("Executing loss task")
@@ -473,7 +471,7 @@ def forward_task(layer_idx, inputs):
     tensors['outputs'] = outputs
     logging.debug(f"Forward pass completed for layer {layer_idx}")
 
-def backward_task(layer_idx, error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t, accumulation_steps):
+def backward_task(layer_idx, error, inputs, accumulation_steps):
     global freqs_cis, mask, tensors, transformer_layer
 
     if error is None:
@@ -528,7 +526,7 @@ def final_logits_task(inputs):
     logits = final_logits_layer(normalized_inputs.to(device))
     tensors['logits'] = logits
 
-def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsilon, weight_decay, t, accumulation_steps):
+def final_logits_backward_task(error, inputs, accumulation_steps):
     global final_logits_layer, final_logits_norm, tensors
 
     logging.info(f"Error tensor shape: {error.shape}")
@@ -584,13 +582,12 @@ def final_logits_backward_task(error, inputs, learning_rate, beta1, beta2, epsil
     norm_grads_accumulated = [grad / accumulation_steps for grad in norm_grads_accumulated]
 
     combined_grads = norm_grads_accumulated + final_logits_grads_accumulated
-    
 
     # Concatenate the gradients for all microbatches
     tensors['error_output'] = torch.cat(error_output_list, dim=0)
     tensors['updates'] = combined_grads
 
-def embed_backward_task(error, batch, learning_rate, beta1, beta2, epsilon, weight_decay, t, accumulation_steps):
+def embed_backward_task(error, batch, accumulation_steps):
     global embedding, tensors
 
     if error is None:
