@@ -50,8 +50,6 @@ class Master:
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
-        self.interactive = plt.isinteractive()
-
         # Set up the plot
         self.fig, self.ax = plt.subplots()
         self.line, = self.ax.plot([], [], label='Perplexity')
@@ -61,22 +59,7 @@ class Master:
         self.ax.legend()
         self.ax.grid(True)
 
-        if self.interactive:
-            # Turn on interactive mode
-            plt.ion()
-
-            # Set up the animation
-            self.anim = FuncAnimation(self.fig, self.update_plot, interval=1000)
-            plt.show()
-
-            # Start the worker thread to run the main iterations
-            self.worker_thread = threading.Thread(target=self.run_worker)
-            self.worker_thread.start()
-        else:
-            # Run the main iterations in the main thread
-            asyncio.run(self.main())
-
-    def run_worker(self):
+        # Run the main iterations in the main thread
         asyncio.run(self.main())
 
     def update_plot(self, frame=None):
@@ -88,9 +71,6 @@ class Master:
         self.ax.relim()
         self.ax.autoscale_view()
         self.fig.savefig('perplexity_plot.png')  # Save the figure after each update
-        if self.interactive:
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
 
     async def approve_token(self, token_address, spender_address, amount):
         token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
@@ -253,9 +233,8 @@ class Master:
 
         logging.info(f"Iteration {iteration_number} done, loss: {loss_result['loss']}")
 
-        # Update the plot explicitly if not interactive
-        if not self.interactive:
-            self.update_plot()
+        # Update the plot explicitly
+        self.update_plot()
 
     async def main(self):
         logging.info("Starting main process")
@@ -401,9 +380,3 @@ if __name__ == "__main__":
         subnet_addresses = json.load(file)
 
     master = Master(args.rpc_url, args.private_key, args.sot_url, subnet_addresses, max_simultaneous_iterations=args.max_simultaneous_iterations, detailed_logs=args.detailed_logs)
-    
-    if master.interactive:
-        plt.show(block=True)
-    else:
-        master.worker_thread.join()
-
