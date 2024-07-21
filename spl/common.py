@@ -33,6 +33,8 @@ model_args = ModelArgs(
 
 batch_size = 1
 
+BUFFER_SIZE = 1000  # Size of the buffer to shuffle data
+
 TENSOR_VERSION_INTERVAL = 30
 
 # Define Enums
