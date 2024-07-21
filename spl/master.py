@@ -22,12 +22,13 @@ import queue
 logging.basicConfig(level=logging.INFO)
 
 class Master:
-    def __init__(self, rpc_url, private_key, sot_url, subnet_addresses, detailed_logs=False):
+    def __init__(self, rpc_url, private_key, sot_url, subnet_addresses, max_simultaneous_iterations=1, detailed_logs=False):
         self.web3 = Web3(Web3.HTTPProvider(rpc_url))
         self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
         self.account = self.web3.eth.account.from_key(private_key)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
+        self.max_simultaneous_iterations = max_simultaneous_iterations
         self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, subnet_addresses)
         self.iteration = 1  # Track the number of iterations
         self.perplexities = []  # Initialize perplexity list
@@ -48,26 +49,35 @@ class Master:
 
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
-        
-        # Set up the live plot
-        plt.ion()  # Turn on interactive mode
-        self.fig, self.ax = plt.subplots()
-        self.line, = self.ax.plot([], [], label='Perplexity')
-        self.ax.set_xlabel('Iteration')
-        self.ax.set_ylabel('Perplexity')
-        self.ax.set_title('Perplexity over Iterations')
-        self.ax.legend()
-        self.ax.grid(True)
 
-        # Set up the animation
-        self.anim = FuncAnimation(self.fig, self.update_plot, interval=1000)
-        plt.show()
+        self.interactive = plt.isinteractive()
 
-        # Start the worker thread
-        self.worker_thread = threading.Thread(target=self.run_main_iterations)
-        self.worker_thread.start()
+        if self.interactive:
+            # Set up the live plot
+            plt.ion()  # Turn on interactive mode
+            self.fig, self.ax = plt.subplots()
+            self.line, = self.ax.plot([], [], label='Perplexity')
+            self.ax.set_xlabel('Iteration')
+            self.ax.set_ylabel('Perplexity')
+            self.ax.set_title('Perplexity over Iterations')
+            self.ax.legend()
+            self.ax.grid(True)
 
-    def update_plot(self, frame):
+            # Set up the animation
+            self.anim = FuncAnimation(self.fig, self.update_plot, interval=1000)
+            plt.show()
+
+            # Start the worker thread to run the main iterations
+            self.worker_thread = threading.Thread(target=self.run_worker)
+            self.worker_thread.start()
+        else:
+            # Run the main iterations in the main thread
+            asyncio.run(self.main())
+
+    def run_worker(self):
+        asyncio.run(self.main())
+
+    def update_plot(self, frame=None):
         while not self.perplexity_queue.empty():
             perplexity = self.perplexity_queue.get()
             self.perplexities.append(perplexity)
@@ -75,11 +85,10 @@ class Master:
         self.line.set_ydata(self.perplexities)
         self.ax.relim()
         self.ax.autoscale_view()
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
-
-    def run_main_iterations(self):
-        asyncio.run(self.main(args.max_simultaneous_iterations))
+        self.fig.savefig('perplexity_plot.png')  # Save the figure after each update
+        if self.interactive:
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
 
     async def approve_token(self, token_address, spender_address, amount):
         token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
@@ -222,8 +231,7 @@ class Master:
         loss_result = await self.handle_loss_computation(final_logits_result['result_url'], targets_url, current_version_number, iteration_number)
 
         # Update perplexity list and plot
-        #perplexity = exp(loss_result['loss'])
-        perplexity = loss_result['loss']
+        perplexity = exp(loss_result['loss'])
         self.perplexity_queue.put(perplexity)
 
         error_url = loss_result['result_url']
@@ -243,11 +251,15 @@ class Master:
 
         logging.info(f"Iteration {iteration_number} done, loss: {loss_result['loss']}")
 
-    async def main(self, max_simultaneous_iterations):
+        # Update the plot explicitly if not interactive
+        if not self.interactive:
+            self.update_plot()
+
+    async def main(self):
         logging.info("Starting main process")
         tasks = set()
 
-        for _ in range(max_simultaneous_iterations):
+        for _ in range(self.max_simultaneous_iterations):
             tasks.add(asyncio.create_task(self.main_iteration(self.iteration)))
             self.iteration += 1
 
@@ -378,14 +390,17 @@ if __name__ == "__main__":
     parser.add_argument('--private_key', type=str, required=True, help="Private key for Ethereum account")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
     parser.add_argument('--max_simultaneous_iterations', type=int, default=1, help="Maximum number of simultaneous iterations")
+    parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()
 
     with open(args.subnet_addresses, 'r') as file:
         subnet_addresses = json.load(file)
 
-    master = Master(args.rpc_url, args.private_key, args.sot_url, subnet_addresses, detailed_logs=args.detailed_logs)
+    master = Master(args.rpc_url, args.private_key, args.sot_url, subnet_addresses, max_simultaneous_iterations=args.max_simultaneous_iterations, detailed_logs=args.detailed_logs)
     
-    plt.show(block=True)
+    if master.interactive:
+        plt.show(block=True)
+    else:
+        master.worker_thread.join()

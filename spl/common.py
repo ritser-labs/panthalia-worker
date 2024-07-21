@@ -33,7 +33,7 @@ model_args = ModelArgs(
 
 batch_size = 1
 
-TENSOR_VERSION_INTERVAL = 500
+TENSOR_VERSION_INTERVAL = 30
 
 # Define Enums
 class TaskStatus(Enum):
