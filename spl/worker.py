@@ -51,7 +51,7 @@ args = ModelArgs()
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
     parser.add_argument('--task_type', type=str, required=True, choices=[
-        'embed', 'forward', 'backward', 'final_logits', 'final_logits_backward', 'embed_backward', 'loss'
+        'embed', 'forward', 'backward', 'final_logits', 'embed_backward'
     ], help="Type of task to process")
     parser.add_argument('--subnet_address', type=str, required=True, help="Subnet contract address")
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the worker's Ethereum account")
@@ -349,11 +349,6 @@ async def process_tasks():
         logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
         targets = download_json(task_params['targets_url'])
 
-    logits = None
-    if 'logits_url' in task_params:
-        logging.debug(f"Downloading logits from URL: {task_params['logits_url']}")
-        logits = download_file(task_params['logits_url'])
-
     pause_gradient_updates()
 
     task_type = args.task_type
@@ -374,22 +369,12 @@ async def process_tasks():
         result = await upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
     elif task_type == 'final_logits':
         logging.debug("Executing final_logits task")
-        final_logits_task(inputs)
-        result['result_url'] = await upload_tensor(tensors['logits'], 'final_logits_outputs')
-    elif task_type == 'final_logits_backward':
-        logging.debug("Executing final_logits_backward task")
-        final_logits_backward_task(error, inputs, accumulation_steps)
-        result = await upload_tensors_and_grads(tensors['error_output'], tensors['updates'], -1)
+        final_logits_task(inputs, targets, accumulation_steps)
+        result = await upload_final_logits_results()
     elif task_type == 'embed_backward':
         logging.debug("Executing embed_backward task")
         embed_backward_task(error, batch, accumulation_steps)
         result = await upload_tensors_and_grads(None, tensors['updates'], -2)
-    elif task_type == 'loss':
-        logging.debug("Executing loss task")
-        loss_task(logits, targets)
-        result['loss'] = tensors['loss'].item()
-        result['result_url'] = await upload_tensor(tensors['logits_grad'], 'loss_logits_grad')
-
     await submit_solution(task_id, result)
 
     processed_tasks.add(task_id)
@@ -517,22 +502,12 @@ def backward_task(layer_idx, error, inputs, accumulation_steps):
     tensors['error_output'] = torch.cat(error_output_list, dim=0)
     tensors['updates'] = grads_accumulated
 
-def final_logits_task(inputs):
+def final_logits_task(inputs, targets, accumulation_steps):
     global final_logits_layer, final_logits_norm, tensors
 
-    # Apply RMSNorm before the final logits layer
-    normalized_inputs = final_logits_norm(inputs)
-    logits = final_logits_layer(normalized_inputs.to(device))
-    tensors['logits'] = logits
-
-def final_logits_backward_task(error, inputs, accumulation_steps):
-    global final_logits_layer, final_logits_norm, tensors
-
-    logging.info(f"Error tensor shape: {error.shape}")
-
-    # Ensure the inputs and error tensors are on the correct device
+    # Ensure the inputs and targets tensors are on the correct device
     inputs = inputs.to(device)
-    error = error.to(device)
+    targets = targets.to(device)
 
     # Clone inputs to make them leaf tensors
     inputs = inputs.clone().detach().requires_grad_(True)
@@ -552,9 +527,11 @@ def final_logits_backward_task(error, inputs, accumulation_steps):
     # List to store gradients for each microbatch
     error_output_list = []
 
+    total_loss = 0.0
+
     for i in range(accumulation_steps):
         microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size]
-        microbatch_error = error[i * microbatch_size:(i + 1) * microbatch_size]
+        microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size]
 
         # Clone microbatch_inputs to make them leaf tensors
         microbatch_inputs = microbatch_inputs.clone().detach().requires_grad_(True)
@@ -563,7 +540,17 @@ def final_logits_backward_task(error, inputs, accumulation_steps):
         logits = final_logits_layer(normalized_inputs)
         logits.retain_grad()
 
-        logits.backward(microbatch_error, retain_graph=True)
+        # Reshape logits to [batch_size * seq_len, vocab_size]
+        reshaped_logits = logits.view(-1, model_args.vocab_size)
+        # Reshape targets to [batch_size * seq_len]
+        reshaped_targets = microbatch_targets.view(-1)
+
+        # Calculate the cross-entropy loss
+        loss = F.cross_entropy(reshaped_logits.to(device), reshaped_targets.to(device), ignore_index=tokenizer.pad_id)
+
+        total_loss += loss.item()
+
+        loss.backward(retain_graph=True)
 
         for j, param in enumerate(final_logits_layer.parameters()):
             final_logits_grads_accumulated[j] += param.grad
@@ -585,6 +572,7 @@ def final_logits_backward_task(error, inputs, accumulation_steps):
     # Concatenate the gradients for all microbatches
     tensors['error_output'] = torch.cat(error_output_list, dim=0)
     tensors['updates'] = combined_grads
+    tensors['loss'] = total_loss / accumulation_steps
 
 def embed_backward_task(error, batch, accumulation_steps):
     global embedding, tensors
@@ -616,74 +604,20 @@ def embed_backward_task(error, batch, accumulation_steps):
 
     tensors['updates'] = grads_accumulated
 
-def loss_task(logits, targets):
-    global tensors
+async def upload_final_logits_results():
+    error_output_url = await upload_tensor(tensors['error_output'], 'final_logits_error_output')
+    grads_url = await upload_tensor(torch.cat([grad.view(-1).to(device) for grad in tensors['updates']]), 'final_logits_grads')
+    loss = tensors['loss']
 
-    logging.info(f"Logits for loss: {logits.shape}")
-    logging.info(f"Targets for loss: {targets.shape}")
+    block_timestamp = web3.eth.get_block('latest')['timestamp']
+    version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
-    pad_id = tokenizer.pad_id
-
-    batch_size, seq_len, vocab_size = logits.shape
-
-    # Print initial logits before reshaping
-    logging.info(f"Initial logits (before reshaping): {logits}")
-
-    logits = logits.reshape(batch_size * seq_len, vocab_size)
-
-    # Print logits after reshaping
-    logging.info(f"Logits (after reshaping): {logits.shape}")
-
-    targets = targets.reshape(-1)
-
-    # Compute the loss
-    loss = F.cross_entropy(logits.to(device), targets.to(device), ignore_index=pad_id)
-
-    # Ensure logits require gradients
-    logits.retain_grad()
-
-    # Perform backward pass to compute gradients with respect to logits
-    loss.backward(retain_graph=True)
-
-    # Check for NaNs in gradients
-    logging.info(f"Logits gradients for loss: {logits.grad.shape}")
-
-    # Reshape logits gradients to the original shape
-    logits_grad = logits.grad.reshape(batch_size, seq_len, vocab_size)
-    tensors['logits_grad'] = logits_grad
-    tensors['loss'] = loss
-    
-    if args.detailed_logs:
-        # Print logits gradients after reshaping
-        logging.info(f"Logits gradients (after reshaping): {logits_grad.shape}")
-
-        # Compute the softmax probabilities from the logits, not from logits_grad
-        softmax_probs = F.softmax(logits.reshape(batch_size, seq_len, vocab_size), dim=-1)
-
-        torch.set_printoptions(profile="full")
-        logits_for_one_index = str(softmax_probs[0][0])
-        with open('output_logits_for_one_index.txt', 'w') as f:
-            f.write(logits_for_one_index)
-        torch.set_printoptions(profile="default")
-
-        # Print softmax probabilities
-        logging.info(f"Softmax probabilities (for first token of first sequence): {softmax_probs[0, 0]}")
-
-        # Identify the token with the highest probability for each position in the sequence
-        max_prob_values, max_prob_tokens = torch.max(softmax_probs, dim=-1)
-
-        # Store the max probability tokens in the tensors dictionary
-        tensors['max_prob_tokens'] = max_prob_tokens
-
-        # Print and write the entire max_prob_tokens tensor to a text file
-        max_prob_tokens_list = max_prob_tokens.cpu().numpy().tolist()
-        with open('output_max_prob_tokens.txt', 'w') as f:
-            for item in max_prob_tokens_list:
-                f.write("%s\n" % item)
-
-        logging.info(f"Max probability tokens: {max_prob_tokens}")
-        logging.info(f"Max probability tokens shape: {max_prob_tokens.shape}")
-        logging.info(f"Loss: {loss.item()}")
+    return {
+        'error_output_url': error_output_url,
+        'grads_url': grads_url,
+        'loss': loss,
+        'version_number': version_number
+    }
 
 async def check_and_finalize_verifications():
     current_time = int(time.time())
@@ -773,16 +707,12 @@ def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
     if task_type.startswith('forward') or task_type.startswith('backward'):
         relevant_tensors = [
-            f'layer_{args.layer_idx}',
-            f'layer_{args.layer_idx}_adam_m',
-            f'layer_{args.layer_idx}_adam_v'
+            f'layer_{args.layer_idx}'
         ]
     elif task_type in ['embed', 'embed_backward']:
         relevant_tensors = ['embed']
-    elif task_type in ['final_logits', 'final_logits_backward']:
+    elif task_type == 'final_logits':
         relevant_tensors = ['final_logits']
-    elif task_type == 'loss':
-        relevant_tensors = []
     else:
         raise ValueError(f"Invalid task type: {task_type}")
     return relevant_tensors

@@ -6,18 +6,16 @@ import requests
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from math import exp
+import math
+import aiohttp
+import threading
+import queue
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
 from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, decode_custom_error, wait_for_state_change
 from io import BytesIO
 import os
-import math
-import aiohttp
-import threading
-import queue
 
 logging.basicConfig(level=logging.INFO)
 
@@ -206,20 +204,12 @@ class Master:
             layer_result = await self.handle_layer_forward(layer_idx, layer_inputs_url[-1], model_params, current_version_number, iteration_number)
             layer_inputs_url.append(layer_result['result_url'])
 
-        logging.info(f"Iteration {iteration_number}: Starting final logits forward task")
-        final_logits_result = await self.handle_final_logits_forward(layer_inputs_url[-1], current_version_number, iteration_number)
-
-        logging.info(f"Iteration {iteration_number}: Starting loss computation task")
-        loss_result = await self.handle_loss_computation(final_logits_result['result_url'], targets_url, current_version_number, iteration_number)
+        logging.info(f"Iteration {iteration_number}: Starting final_logits task")
+        final_logits_result = await self.handle_final_logits(layer_inputs_url[-1], targets_url, current_version_number, iteration_number)
 
         # Update perplexity list and plot
-        perplexity = exp(loss_result['loss'])
+        perplexity = math.exp(final_logits_result['loss'])
         self.perplexity_queue.put(perplexity)
-
-        error_url = loss_result['result_url']
-
-        logging.info(f"Iteration {iteration_number}: Starting final logits backward task")
-        final_logits_result = await self.handle_final_logits_backward(error_url, layer_inputs_url[-1], current_version_number, iteration_number)
 
         error_url = final_logits_result['error_output_url']
 
@@ -231,7 +221,7 @@ class Master:
         logging.info(f"Iteration {iteration_number}: Starting embed backward task")
         await self.handle_embed_backward(error_url, batch_url, current_version_number, iteration_number)
 
-        logging.info(f"Iteration {iteration_number} done, loss: {loss_result['loss']}")
+        logging.info(f"Iteration {iteration_number} done, loss: {final_logits_result['loss']}")
 
         # Update the plot explicitly
         self.update_plot()
@@ -278,16 +268,11 @@ class Master:
         result = await self.wait_for_result(task_type, task_id, iteration_number)
         return result
 
-    async def handle_final_logits_forward(self, inputs_url, current_version_number, iteration_number):
-        task_params = {'inputs_url': inputs_url, 'version_number': current_version_number}
+    async def handle_final_logits(self, inputs_url, targets_url, current_version_number, iteration_number):
+        task_params = {'inputs_url': inputs_url, 'targets_url': targets_url, 'version_number': current_version_number}
         task_id = await self.submit_task('final_logits', task_params, iteration_number)
         result = await self.wait_for_result('final_logits', task_id, iteration_number)
-        return result
-
-    async def handle_loss_computation(self, logits_url, targets_url, current_version_number, iteration_number):
-        task_params = {'logits_url': logits_url, 'targets_url': targets_url, 'version_number': current_version_number}
-        task_id = await self.submit_task('loss', task_params, iteration_number)
-        result = await self.wait_for_result('loss', task_id, iteration_number)
+        await self.update_sot_all('final_logits', result, iteration_number=iteration_number)
         return result
 
     async def handle_layer_backward(self, layer_idx, error_url, inputs_url, current_version_number, iteration_number):
@@ -301,17 +286,6 @@ class Master:
         task_id = await self.submit_task(task_type, task_params, iteration_number)
         result = await self.wait_for_result(task_type, task_id, iteration_number)
         await self.update_sot_all(task_type, result, layer_idx, iteration_number)
-        return result
-
-    async def handle_final_logits_backward(self, error_url, inputs_url, current_version_number, iteration_number):
-        task_params = {
-            'error_url': error_url,
-            'inputs_url': inputs_url,
-            'version_number': current_version_number
-        }
-        task_id = await self.submit_task('final_logits_backward', task_params, iteration_number)
-        result = await self.wait_for_result('final_logits_backward', task_id, iteration_number)
-        await self.update_sot_all('final_logits_backward', result, iteration_number=iteration_number)
         return result
 
     async def handle_embed_backward(self, error_url, batch_url, current_version_number, iteration_number):
@@ -350,7 +324,7 @@ class Master:
     async def update_sot_all(self, task_type, result, layer_idx=None, iteration_number=None):
         if task_type == 'embed_backward':
             tensor_name = 'embed'
-        elif task_type == 'final_logits_backward':
+        elif task_type == 'final_logits':
             tensor_name = 'final_logits'
         else:
             tensor_name = f'layer_{layer_idx}'
