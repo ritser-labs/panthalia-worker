@@ -52,16 +52,18 @@ class Master:
 
         self.interactive = plt.isinteractive()
 
+        # Set up the plot
+        self.fig, self.ax = plt.subplots()
+        self.line, = self.ax.plot([], [], label='Perplexity')
+        self.ax.set_xlabel('Iteration')
+        self.ax.set_ylabel('Perplexity')
+        self.ax.set_title('Perplexity over Iterations')
+        self.ax.legend()
+        self.ax.grid(True)
+
         if self.interactive:
-            # Set up the live plot
-            plt.ion()  # Turn on interactive mode
-            self.fig, self.ax = plt.subplots()
-            self.line, = self.ax.plot([], [], label='Perplexity')
-            self.ax.set_xlabel('Iteration')
-            self.ax.set_ylabel('Perplexity')
-            self.ax.set_title('Perplexity over Iterations')
-            self.ax.legend()
-            self.ax.grid(True)
+            # Turn on interactive mode
+            plt.ion()
 
             # Set up the animation
             self.anim = FuncAnimation(self.fig, self.update_plot, interval=1000)
@@ -404,3 +406,4 @@ if __name__ == "__main__":
         plt.show(block=True)
     else:
         master.worker_thread.join()
+
