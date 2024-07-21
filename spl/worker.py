@@ -226,7 +226,7 @@ def create_callback(encoder, pbar):
         pbar.update(monitor.bytes_read - pbar.n)
     return callback
 
-def upload_tensor(tensor, tensor_name):
+async def upload_tensor(tensor, tensor_name):
     tensor_bytes = BytesIO()
     torch.save(tensor, tensor_bytes)
     tensor_bytes.seek(0)
@@ -244,8 +244,10 @@ def upload_tensor(tensor, tensor_name):
     headers = {'Content-Type': monitor.content_type}
     logging.debug("Starting tensor upload...")
 
+    loop = asyncio.get_event_loop()
+
     try:
-        response = requests.post(f'{args.sot_url}/upload_tensor', data=monitor, headers=headers, timeout=300)
+        response = await loop.run_in_executor(None, lambda: requests.post(f'{args.sot_url}/upload_tensor', data=monitor, headers=headers, timeout=300))
         pbar.close()
         logging.debug("Upload completed.")
     except requests.exceptions.Timeout:
@@ -361,35 +363,32 @@ async def process_tasks():
     if task_type == 'embed':
         logging.debug("Executing embed task")
         embed_task(batch)
-        result['result_url'] = upload_tensor(tensors['outputs'], 'embed_outputs')
+        result['result_url'] = await upload_tensor(tensors['outputs'], 'embed_outputs')
     elif task_type == 'forward':
         logging.debug(f"Executing forward task for layer {layer_idx}")
         forward_task(layer_idx, inputs)
-        result['result_url'] = upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')
+        result['result_url'] = await upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')
     elif task_type == 'backward':
         logging.debug(f"Executing backward task for layer {layer_idx}")
         backward_task(layer_idx, error, inputs, accumulation_steps)
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
+        result = await upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
     elif task_type == 'final_logits':
         logging.debug("Executing final_logits task")
         final_logits_task(inputs)
-        result['result_url'] = upload_tensor(tensors['logits'], 'final_logits_outputs')
+        result['result_url'] = await upload_tensor(tensors['logits'], 'final_logits_outputs')
     elif task_type == 'final_logits_backward':
         logging.debug("Executing final_logits_backward task")
         final_logits_backward_task(error, inputs, accumulation_steps)
-        result = upload_tensors_and_grads(tensors['error_output'], tensors['updates'], -1)
+        result = await upload_tensors_and_grads(tensors['error_output'], tensors['updates'], -1)
     elif task_type == 'embed_backward':
         logging.debug("Executing embed_backward task")
         embed_backward_task(error, batch, accumulation_steps)
-        result = upload_tensors_and_grads(None, tensors['updates'], -2)
+        result = await upload_tensors_and_grads(None, tensors['updates'], -2)
     elif task_type == 'loss':
         logging.debug("Executing loss task")
         loss_task(logits, targets)
-        logging.info(1)
         result['loss'] = tensors['loss'].item()
-        logging.info(2)
-        result['result_url'] = upload_tensor(tensors['logits_grad'], 'loss_logits_grad')
-        logging.info(3)
+        result['result_url'] = await upload_tensor(tensors['logits_grad'], 'loss_logits_grad')
 
     await submit_solution(task_id, result)
 
@@ -412,7 +411,7 @@ async def submit_solution(task_id, result):
         logging.error(f"Error submitting solution for task {task_id}: {e}")
         raise
 
-def upload_tensors_and_grads(error_output, grads, layer_idx):
+async def upload_tensors_and_grads(error_output, grads, layer_idx):
     if layer_idx == -1:
         layer_label = "final_logits"
     elif layer_idx == -2:
@@ -422,7 +421,7 @@ def upload_tensors_and_grads(error_output, grads, layer_idx):
 
     grads_flat = torch.cat([grad.view(-1).to(device) for grad in grads])
 
-    grads_url = upload_tensor(grads_flat, f'{layer_label}_grads')
+    grads_url = await upload_tensor(grads_flat, f'{layer_label}_grads')
     
     block_timestamp = web3.eth.get_block('latest')['timestamp']
     version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
@@ -433,7 +432,7 @@ def upload_tensors_and_grads(error_output, grads, layer_idx):
     }
 
     if error_output is not None:
-        result['error_output_url'] = upload_tensor(error_output, f'{layer_label}_error_output')
+        result['error_output_url'] = await upload_tensor(error_output, f'{layer_label}_error_output')
 
     return result
 
@@ -805,7 +804,7 @@ async def main():
             await report_sync_status('synced')
             reported = True
         for event in event_filter.get_new_entries():
-            await handle_event(event)
+            asyncio.create_task(handle_event(event))  # Schedule the event handling as a task
         await check_and_finalize_verifications()
         await asyncio.sleep(1)
 
