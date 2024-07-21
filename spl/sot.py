@@ -4,7 +4,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import model_args, tokenizer, batch_size, initialize_distributed_environment, TENSOR_VERSION_INTERVAL
+from common import model_args, tokenizer, batch_size, initialize_distributed_environment, TENSOR_VERSION_INTERVAL, BUFFER_SIZE
 from datasets import load_dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
@@ -183,44 +183,51 @@ def truncate_tokens(tokens, max_seq_len, pad_token=tokenizer.pad_id):
         tokens = tokens[:max_seq_len]
     return tokens
 
-def preload_batch():
-    global preloaded_batch, dataset_iter
-    min_seq_len = 32
+def generate_examples(buffer_size=BUFFER_SIZE):
+    global dataset_iter
     max_seq_len = 512
+    buffer = []
+
+    try:
+        while True:
+            # Fill the buffer
+            while len(buffer) < buffer_size:
+                example = next(dataset_iter)
+                tokens = tokenizer.encode(
+                    example['text'], 
+                    bos=False, 
+                    eos=False, 
+                    allowed_special=set(), 
+                    disallowed_special=(), 
+                )
+
+                for seq_len in range(1, min(len(tokens), max_seq_len) + 1):
+                    inputs = truncate_tokens(tokens[:seq_len], max_seq_len)
+                    targets = truncate_tokens(tokens[1:seq_len + 1], max_seq_len, tokenizer.eos_id)
+                    buffer.append((inputs, targets))
+
+            # Shuffle the buffer
+            random.shuffle(buffer)
+
+            # Yield items from the buffer
+            while buffer:
+                yield buffer.pop()
+    except StopIteration:
+        # Yield remaining items in buffer after StopIteration
+        while buffer:
+            yield buffer.pop()
+
+def preload_batch():
+    global preloaded_batch
+    example_generator = generate_examples()
     batch = []
     targets = []
 
-    for _ in range(batch_size):
+    while len(batch) < batch_size:
         try:
-            example = next(dataset_iter)
-            tokens = tokenizer.encode(
-                example['text'], 
-                bos=False, 
-                eos=False, 
-                allowed_special=set(), 
-                disallowed_special=(), 
-            )
-            token_length = len(tokens)
-            start_idx = 0
-
-            while start_idx < token_length:
-                # Random sequence length for this pair
-                random_seq_len = random.randint(min_seq_len, max_seq_len)
-                end_idx = min(start_idx + random_seq_len, token_length)
-
-                # Ensure the sequence does not exceed the maximum length
-                inputs = tokens[start_idx:end_idx]
-                targets_tokens = tokens[start_idx + 1:end_idx + 1]
-
-                # Pad or truncate to max_seq_len
-                inputs = truncate_tokens(inputs, max_seq_len)
-                targets_tokens = truncate_tokens(targets_tokens, max_seq_len, tokenizer.eos_id)
-
-                batch.append(inputs)
-                targets.append(targets_tokens)
-
-                start_idx += random_seq_len
-
+            inputs, target_tokens = next(example_generator)
+            batch.append(inputs)
+            targets.append(target_tokens)
         except StopIteration:
             break
 
