@@ -185,6 +185,7 @@ def truncate_tokens(tokens, max_seq_len, pad_token=tokenizer.pad_id):
 
 def preload_batch():
     global preloaded_batch, dataset_iter
+    min_seq_len = 32
     max_seq_len = 512
     batch = []
     targets = []
@@ -199,16 +200,27 @@ def preload_batch():
                 allowed_special=set(), 
                 disallowed_special=(), 
             )
+            token_length = len(tokens)
+            start_idx = 0
 
-            # Make a copy of tokens for target creation
-            inputs = truncate_tokens(tokens, max_seq_len)
+            while start_idx < token_length:
+                # Random sequence length for this pair
+                random_seq_len = random.randint(min_seq_len, max_seq_len)
+                end_idx = min(start_idx + random_seq_len, token_length)
 
-            batch.append(inputs)
+                # Ensure the sequence does not exceed the maximum length
+                inputs = tokens[start_idx:end_idx]
+                targets_tokens = tokens[start_idx + 1:end_idx + 1]
 
-            # Create targets from tokens
-            target_tokens = truncate_tokens(tokens[1:], max_seq_len, tokenizer.eos_id)
+                # Pad or truncate to max_seq_len
+                inputs = truncate_tokens(inputs, max_seq_len)
+                targets_tokens = truncate_tokens(targets_tokens, max_seq_len, tokenizer.eos_id)
 
-            targets.append(target_tokens)
+                batch.append(inputs)
+                targets.append(targets_tokens)
+
+                start_idx += random_seq_len
+
         except StopIteration:
             break
 
