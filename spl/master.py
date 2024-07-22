@@ -372,7 +372,7 @@ if __name__ == "__main__":
     parser.add_argument('--private_key', type=str, required=True, help="Private key for Ethereum account")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--max_simultaneous_iterations', type=int, default=1, help="Maximum number of simultaneous iterations")
+    parser.add_argument('--max_simultaneous_iterations', type=int, default=8, help="Maximum number of simultaneous iterations")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()

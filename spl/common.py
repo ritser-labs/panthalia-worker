@@ -12,26 +12,29 @@ from web3 import Web3
 from enum import Enum
 import web3 as Web3Module
 from collections import namedtuple
+from web3.datastructures import AttributeDict
+from web3.exceptions import ContractLogicError
 from device import device
 import math
 import asyncio
+from hexbytes import HexBytes
 
 # Define the new tokenizer and model arguments
 tokenizer = Tokenizer('r50k_base')
 
 model_args = ModelArgs(
     vocab_size=tokenizer.get_vocab_size(),
-    dim=512,
-    n_layers=4,
-    n_heads=8,
+    dim=384,
+    n_layers=6,
+    n_heads=6,
     multiple_of=256,
     norm_eps=1e-5,
     rope_theta=500000,
     max_batch_size=32,
-    max_seq_len=2048
+    max_seq_len=256
 )
 
-batch_size = 1
+batch_size = 16
 
 BUFFER_SIZE = 1000  # Size of the buffer to shuffle data
 
@@ -166,7 +169,6 @@ def initialize_distributed_environment(backend, master_addr='localhost', master_
     if not dist.is_initialized():
         dist.init_process_group(backend=backend)
 
-
 def decode_custom_error(web3, error_selectors, error_data):
     try:
         if error_data.startswith("0x"):
@@ -195,13 +197,36 @@ def decode_custom_error(web3, error_selectors, error_data):
         logging.error(f"Error decoding message chunk: {e}")
         raise
 
-# Function to get transaction trace
+def process_trace(trace):
+    if isinstance(trace, AttributeDict):
+        return {k: process_trace(v) for k, v in trace.items()}
+    elif isinstance(trace, dict):
+        return {k: process_trace(v) for k, v in trace.items()}
+    elif isinstance(trace, list):
+        return [process_trace(i) for i in trace]
+    elif isinstance(trace, HexBytes):
+        return trace.hex()
+    else:
+        return trace
+
 def get_debug_trace(web3, tx_hash):
-    trace = web3.manager.request_blocking('debug_traceTransaction', [tx_hash])
-    # Convert the trace AttributeDict to a dictionary
-    trace_dict = dict(trace)
-    print(json.dumps(trace_dict, indent=4))
-    return trace_dict
+    try:
+        # Ensure tx_hash is in string format
+        if isinstance(tx_hash, HexBytes):
+            tx_hash = tx_hash.hex()
+        elif isinstance(tx_hash, bytes):
+            tx_hash = tx_hash.hex()
+        
+        trace = web3.manager.request_blocking('debug_traceTransaction', [tx_hash])
+        processed_trace = process_trace(trace)
+        for key, value in processed_trace.items():
+            logging.info(f"{key}: {value}")
+        return processed_trace
+    except Exception as e:
+        logging.error(f"ERROR IN GET_DEBUG_TRACE: {e}")
+        return {}
+
+
 
 def decode_revert_reason(return_value):
     try:
@@ -246,29 +271,28 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                         'to': tx['to'],
                         'data': tx.get('input', b'')
                     }, receipt.blockNumber)
-                except Web3Module.exceptions.ContractLogicError as e:
+                except ContractLogicError as e:
                     logging.error(f"Contract Logic Error: {e}")
-                    # Get detailed trace for the ContractLogicError
                     trace = get_debug_trace(web3, tx_hash)
-                    logging.error(f"Transaction trace: {json.dumps(trace, indent=4)}")
-
-                    # Decode the revert reason
-                    revert_reason = decode_revert_reason(trace['returnValue'])
-                    logging.error(f"Revert reason: {revert_reason}")
-                    raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
-
-                logging.debug(f"Error message: {error_message}")
-                error_selectors = load_error_selectors(web3)
-                decoded_error_message = decode_custom_error(web3, error_selectors, error_message)
-                logging.error(f"Transaction failed with error message: {decoded_error_message}")
-                raise ValueError(f"Transaction failed with status 0. Transaction hash: {receipt['transactionHash']}")
+                    logging.error(f"Transaction trace: {trace}")
+                    if 'returnValue' in trace:
+                        revert_reason = decode_revert_reason(trace['returnValue'])
+                        logging.error(f"Revert reason: {revert_reason}")
+                        raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
+                    else:
+                        raise ValueError(f"Transaction failed without revert reason: {trace}")
 
             return receipt
-        except Web3Module.exceptions.ContractCustomError as e:
-            error_selectors = load_error_selectors(web3)
-            decoded_error_message = decode_custom_error(web3, error_selectors, e.data['data'])
-            logging.error(f"Contract Custom Error: {decoded_error_message}")
-            raise ValueError(f"Contract Custom Error: {decoded_error_message}")
+        except ContractLogicError as e:
+            logging.error(f"Contract Logic Error: {e}")
+            trace = get_debug_trace(web3, tx_hash)
+            logging.error(f"Transaction trace: {trace}")
+            if 'returnValue' in trace:
+                revert_reason = decode_revert_reason(trace['returnValue'])
+                logging.error(f"Revert reason: {revert_reason}")
+                raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
+            else:
+                raise ValueError(f"Transaction failed without revert reason: {trace}")
         except ValueError as e:
             if 'nonce too low' in str(e) or 'replacement transaction underpriced' in str(e):
                 logging.error(f"Nonce too low or replacement transaction underpriced, retrying with higher nonce...")
@@ -278,19 +302,14 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                 raise
         except Exception as e:
             logging.error(f"Unexpected error during transaction: {e}")
-            # Get detailed trace for the failed transaction
             tx_hash = signed_tx.hash.hex()
             trace = get_debug_trace(web3, tx_hash)
-            logging.error(f"Transaction trace: {json.dumps(trace, indent=4)}")
-
-            # Decode the revert reason
+            logging.error(f"Transaction trace: {trace}")
             if 'returnValue' in trace:
                 revert_reason = decode_revert_reason(trace['returnValue'])
                 logging.error(f"Revert reason: {revert_reason}")
             raise
     raise RuntimeError("Failed to send transaction after multiple attempts")
-
-
 
 def get_learning_hyperparameters(current_iteration):
     """
