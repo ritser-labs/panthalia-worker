@@ -18,6 +18,7 @@ from device import device
 import math
 import asyncio
 from hexbytes import HexBytes
+from eth_abi import decode
 
 # Define the new tokenizer and model arguments
 tokenizer = Tokenizer('r50k_base')
@@ -114,7 +115,6 @@ def load_error_selectors(web3, abi_dir='abis'):
                 with open(contract_path, 'r') as abi_file:
                     abi = json.load(abi_file).get('abi', [])
                     extract_error_selectors(abi, web3, error_selectors)
-    logging.info(f"Loaded error selectors: {error_selectors}")
     return error_selectors
 
 def load_contracts(web3, subnet_addresses):
@@ -169,33 +169,6 @@ def initialize_distributed_environment(backend, master_addr='localhost', master_
     if not dist.is_initialized():
         dist.init_process_group(backend=backend)
 
-def decode_custom_error(web3, error_selectors, error_data):
-    try:
-        if error_data.startswith("0x"):
-            error_data = error_data[2:]
-
-        logging.debug(f"Error data without 0x prefix: {error_data}")
-
-        error_bytes = bytes.fromhex(error_data)
-        selector = '0x' + error_bytes[:4].hex().lower()
-        data = error_bytes[4:]
-
-        logging.debug(f"Extracted selector: {selector}")
-        logging.debug(f"Extracted data: {data.hex()}")
-
-        if selector in error_selectors:
-            error_info = error_selectors[selector]
-            error_name = error_info['name']
-            inputs = error_info['inputs']
-            logging.debug(f"Matched error selector {selector} with error {error_name}")
-            decoded_params = web3.codec.decode_abi([input['type'] for input in inputs], data)
-            param_str = ', '.join(f"{input['name']}: {value}" for input, value in zip(inputs, decoded_params))
-            return f"Error {error_name}: {param_str}"
-        else:
-            return f"Unknown error with selector {selector} and data {data.hex()}"
-    except Exception as e:
-        logging.error(f"Error decoding message chunk: {e}")
-        raise
 
 def process_trace(trace):
     if isinstance(trace, AttributeDict):
@@ -226,22 +199,6 @@ def get_debug_trace(web3, tx_hash):
         logging.error(f"ERROR IN GET_DEBUG_TRACE: {e}")
         return {}
 
-
-
-def decode_revert_reason(return_value):
-    try:
-        # Remove the method id (first 4 bytes)
-        hex_string = return_value[8:]
-        # Convert hex to bytes
-        byte_array = bytes.fromhex(hex_string)
-        # Decode bytes to string (utf-8)
-        revert_reason = byte_array.decode('utf-8')
-        return revert_reason
-    except Exception as e:
-        logging.error(f"Error decoding revert reason: {e}")
-        return "Could not decode revert reason"
-
-# Async function to transact with contract
 async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, gas=500000, attempts=5):
     account = web3.eth.account.from_key(private_key)
     gas_price = web3.eth.gas_price
@@ -276,7 +233,7 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                     trace = get_debug_trace(web3, tx_hash)
                     logging.error(f"Transaction trace: {trace}")
                     if 'returnValue' in trace:
-                        revert_reason = decode_revert_reason(trace['returnValue'])
+                        revert_reason = decode_revert_reason(web3, trace['returnValue'])
                         logging.error(f"Revert reason: {revert_reason}")
                         raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
                     else:
@@ -288,7 +245,7 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
             trace = get_debug_trace(web3, tx_hash)
             logging.error(f"Transaction trace: {trace}")
             if 'returnValue' in trace:
-                revert_reason = decode_revert_reason(trace['returnValue'])
+                revert_reason = decode_revert_reason(web3, trace['returnValue'])
                 logging.error(f"Revert reason: {revert_reason}")
                 raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
             else:
@@ -306,10 +263,50 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
             trace = get_debug_trace(web3, tx_hash)
             logging.error(f"Transaction trace: {trace}")
             if 'returnValue' in trace:
-                revert_reason = decode_revert_reason(trace['returnValue'])
+                revert_reason = decode_revert_reason(web3, trace['returnValue'])
                 logging.error(f"Revert reason: {revert_reason}")
             raise
     raise RuntimeError("Failed to send transaction after multiple attempts")
+
+def decode_revert_reason(web3, revert_reason):
+    # Check if the revert reason starts with '0x' and remove it
+    if revert_reason.startswith('0x'):
+        revert_reason = revert_reason[2:]
+
+    selector = '0x' + revert_reason[:8]
+    encoded_data = revert_reason[8:]
+
+    # Define the selector for the 'Error(string)' type
+    error_selector = '0x08c379a0'
+
+    # Check if the selector matches 'Error(string)'
+    if selector == error_selector:
+        # Decode the error message
+        try:
+            # Error(string) has a single argument of type string
+            data_bytes = bytes.fromhex(encoded_data)
+            decoded = decode(['string'], data_bytes)
+            decoded_reason = f"Error: {decoded[0]}"
+            return decoded_reason
+        except Exception as e:
+            logging.error(f"Error decoding revert reason: {e}")
+            return f"Error decoding revert reason: {revert_reason}"
+    
+    # If the selector does not match 'Error(string)', proceed with other selectors
+    error_selectors = load_error_selectors(web3)
+
+    if selector in error_selectors:
+        error_info = error_selectors[selector]
+        name = error_info['name']
+        types = [input['type'] for input in error_info['inputs']]
+        data_bytes = bytes.fromhex(encoded_data)
+        decoded = decode(types, data_bytes)
+        decoded_reason = f"{name}({', '.join(map(str, decoded))})"
+        return decoded_reason
+    else:
+        logging.error(f'Selector {selector} not found in error selectors')
+        logging.error(f'Selectors: {error_selectors}')
+        return f"Unknown revert reason: {revert_reason}"
 
 def get_learning_hyperparameters(current_iteration):
     """
