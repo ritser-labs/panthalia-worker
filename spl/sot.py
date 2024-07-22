@@ -195,7 +195,7 @@ def truncate_tokens(tokens, max_seq_len, pad_token=tokenizer.pad_id):
 
 def generate_examples(buffer_size=BUFFER_SIZE):
     global dataset_iter
-    max_seq_len = 512
+    max_seq_len = model_args.max_seq_len
     buffer = []
 
     try:
