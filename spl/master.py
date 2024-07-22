@@ -16,6 +16,9 @@ from web3.exceptions import ContractCustomError, TransactionNotFound
 from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, decode_custom_error, wait_for_state_change
 from io import BytesIO
 import os
+from eth_account.messages import encode_defunct
+from eth_account import Account
+import uuid
 
 logging.basicConfig(level=logging.INFO)
 
@@ -254,6 +257,21 @@ class Master:
             async with session.get(f"{self.sot_url}/latest_model_params", params={'version_number': current_version_number}) as response:
                 return await response.json()
 
+    def sign_message(self, message):
+        message = encode_defunct(text=message)
+        signed_message = self.account.sign_message(message)
+        return signed_message.signature.hex()
+
+    def generate_message(self, endpoint):
+        nonce = str(uuid.uuid4())
+        timestamp = int(time.time())
+        message = {
+            'endpoint': endpoint,
+            'nonce': nonce,
+            'timestamp': timestamp
+        }
+        return message
+
     async def handle_embed_forward(self, model_params, batch_url, current_version_number, iteration_number):
         task_params = {'batch_url': batch_url, 'model_params': model_params, 'version_number': current_version_number}
         task_id = await self.submit_task('embed', task_params, iteration_number)
@@ -314,8 +332,13 @@ class Master:
             'version_number': result['version_number'],
             **learning_params
         }
+
+        message = json.dumps(self.generate_message('update_state'), sort_keys=True)
+        signature = self.sign_message(message)
+        headers = {'Authorization': f'{message}:{signature}'}
+
         async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self.sot_url}/update_state", json=params) as response:
+            async with session.post(f"{self.sot_url}/update_state", json=params, headers=headers) as response:
                 if response.status != 200:  # Use 'status' instead of 'status_code'
                     logging.error(f"Failed to update SOT for {tensor_name}: {await response.text()}")
                 else:
@@ -331,9 +354,13 @@ class Master:
         await self.update_sot(tensor_name, result)
 
     async def get_batch_and_targets_url(self):
+        message = json.dumps(self.generate_message('get_batch'), sort_keys=True)
+        signature = self.sign_message(message)
+        headers = {'Authorization': f'{message}:{signature}'}
+
         url = os.path.join(self.sot_url, 'get_batch')
         async with aiohttp.ClientSession() as session:
-            async with session.post(url) as response:
+            async with session.post(url, headers=headers) as response:
                 response_json = await response.json()
                 return response_json['batch_url'], response_json['targets_url']
 

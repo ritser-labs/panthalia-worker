@@ -211,7 +211,8 @@ if __name__ == "__main__":
     print("Starting SOT service...")
 
     # Start the SOT service
-    sot_process = subprocess.Popen(['python', 'sot.py'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    #sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address])
     print(f"SOT service started with PID {sot_process.pid}")
 
     # Wait for the SOT service to be available

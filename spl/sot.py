@@ -17,6 +17,10 @@ from tqdm import tqdm
 import torch.nn.init as init
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from model import VocabParallelEmbedding, RMSNorm, ColumnParallelLinear, TransformerBlock
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from web3 import Web3
+import functools
 
 app = Flask(__name__)
 sync_status = {}
@@ -57,6 +61,12 @@ executor = ThreadPoolExecutor(max_workers=10)
 
 # Replace hardcoded URL with a variable
 BASE_URL = 'http://localhost:5001'
+
+# Global variable to store master's public key
+master_public_key = None
+
+# Dictionary to store used nonces
+used_nonces = {}
 
 def calculate_transformer_block_size(args):
     head_dim = args.dim // args.n_heads
@@ -207,6 +217,7 @@ def generate_examples(buffer_size=BUFFER_SIZE):
                     buffer.append((inputs, targets))
 
             # Shuffle the buffer
+
             random.shuffle(buffer)
 
             # Yield items from the buffer
@@ -268,6 +279,59 @@ def fetch(session, url):
         logging.error(f"Error fetching {url}: {e}")
         raise
 
+def verify_signature(message, signature):
+    message = encode_defunct(text=message)
+    recovered_address = Account.recover_message(message, signature=signature)
+    logging.debug(f"Recovered address: {recovered_address}, Expected address: {master_public_key}")
+    return recovered_address.lower() == master_public_key.lower()
+
+def requires_authentication(f):
+    @functools.wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        logging.debug(f"Authorization header: {auth_header}")
+        if not auth_header:
+            logging.error("Authorization header missing")
+            return jsonify({'error': 'Authorization header missing'}), 401
+
+        try:
+            message, signature = auth_header.rsplit(':', 1)
+        except ValueError:
+            logging.error("Invalid Authorization header format")
+            return jsonify({'error': 'Invalid Authorization header format'}), 401
+
+        if not verify_signature(message, signature):
+            logging.error("Invalid signature")
+            return jsonify({'error': 'Invalid signature'}), 403
+
+        # Parse the message to extract the nonce and timestamp
+        try:
+            message_data = json.loads(message)
+            nonce = message_data['nonce']
+            timestamp = message_data['timestamp']
+            logging.debug(f"Message nonce: {nonce}, timestamp: {timestamp}")
+        except (KeyError, json.JSONDecodeError):
+            logging.error("Invalid message format")
+            return jsonify({'error': 'Invalid message format'}), 401
+
+        # Check if the nonce has been used before
+        if nonce in used_nonces:
+            logging.error("Nonce already used")
+            return jsonify({'error': 'Nonce already used'}), 403
+
+        # Check if the message has expired (validity period of 5 minutes)
+        current_time = int(time.time())
+        if current_time - timestamp > 300:
+            logging.error("Message expired")
+            return jsonify({'error': 'Message expired'}), 403
+
+        # Store the nonce to prevent reuse
+        used_nonces[nonce] = True
+
+        return f(*args, **kwargs)
+    return decorated_function
+
+
 @app.route('/latest_model_params', methods=['GET'])
 def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
@@ -280,6 +344,7 @@ def get_latest_model_params():
         return jsonify({'error': 'Could not load model parameters'}), 500
 
 @app.route('/get_batch', methods=['POST'])
+@requires_authentication
 def get_batch():
     logging.info("Accessing /get_batch endpoint")
     global preloaded_batch
@@ -377,6 +442,7 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
     return param_update.view(-1), m_update.view(-1), v_update.view(-1)
 
 @app.route('/update_state', methods=['POST'])
+@requires_authentication
 def update_state():
     logging.info("Accessing /update_state endpoint")
     data = request.get_json()
@@ -581,6 +647,15 @@ def upload_tensor():
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
+    parser.add_argument('--public_key', type=str, required=True, help="Public key of the master for verifying requests")
+
+    args = parser.parse_args()
+
+    master_public_key = args.public_key
+
     logging.info("Starting SOT service...")
     initialize_service()
     app.run(host='0.0.0.0', port=5001, debug=True)
