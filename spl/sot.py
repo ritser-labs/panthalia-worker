@@ -336,8 +336,17 @@ def requires_authentication(f):
 def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
     try:
-        with open(os.path.join(data_dir, 'latest_model_params.json'), 'r') as file:
-            model_params = json.load(file)
+        model_params = {
+            "vocab_size": model_args.vocab_size,
+            "dim": model_args.dim,
+            "n_layers": model_args.n_layers,
+            "n_heads": model_args.n_heads,
+            "multiple_of": model_args.multiple_of,
+            "norm_eps": model_args.norm_eps,
+            "rope_theta": model_args.rope_theta,
+            "max_batch_size": model_args.max_batch_size,
+            "max_seq_len": model_args.max_seq_len
+        }
         return jsonify(model_params)
     except Exception as e:
         logging.error(f"Error accessing /latest_model_params: {e}", exc_info=True)
