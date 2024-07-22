@@ -146,160 +146,171 @@ def terminate_processes(processes):
         process.wait()
 
 if __name__ == "__main__":
-    # Delete all .pt files in the state directory except for the latest version for each tensor
-    state_dir = os.path.join(args.local_storage_dir, 'state')
-    block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
-    delete_old_tensor_files(state_dir, block_timestamps_file)
-
-    # Delete the temp directory
-    temp_dir = os.path.join(state_dir, 'temp')
-    delete_directory_contents(temp_dir)
-
-    # Start Flask server in a separate thread
-    flask_thread = threading.Thread(target=lambda: app.run(port=5002))
-    flask_thread.start()
-
-    # Print initial stage
-    print("Starting deployment...")
-
-    # Set environment variables for deployment
-    os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
-    os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
-    os.environ['LAYERS'] = str(model_args.n_layers)
-    os.environ['SOT_URL'] = args.sot_url
-
-    # Run Deploy.s.sol script from the correct path
-    deploy_command = [
-        'forge', 'script', os.path.basename(args.forge_script),
-        '--broadcast', '--rpc-url', args.rpc_url,
-        '--private-key', args.private_key, '-vv'
-    ]
-    subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
-
-    # Print deployment stage completion
-    print("Deployment completed successfully.")
-
-    # Load subnet addresses and deployment config
-    with open(args.subnet_addresses, 'r') as file:
-        subnet_addresses = json.load(file)
-
-    with open(args.deployment_config, 'r') as file:
-        deployment_config = json.load(file)
-
-    pool_address = deployment_config['pool']
-
-    web3 = Web3(Web3.HTTPProvider(args.rpc_url))
-    deployer_account = web3.eth.account.from_key(args.private_key)
-    deployer_address = deployer_account.address
-    pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
-    token_address = pool_contract.functions.token().call()
-    token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
-
-    # Initialize sync_status with all subnet addresses
-    sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
-
-    # Generate wallets and fund them
-    num_wallets = len(subnet_addresses)
-    wallets = generate_wallets(num_wallets)
-    fund_wallets(web3, wallets, deployer_address, token_contract, 1, 10000 * 10**18)
-
-    worker_processes = []
-    os.environ['RANK'] = '0'
-    os.environ['WORLD_SIZE'] = '1'
-
-    # Print SOT service initialization stage
-    print("Starting SOT service...")
-
-    # Start the SOT service
-    #sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address])
-    print(f"SOT service started with PID {sot_process.pid}")
-
-    # Wait for the SOT service to be available
-    if not wait_for_sot(args.sot_url):
-        print("Error: SOT service did not become available within the timeout period.")
-        sot_process.terminate()
-        exit(1)
-
-    # Print worker initialization stage
-    print("Starting worker processes...")
-
-    # Start worker.py for each subnet
-    for index, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
-        # Determine base_task_type and layer_idx
-        if 'forward_layer' in task_type:
-            base_task_type = 'forward'
-            layer_idx = int(task_type.split('_')[-1])
-        elif 'backward_layer' in task_type:
-            base_task_type = 'backward'
-            layer_idx = int(task_type.split('_')[-1])
-        else:
-            base_task_type = task_type  # Use the full task type as is
-            layer_idx = None
-
-        # Select the corresponding wallet for each worker
-        wallet = wallets[index]
-
-        command = [
-            'python', 'worker.py',
-            '--task_type', base_task_type,
-            '--subnet_address', subnet_address,
-            '--private_key', wallet['private_key'],
-            '--rpc_url', args.rpc_url,
-            '--sot_url', args.sot_url,
-            '--pool_address', pool_address,
-            '--group', str(args.group),
-            '--local_storage_dir', args.local_storage_dir,
-            '--backend', args.backend,
-        ]
-        if layer_idx is not None:
-            command.extend(['--layer_idx', str(layer_idx)])
-        if args.detailed_logs or task_type == 'embed': # or task_type == 'embed_backward':
-            worker_processes.append(subprocess.Popen(command + ['--detailed_logs']))
-        else:
-            worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
+    # Start anvil process
+    print("Starting anvil...")
+    anvil_process = subprocess.Popen(['anvil'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"Anvil started with PID {anvil_process.pid}")
 
     try:
-        # Wait for all workers to sync
-        if not wait_for_workers_to_sync(num_wallets):
-            print("Error: Not all workers synced within the timeout period.")
-            terminate_processes(worker_processes)
+        # Delete all .pt files in the state directory except for the latest version for each tensor
+        state_dir = os.path.join(args.local_storage_dir, 'state')
+        block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
+        delete_old_tensor_files(state_dir, block_timestamps_file)
+
+        # Delete the temp directory
+        temp_dir = os.path.join(state_dir, 'temp')
+        delete_directory_contents(temp_dir)
+
+        # Start Flask server in a separate thread
+        flask_thread = threading.Thread(target=lambda: app.run(port=5002))
+        flask_thread.start()
+
+        # Print initial stage
+        print("Starting deployment...")
+
+        # Set environment variables for deployment
+        os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
+        os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
+        os.environ['LAYERS'] = str(model_args.n_layers)
+        os.environ['SOT_URL'] = args.sot_url
+
+        # Run Deploy.s.sol script from the correct path
+        deploy_command = [
+            'forge', 'script', os.path.basename(args.forge_script),
+            '--broadcast', '--rpc-url', args.rpc_url,
+            '--private-key', args.private_key, '-vv'
+        ]
+        subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
+
+        # Print deployment stage completion
+        print("Deployment completed successfully.")
+
+        # Load subnet addresses and deployment config
+        with open(args.subnet_addresses, 'r') as file:
+            subnet_addresses = json.load(file)
+
+        with open(args.deployment_config, 'r') as file:
+            deployment_config = json.load(file)
+
+        pool_address = deployment_config['pool']
+
+        web3 = Web3(Web3.HTTPProvider(args.rpc_url))
+        deployer_account = web3.eth.account.from_key(args.private_key)
+        deployer_address = deployer_account.address
+        pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
+        token_address = pool_contract.functions.token().call()
+        token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+
+        # Initialize sync_status with all subnet addresses
+        sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
+
+        # Generate wallets and fund them
+        num_wallets = len(subnet_addresses)
+        wallets = generate_wallets(num_wallets)
+        fund_wallets(web3, wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+
+        worker_processes = []
+        os.environ['RANK'] = '0'
+        os.environ['WORLD_SIZE'] = '1'
+
+        # Print SOT service initialization stage
+        print("Starting SOT service...")
+
+        # Start the SOT service
+        sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address])
+        print(f"SOT service started with PID {sot_process.pid}")
+
+        # Wait for the SOT service to be available
+        if not wait_for_sot(args.sot_url):
+            print("Error: SOT service did not become available within the timeout period.")
             sot_process.terminate()
             exit(1)
 
-        # Print master initialization stage
-        print("Starting master process...")
+        # Print worker initialization stage
+        print("Starting worker processes...")
 
-        # Start master.py
-        master_command = [
-            'python', 'master.py',
-            '--rpc_url', args.rpc_url,
-            '--private_key', args.private_key,
-            '--sot_url', args.sot_url,
-            '--subnet_addresses', args.subnet_addresses,
-        ]
-        if args.detailed_logs:
-            master_command.append('--detailed_logs')
-        master_process = subprocess.Popen(master_command)
-        print(f"Started master process with command: {' '.join(master_command)}")
+        # Start worker.py for each subnet
+        for index, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
+            # Determine base_task_type and layer_idx
+            if 'forward_layer' in task_type:
+                base_task_type = 'forward'
+                layer_idx = int(task_type.split('_')[-1])
+            elif 'backward_layer' in task_type:
+                base_task_type = 'backward'
+                layer_idx = int(task_type.split('_')[-1])
+            else:
+                base_task_type = task_type  # Use the full task type as is
+                layer_idx = None
 
-        # Print master started stage
-        print("Master process started.")
+            # Select the corresponding wallet for each worker
+            wallet = wallets[index]
 
-        # Wait for the master process to complete
-        master_process.wait()
+            command = [
+                'python', 'worker.py',
+                '--task_type', base_task_type,
+                '--subnet_address', subnet_address,
+                '--private_key', wallet['private_key'],
+                '--rpc_url', args.rpc_url,
+                '--sot_url', args.sot_url,
+                '--pool_address', pool_address,
+                '--group', str(args.group),
+                '--local_storage_dir', args.local_storage_dir,
+                '--backend', args.backend,
+            ]
+            if layer_idx is not None:
+                command.extend(['--layer_idx', str(layer_idx)])
+            if args.detailed_logs or task_type == 'embed': # or task_type == 'embed_backward':
+                worker_processes.append(subprocess.Popen(command + ['--detailed_logs']))
+            else:
+                worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
+
+        try:
+            # Wait for all workers to sync
+            if not wait_for_workers_to_sync(num_wallets):
+                print("Error: Not all workers synced within the timeout period.")
+                terminate_processes(worker_processes)
+                sot_process.terminate()
+                exit(1)
+
+            # Print master initialization stage
+            print("Starting master process...")
+
+            # Start master.py
+            master_command = [
+                'python', 'master.py',
+                '--rpc_url', args.rpc_url,
+                '--private_key', args.private_key,
+                '--sot_url', args.sot_url,
+                '--subnet_addresses', args.subnet_addresses,
+            ]
+            if args.detailed_logs:
+                master_command.append('--detailed_logs')
+            master_process = subprocess.Popen(master_command)
+            print(f"Started master process with command: {' '.join(master_command)}")
+
+            # Print master started stage
+            print("Master process started.")
+
+            # Wait for the master process to complete
+            master_process.wait()
+
+        finally:
+            # Terminate all worker processes
+            terminate_processes(worker_processes)
+
+            # Terminate the SOT process
+            sot_process.terminate()
+            sot_process.wait()
+
+            # Print final stage
+            print("Test run completed.")
+
+            master_process.terminate()
+            master_process.wait()
 
     finally:
-        # Terminate all worker processes
-        terminate_processes(worker_processes)
-
-        # Terminate the SOT process
-        sot_process.terminate()
-        sot_process.wait()
-
-        # Print final stage
-        print("Test run completed.")
-
-        master_process.terminate()
-        master_process.wait()
+        print("Terminating anvil process...")
+        anvil_process.terminate()
+        anvil_process.wait()
+        print("Anvil process terminated.")
