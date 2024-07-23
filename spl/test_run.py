@@ -302,40 +302,49 @@ if __name__ == "__main__":
         print("Starting worker processes...")
 
         # Start worker.py for each subnet
-        for index, (task_type, subnet_address) in enumerate(subnet_addresses.items()):
-            # Determine base_task_type and layer_idx
-            if 'forward_layer' in task_type:
-                base_task_type = 'forward'
-                layer_idx = int(task_type.split('_')[-1])
-            elif 'backward_layer' in task_type:
-                base_task_type = 'backward'
-                layer_idx = int(task_type.split('_')[-1])
-            else:
-                base_task_type = task_type  # Use the full task type as is
-                layer_idx = None
+        task_order = [
+            'embed',
+            *['forward_layer_{}'.format(i) for i in range(model_args.n_layers)],
+            'final_logits',
+            *['backward_layer_{}'.format(i) for i in range(model_args.n_layers)],
+            'embed_backward'
+        ]
+        for task_type in task_order:
+            if task_type in subnet_addresses:
+                subnet_address = subnet_addresses[task_type]
+                # Determine base_task_type and layer_idx
+                if 'forward_layer' in task_type:
+                    base_task_type = 'forward'
+                    layer_idx = int(task_type.split('_')[-1])
+                elif 'backward_layer' in task_type:
+                    base_task_type = 'backward'
+                    layer_idx = int(task_type.split('_')[-1])
+                else:
+                    base_task_type = task_type  # Use the full task type as is
+                    layer_idx = None
 
-            # Select the corresponding wallet for each worker
-            wallet = wallets[index]
+                # Select the corresponding wallet for each worker
+                wallet = wallets.pop(0)
 
-            command = [
-                'python', 'worker.py',
-                '--task_type', base_task_type,
-                '--subnet_address', subnet_address,
-                '--private_key', wallet['private_key'],
-                '--rpc_url', args.rpc_url,
-                '--sot_url', args.sot_url,
-                '--pool_address', pool_address,
-                '--group', str(args.group),
-                '--local_storage_dir', args.local_storage_dir,
-                '--backend', args.backend,
-            ]
-            if layer_idx is not None:
-                command.extend(['--layer_idx', str(layer_idx)])
-            log_file_path = os.path.join(log_dir, f'worker_{index}.log')
-            log_file = open(log_file_path, 'w')
-            worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
-            processes[f'worker_{index}'] = worker_process
-            print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
+                command = [
+                    'python', 'worker.py',
+                    '--task_type', base_task_type,
+                    '--subnet_address', subnet_address,
+                    '--private_key', wallet['private_key'],
+                    '--rpc_url', args.rpc_url,
+                    '--sot_url', args.sot_url,
+                    '--pool_address', pool_address,
+                    '--group', str(args.group),
+                    '--local_storage_dir', args.local_storage_dir,
+                    '--backend', args.backend,
+                ]
+                if layer_idx is not None:
+                    command.extend(['--layer_idx', str(layer_idx)])
+                log_file_path = os.path.join(log_dir, f'worker_{task_type}.log')
+                log_file = open(log_file_path, 'w')
+                worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
+                processes[f'worker_{task_type}'] = worker_process
+                print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
 
         try:
             # Wait for all workers to sync
