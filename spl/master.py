@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-import requests
+import datetime
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
@@ -13,7 +13,7 @@ import queue
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once
+from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SOLVER_SELECTION_DURATION
 from io import BytesIO
 import os
 from eth_account.messages import encode_defunct
@@ -149,23 +149,31 @@ class Master:
             logging.error(f"Error submitting selection request: {e}")
             raise
 
-    async def select_solver(self, task_type, task_id, iteration_number, max_retries=5, retry_delay=1):
-        for attempt in range(max_retries):
+    async def select_solver(self, task_type, task_id, iteration_number, retry_delay=1):
+        max_duration = datetime.timedelta(seconds=MAX_SOLVER_SELECTION_DURATION)
+        start_time = datetime.datetime.now()
+
+        attempt = 0
+        while True:
+            attempt += 1
+            current_time = datetime.datetime.now()
+            elapsed_time = current_time - start_time
+
+            if elapsed_time >= max_duration:
+                logging.error(f"Failed to select solver within {max_duration}")
+                raise RuntimeError(f"Failed to select solver within {max_duration}")
+
             try:
-                logging.info(f"Selecting solver for task ID: {task_id}, attempt {attempt + 1}/{max_retries}")
+                logging.info(f"Selecting solver for task ID: {task_id}, attempt {attempt}")
 
                 await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.account._private_key)
                 receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id, gas=1000000)
                 logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
                 return
             except Exception as e:
-                logging.error(f"Error selecting solver on attempt {attempt + 1}: {e}")
-                if attempt < max_retries - 1:
-                    logging.info(f"Retrying in {retry_delay} seconds...")
-                    await asyncio.sleep(retry_delay)
-                else:
-                    logging.error(f"Failed to select solver after {max_retries} attempts")
-                    raise
+                logging.error(f"Error selecting solver on attempt {attempt}: {e}")
+                logging.info(f"Retrying in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
 
     async def remove_solver_stake(self, task_type, task_id, iteration_number):
         try:
