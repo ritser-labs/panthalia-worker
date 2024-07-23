@@ -21,7 +21,10 @@ from hexbytes import HexBytes
 from eth_abi import decode
 
 # Define the new tokenizer and model arguments
-tokenizer = Tokenizer('r50k_base')
+current_dir = os.path.dirname(os.path.abspath(__file__))
+tokenizer_path = os.path.join(current_dir, 'tokenizers', 'char.tiktoken')
+
+tokenizer = Tokenizer(tokenizer_path)
 
 model_args = ModelArgs(
     vocab_size=tokenizer.get_vocab_size(),
@@ -40,6 +43,8 @@ batch_size = 16
 BUFFER_SIZE = 1000  # Size of the buffer to shuffle data
 
 TENSOR_VERSION_INTERVAL = 30
+
+MAX_SOLVER_SELECTION_DURATION = 300
 
 # Define Enums
 class TaskStatus(Enum):
@@ -382,7 +387,7 @@ def get_learning_hyperparameters(current_iteration):
     }
 
 async def wait_for_state_change(web3, pool, target_state, private_key):
-    max_retries = 10
+    max_retries = 300
     retries = 0
     while retries < max_retries:
         try:
