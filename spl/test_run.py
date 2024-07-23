@@ -12,6 +12,7 @@ from eth_account import Account
 import glob
 import shutil
 import signal
+import curses
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -61,12 +62,6 @@ def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
             print(f"Waiting for SOT service to be available... {e}")
         time.sleep(2)
     return False
-
-def read_logs(process):
-    for line in process.stdout:
-        print(line.decode(), end='')
-    for line in process.stderr:
-        print(line.decode(), end='')
 
 def wait_for_workers_to_sync(worker_count, timeout=600):
     """Wait for all workers to sync their deposit stake."""
@@ -145,10 +140,69 @@ def terminate_processes(processes):
         process.terminate()
         process.wait()
 
+def monitor_processes(stdscr, processes):
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    stdscr.keypad(True)
+    selected_process = 0
+
+    # Initialize colors
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
+
+    def draw_screen():
+        height, width = stdscr.getmaxyx()
+        split_point = int(width * 0.75)  # Logs take 75% of the screen width
+
+        # Display logs on the left side
+        process_name = list(processes.keys())[selected_process]
+        log_file = os.path.join('logs', f"{process_name}.log")
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as f:
+                log_lines = f.readlines()
+        else:
+            log_lines = []
+
+        for i, line in enumerate(log_lines[-(height - 2):]):  # Leave space for instructions
+            stdscr.addstr(i, 0, line[:split_point])
+
+        # Display processes on the right side
+        for i, (name, process) in enumerate(processes.items()):
+            is_selected = (i == selected_process)
+            status = process.poll() is None
+            color = curses.color_pair(1) if status else curses.color_pair(2)
+            indicator = '*' if is_selected else ' '
+            stdscr.addstr(i, split_point, f"{indicator} {name}", color)
+        
+        stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
+        stdscr.refresh()
+
+    while True:
+        draw_screen()
+        key = stdscr.getch()
+        if key == curses.KEY_UP:
+            selected_process = (selected_process - 1) % len(processes)
+        elif key == curses.KEY_DOWN:
+            selected_process = (selected_process + 1) % len(processes)
+        elif key == ord('q'):
+            terminate_processes(list(processes.values()))
+            break
+        time.sleep(0.1)
+
+    stdscr.keypad(False)  # Reset keypad mode before exiting
+    curses.endwin()
+
 if __name__ == "__main__":
+    processes = {}
+    log_dir = 'logs'
+    os.makedirs(log_dir, exist_ok=True)
+
     # Start anvil process
     print("Starting anvil...")
-    anvil_process = subprocess.Popen(['anvil'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    anvil_log = open(os.path.join(log_dir, 'anvil.log'), 'w')
+    anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log)
+    processes['anvil'] = anvil_process
     print(f"Anvil started with PID {anvil_process.pid}")
 
     try:
@@ -209,7 +263,6 @@ if __name__ == "__main__":
         wallets = generate_wallets(num_wallets)
         fund_wallets(web3, wallets, deployer_address, token_contract, 1, 10000 * 10**18)
 
-        worker_processes = []
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
 
@@ -217,7 +270,9 @@ if __name__ == "__main__":
         print("Starting SOT service...")
 
         # Start the SOT service
-        sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address])
+        sot_log = open(os.path.join(log_dir, 'sot.log'), 'w')
+        sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address], stdout=sot_log, stderr=sot_log)
+        processes['sot'] = sot_process
         print(f"SOT service started with PID {sot_process.pid}")
 
         # Wait for the SOT service to be available
@@ -259,24 +314,24 @@ if __name__ == "__main__":
             ]
             if layer_idx is not None:
                 command.extend(['--layer_idx', str(layer_idx)])
-            if args.detailed_logs or task_type == 'embed': # or task_type == 'embed_backward':
-                worker_processes.append(subprocess.Popen(command + ['--detailed_logs']))
-            else:
-                worker_processes.append(subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            log_file_path = os.path.join(log_dir, f'worker_{index}.log')
+            log_file = open(log_file_path, 'w')
+            worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
+            processes[f'worker_{index}'] = worker_process
             print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
 
         try:
             # Wait for all workers to sync
             if not wait_for_workers_to_sync(num_wallets):
                 print("Error: Not all workers synced within the timeout period.")
-                terminate_processes(worker_processes)
-                sot_process.terminate()
+                terminate_processes(processes.values())
                 exit(1)
 
             # Print master initialization stage
             print("Starting master process...")
 
             # Start master.py
+            master_log = open(os.path.join(log_dir, 'master.log'), 'w')
             master_command = [
                 'python', 'master.py',
                 '--rpc_url', args.rpc_url,
@@ -286,28 +341,25 @@ if __name__ == "__main__":
             ]
             if args.detailed_logs:
                 master_command.append('--detailed_logs')
-            master_process = subprocess.Popen(master_command)
+            master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log)
+            processes['master'] = master_process
             print(f"Started master process with command: {' '.join(master_command)}")
 
             # Print master started stage
             print("Master process started.")
+
+            # Start the curses interface in a new thread
+            curses.wrapper(monitor_processes, processes)
 
             # Wait for the master process to complete
             master_process.wait()
 
         finally:
             # Terminate all worker processes
-            terminate_processes(worker_processes)
-
-            # Terminate the SOT process
-            sot_process.terminate()
-            sot_process.wait()
+            terminate_processes(processes.values())
 
             # Print final stage
             print("Test run completed.")
-
-            master_process.terminate()
-            master_process.wait()
 
     finally:
         print("Terminating anvil process...")
