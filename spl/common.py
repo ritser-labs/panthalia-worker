@@ -292,7 +292,23 @@ def decode_revert_reason(web3, revert_reason):
             logging.error(f"Error decoding revert reason: {e}")
             return f"Error decoding revert reason: {revert_reason}"
     
-    # If the selector does not match 'Error(string)', proceed with other selectors
+    # Define the selector for the 'Panic(uint256)' type
+    panic_selector = '0x4e487b71'
+
+    # Check if the selector matches 'Panic(uint256)'
+    if selector == panic_selector:
+        # Decode the panic code
+        try:
+            # Panic(uint256) has a single argument of type uint256
+            data_bytes = bytes.fromhex(encoded_data)
+            decoded = decode(['uint256'], data_bytes)
+            decoded_reason = f"Panic: {hex(decoded[0])}"
+            return decoded_reason
+        except Exception as e:
+            logging.error(f"Error decoding panic code: {e}")
+            return f"Error decoding panic code: {revert_reason}"
+    
+    # If the selector does not match 'Error(string)' or 'Panic(uint256)', proceed with other selectors
     error_selectors = load_error_selectors(web3)
 
     if selector in error_selectors:
@@ -325,6 +341,7 @@ async def deposit_stake_without_approval(web3, pool_contract, private_key, subne
                 await wait_for_state_change(web3, pool_contract, PoolState.Unlocked.value, private_key)
                 receipt = await async_transact_with_contract_function(web3, pool_contract, 'depositStake', private_key, subnet_id, group)
                 logging.info(f"depositStake transaction receipt: {receipt}")
+            logging.info(f"Deposited {max_stakes - len(stakes_deposited)} stakes for {worker_address}, total stakes: {max_stakes}")
         except Exception as e:
             logging.error(f"Failed to deposit stake: {e}")
             raise
