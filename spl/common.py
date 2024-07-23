@@ -340,18 +340,32 @@ async def approve_token_once(web3, token_contract, private_key, spender_address,
     else:
         logging.info("Current allowance is sufficient, no need to approve more tokens.")
 
-async def deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, group, worker_address, stake_amount, max_stakes):
+async def deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, group, worker_address, stake_amount, max_stakes, max_retries=10):
     stakes_deposited = pool_contract.functions.getStakeIds(subnet_id, group, worker_address).call()
-    if len(stakes_deposited) < max_stakes:
-        try:
-            for _ in range(max_stakes - len(stakes_deposited)):
+    number_of_stakes_to_deposit = max_stakes - len(stakes_deposited)
+
+    if number_of_stakes_to_deposit > 0:
+        for attempt in range(max_retries):  # Use max_retries variable
+            try:
                 await wait_for_state_change(web3, pool_contract, PoolState.Unlocked.value, private_key)
-                receipt = await async_transact_with_contract_function(web3, pool_contract, 'depositStake', private_key, subnet_id, group)
-                logging.info(f"depositStake transaction receipt: {receipt}")
-            logging.info(f"Deposited {max_stakes - len(stakes_deposited)} stakes for {worker_address}, total stakes: {max_stakes}")
-        except Exception as e:
-            logging.error(f"Failed to deposit stake: {e}")
-            raise
+                receipt = await async_transact_with_contract_function(
+                    web3, 
+                    pool_contract, 
+                    'depositMultipleStakes', 
+                    private_key, 
+                    subnet_id, 
+                    group, 
+                    number_of_stakes_to_deposit
+                )
+                logging.info(f"depositMultipleStakes transaction receipt: {receipt}")
+                logging.info(f"Deposited {number_of_stakes_to_deposit} stakes for {worker_address}, total stakes: {max_stakes}")
+                break  # Exit loop if successful
+            except Exception as e:
+                logging.error(f"Failed to deposit stakes on attempt {attempt + 1}: {e}")
+                if attempt == max_retries - 1:
+                    raise  # Rethrow the exception after the last attempt
+                await asyncio.sleep(1)  # Wait before retrying
+
 
 def get_learning_hyperparameters(current_iteration):
     """
