@@ -12,7 +12,7 @@ from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
-from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, PoolState
+from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, PoolState, approve_token_once, deposit_stake_without_approval
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional, Tuple
 from io import BytesIO
@@ -64,7 +64,7 @@ def parse_args():
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
     parser.add_argument('--sync_url', type=str, required=False, help="URL for reporting sync status", default='http://localhost:5002')
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
-    parser.add_argument('--max_stakes', type=int, default=2, help="Maximum number of stakes to maintain")
+    parser.add_argument('--max_stakes', type=int, default=8, help="Maximum number of stakes to maintain")
     return parser.parse_args()
 
 args = parse_args()
@@ -269,19 +269,7 @@ def resume_gradient_updates():
     gradient_update_paused = False
 
 async def deposit_stake():
-    stakes_deposited = pool_contract.functions.getStakeIds(subnet_id, args.group, worker_address).call()
-    max_stakes = args.max_stakes
-    if len(stakes_deposited) < max_stakes:
-        try:
-            for _ in range(max_stakes - len(stakes_deposited)):
-                receipt = await async_transact_with_contract_function(web3, token_contract, 'approve', args.private_key, args.pool_address, stake_amount)
-                logging.info(f"Approved token transaction receipt: {receipt}")
-                await wait_for_state_change(web3, pool_contract, PoolState.Unlocked.value, args.private_key)
-                receipt = await async_transact_with_contract_function(web3, pool_contract, 'depositStake', args.private_key, subnet_id, args.group)
-                logging.info(f"depositStake transaction receipt: {receipt}")
-        except Exception as e:
-            logging.error(f"Failed to deposit stake: {e}")
-            raise
+    await deposit_stake_without_approval(web3, pool_contract, args.private_key, subnet_id, args.group, worker_address, stake_amount, args.max_stakes)
 
 async def handle_event(event):
     task_id = event['args']['taskId']
@@ -722,6 +710,9 @@ async def main():
     torch.set_default_device(device)
     initialize_distributed_environment_and_globals()
     event_filter = contract.events.SolverSelected.create_filter(fromBlock='latest')
+
+    # Approve tokens once at the start
+    await approve_token_once(web3, token_contract, args.private_key, args.pool_address, 2**256 - 1)
 
     logging.info("Starting tensor synchronization...")
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)

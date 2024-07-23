@@ -308,6 +308,27 @@ def decode_revert_reason(web3, revert_reason):
         logging.error(f'Selectors: {error_selectors}')
         return f"Unknown revert reason: {revert_reason}"
 
+async def approve_token_once(web3, token_contract, private_key, spender_address, amount):
+    account = web3.eth.account.from_key(private_key)
+    current_allowance = token_contract.functions.allowance(account.address, spender_address).call()
+    if current_allowance < amount:
+        receipt = await async_transact_with_contract_function(web3, token_contract, 'approve', private_key, spender_address, amount)
+        logging.info(f"Approved token transaction receipt: {receipt}")
+    else:
+        logging.info("Current allowance is sufficient, no need to approve more tokens.")
+
+async def deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, group, worker_address, stake_amount, max_stakes):
+    stakes_deposited = pool_contract.functions.getStakeIds(subnet_id, group, worker_address).call()
+    if len(stakes_deposited) < max_stakes:
+        try:
+            for _ in range(max_stakes - len(stakes_deposited)):
+                await wait_for_state_change(web3, pool_contract, PoolState.Unlocked.value, private_key)
+                receipt = await async_transact_with_contract_function(web3, pool_contract, 'depositStake', private_key, subnet_id, group)
+                logging.info(f"depositStake transaction receipt: {receipt}")
+        except Exception as e:
+            logging.error(f"Failed to deposit stake: {e}")
+            raise
+
 def get_learning_hyperparameters(current_iteration):
     """
     Calculate the learning rate using cosine annealing with warm restarts.

@@ -13,7 +13,7 @@ import queue
 from web3 import Web3
 from web3.middleware import geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change
+from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once
 from io import BytesIO
 import os
 from eth_account.messages import encode_defunct
@@ -63,6 +63,11 @@ class Master:
         # Run the main iterations in the main thread
         asyncio.run(self.main())
 
+    async def approve_tokens_at_start(self):
+        for contract in self.contracts.values():
+            token_address = contract.functions.token().call()
+            await approve_token_once(self.web3, self.web3.eth.contract(address=token_address, abi=self.abis['ERC20']), self.account._private_key, contract.address, 2**256 - 1)
+
     def update_plot(self, frame=None):
         while not self.perplexity_queue.empty():
             perplexity = self.perplexity_queue.get()
@@ -85,11 +90,6 @@ class Master:
 
             logging.info(f"Submitting task of type {task_type} with params: {params}")
             encoded_params = json.dumps(params).encode('utf-8')
-
-            fee = self.contracts[task_type].functions.calculateFee(0).call()
-            token_address = self.contracts[task_type].functions.token().call()
-            spender_address = self.contracts[task_type].address
-            await self.approve_token(token_address, spender_address, fee)
 
             for _ in range(5):  # Retry up to 5 times
                 try:
@@ -231,6 +231,9 @@ class Master:
 
     async def main(self):
         logging.info("Starting main process")
+        # Approve tokens once at the beginning
+        await self.approve_tokens_at_start()
+
         tasks = set()
 
         for _ in range(self.max_simultaneous_iterations):
@@ -372,7 +375,7 @@ if __name__ == "__main__":
     parser.add_argument('--private_key', type=str, required=True, help="Private key for Ethereum account")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--max_simultaneous_iterations', type=int, default=1, help="Maximum number of simultaneous iterations")
+    parser.add_argument('--max_simultaneous_iterations', type=int, default=40, help="Maximum number of simultaneous iterations")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()
