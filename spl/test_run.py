@@ -140,6 +140,16 @@ def terminate_processes(processes):
         process.terminate()
         process.wait()
 
+def reset_logs(log_dir):
+    if os.path.exists(log_dir):
+        for file_name in os.listdir(log_dir):
+            file_path = os.path.join(log_dir, file_name)
+            try:
+                os.remove(file_path)
+                print(f"Deleted log file: {file_path}")
+            except Exception as e:
+                print(f"Error deleting log file {file_path}: {e}")
+
 def monitor_processes(stdscr, processes):
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -151,9 +161,12 @@ def monitor_processes(stdscr, processes):
     curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
 
+    max_name_length = max(len(name) for name in processes.keys()) + 3  # Adding padding for indicator and spaces
+    right_col_width = max_name_length + 2  # Additional padding
+
     def draw_screen():
         height, width = stdscr.getmaxyx()
-        split_point = int(width * 0.75)  # Logs take 75% of the screen width
+        split_point = width - right_col_width  # Right column width based on max name length
 
         # Display logs on the left side
         process_name = list(processes.keys())[selected_process]
@@ -192,11 +205,15 @@ def monitor_processes(stdscr, processes):
 
     stdscr.keypad(False)  # Reset keypad mode before exiting
     curses.endwin()
+    os._exit(0)  # Force exit the program
 
 if __name__ == "__main__":
     processes = {}
     log_dir = 'logs'
     os.makedirs(log_dir, exist_ok=True)
+
+    # Reset logs
+    reset_logs(log_dir)
 
     # Start anvil process
     print("Starting anvil...")
