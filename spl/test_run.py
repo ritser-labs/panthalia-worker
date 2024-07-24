@@ -160,6 +160,7 @@ def monitor_processes(stdscr, processes):
     curses.start_color()
     curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
+    curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)  # Cool color for the simulator text
 
     max_name_length = max(len(name) for name in processes.keys()) + 3  # Adding padding for indicator and spaces
     right_col_width = max_name_length + 2  # Additional padding
@@ -178,7 +179,11 @@ def monitor_processes(stdscr, processes):
             log_lines = []
 
         for i, line in enumerate(log_lines[-(height - 2):]):  # Leave space for instructions
-            stdscr.addstr(i, 0, line[:split_point])
+            stdscr.addstr(i, 0, line[:split_point - 2])
+
+        # Draw the separator line after all left side content is drawn
+        for y in range(height):
+            stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
 
         # Display processes on the right side
         for i, (name, process) in enumerate(processes.items()):
@@ -189,6 +194,8 @@ def monitor_processes(stdscr, processes):
             stdscr.addstr(i, split_point, f"{indicator} {name}", color)
         
         stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
+        # Add the "PANTHALIA SIMULATOR V0" text at the bottom of the right column
+        stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
         stdscr.refresh()
 
     while True:
@@ -306,7 +313,7 @@ if __name__ == "__main__":
             'embed',
             *['forward_layer_{}'.format(i) for i in range(model_args.n_layers)],
             'final_logits',
-            *['backward_layer_{}'.format(i) for i in range(model_args.n_layers)],
+            *['backward_layer_{}'.format(i) for i in reversed(range(model_args.n_layers))],
             'embed_backward'
         ]
         for task_type in task_order:
