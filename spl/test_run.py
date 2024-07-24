@@ -5,14 +5,18 @@ import time
 import argparse
 import requests
 import threading
+import curses
 from flask import Flask, request, jsonify
 from common import model_args, load_abi
 from web3 import Web3
 from eth_account import Account
 import glob
 import shutil
-import signal
-import curses
+import asyncio
+import logging
+
+# Configure logging
+logging.basicConfig(filename='test_run.log', level=logging.DEBUG)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -39,12 +43,12 @@ def report_sync():
     status = request.args.get('status')
     layer_idx = request.args.get('layer_idx')
     key = f"{task_type}_{layer_idx}" if layer_idx else task_type
-    print(f"Received sync report for task_type={task_type}, layer_idx={layer_idx}, status={status}")
+    logging.debug(f"Received sync report for task_type={task_type}, layer_idx={layer_idx}, status={status}")
     if task_type and status:
         sync_status[key] = status
         synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
         total_workers = len(sync_status)
-        print(f"Synced {synced_workers}/{total_workers} workers.")
+        logging.debug(f"Synced {synced_workers}/{total_workers} workers.")
         return jsonify({'status': 'success'})
     else:
         return jsonify({'status': 'error', 'message': 'Missing argument'}), 400
@@ -56,10 +60,10 @@ def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
         try:
             response = requests.get(f"{sot_url}/health")
             if response.status_code == 200:
-                print("SOT service is available.")
+                logging.debug("SOT service is available.")
                 return True
         except requests.ConnectionError as e:
-            print(f"Waiting for SOT service to be available... {e}")
+            logging.debug(f"Waiting for SOT service to be available... {e}")
         time.sleep(2)
     return False
 
@@ -68,12 +72,12 @@ def wait_for_workers_to_sync(worker_count, timeout=600):
     start_time = time.time()
     while time.time() - start_time < timeout:
         synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
-        print(f"Synced {synced_workers}/{worker_count} workers.")
+        logging.debug(f"Synced {synced_workers}/{worker_count} workers.")
         if synced_workers >= worker_count:
-            print("All workers have synced.")
+            logging.debug("All workers have synced.")
             return True
         time.sleep(2)
-    print("Timeout waiting for workers to sync.")
+    logging.debug("Timeout waiting for workers to sync.")
     return False
 
 def generate_wallets(num_wallets):
@@ -100,17 +104,17 @@ def delete_old_tensor_files(directory, timestamps_file):
         if os.path.basename(tensor_file) not in latest_files:
             try:
                 os.remove(tensor_file)
-                print(f"Deleted old tensor file: {tensor_file}")
+                logging.debug(f"Deleted old tensor file: {tensor_file}")
             except Exception as e:
-                print(f"Error deleting file {tensor_file}: {e}")
+                logging.debug(f"Error deleting file {tensor_file}: {e}")
 
 def delete_directory_contents(directory):
     if os.path.exists(directory):
         try:
             shutil.rmtree(directory)
-            print(f"Deleted directory: {directory}")
+            logging.debug(f"Deleted directory: {directory}")
         except Exception as e:
-            print(f"Error deleting directory {directory}: {e}")
+            logging.debug(f"Error deleting directory {directory}: {e}")
 
 def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token):
     for wallet in wallets:
@@ -144,18 +148,17 @@ def terminate_processes(processes):
         except subprocess.TimeoutExpired:
             process.kill()  # Forcefully kill the process if it doesn't terminate in time
 
-
 def reset_logs(log_dir):
     if os.path.exists(log_dir):
         for file_name in os.listdir(log_dir):
             file_path = os.path.join(log_dir, file_name)
             try:
                 os.remove(file_path)
-                print(f"Deleted log file: {file_path}")
+                logging.debug(f"Deleted log file: {file_path}")
             except Exception as e:
-                print(f"Error deleting log file {file_path}: {e}")
+                logging.debug(f"Error deleting log file {file_path}: {e}")
 
-def monitor_processes(stdscr, processes):
+def monitor_processes(stdscr, processes, task_counts):
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
@@ -167,7 +170,7 @@ def monitor_processes(stdscr, processes):
     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
     curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)  # Cool color for the simulator text
 
-    max_name_length = max(len(name) for name in processes.keys()) + 3  # Adding padding for indicator and spaces
+    max_name_length = max(len(name) for name in processes.keys()) + 11  # Increased padding by 3 more characters
     right_col_width = max_name_length + 2  # Additional padding
 
     def draw_screen():
@@ -196,7 +199,17 @@ def monitor_processes(stdscr, processes):
             status = process.poll() is None
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
-            stdscr.addstr(i, split_point, f"{indicator} {name}", color)
+
+            # Remove "worker_" prefix for task name matching
+            task_name = name.replace('worker_', '')
+
+            # Only display task count for worker processes
+            if name.startswith('worker_'):
+                task_count = task_counts.get(task_name, 0)
+                logging.debug(f"Displaying task count for {name}: {task_count}")
+                stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count} tasks)", color)
+            else:
+                stdscr.addstr(i, split_point, f"{indicator} {name}", color)
         
         stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
         # Add the "PANTHALIA SIMULATOR V0" text at the bottom of the right column
@@ -219,8 +232,36 @@ def monitor_processes(stdscr, processes):
     curses.endwin()
     os._exit(0)  # Force exit the program
 
+async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
+    tracked_tasks = set()
+
+    async def fetch_task_counts():
+        while True:
+            try:
+                for task_type, contract_address in subnet_addresses.items():
+                    contract = web3.eth.contract(address=contract_address, abi=load_abi('SubnetManager'))
+                    num_tasks = contract.functions.numTasks().call()
+                    task_count = 0
+
+                    for task_id in range(num_tasks):
+                        task = contract.functions.getTask(task_id).call()
+                        if task.status in [0, 1, 2]:  # Adjust status based on which ones you want to track
+                            tracked_tasks.add((contract_address, task_id))
+                            task_count += 1
+                        elif (contract_address, task_id) in tracked_tasks:
+                            tracked_tasks.remove((contract_address, task_id))
+
+                    task_counts[task_type] = task_count
+                    logging.debug(f"Task count for {task_type}: {task_count}")
+                await asyncio.sleep(30)  # Fetch task counts every 30 seconds
+            except Exception as e:
+                logging.error(f"Error fetching task counts: {e}")
+
+    await fetch_task_counts()
+
 if __name__ == "__main__":
     processes = {}
+    task_counts = {}  # Dictionary to store task counts
     log_dir = 'logs'
     os.makedirs(log_dir, exist_ok=True)
 
@@ -228,11 +269,11 @@ if __name__ == "__main__":
     reset_logs(log_dir)
 
     # Start anvil process
-    print("Starting anvil...")
+    logging.info("Starting anvil...")
     anvil_log = open(os.path.join(log_dir, 'anvil.log'), 'w')
     anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log)
     processes['anvil'] = anvil_process
-    print(f"Anvil started with PID {anvil_process.pid}")
+    logging.info(f"Anvil started with PID {anvil_process.pid}")
 
     try:
         # Delete all .pt files in the state directory except for the latest version for each tensor
@@ -249,7 +290,7 @@ if __name__ == "__main__":
         flask_thread.start()
 
         # Print initial stage
-        print("Starting deployment...")
+        logging.info("Starting deployment...")
 
         # Set environment variables for deployment
         os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
@@ -266,7 +307,7 @@ if __name__ == "__main__":
         subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
 
         # Print deployment stage completion
-        print("Deployment completed successfully.")
+        logging.info("Deployment completed successfully.")
 
         # Load subnet addresses and deployment config
         with open(args.subnet_addresses, 'r') as file:
@@ -296,22 +337,22 @@ if __name__ == "__main__":
         os.environ['WORLD_SIZE'] = '1'
 
         # Print SOT service initialization stage
-        print("Starting SOT service...")
+        logging.info("Starting SOT service...")
 
         # Start the SOT service
         sot_log = open(os.path.join(log_dir, 'sot.log'), 'w')
         sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address], stdout=sot_log, stderr=sot_log)
         processes['sot'] = sot_process
-        print(f"SOT service started with PID {sot_process.pid}")
+        logging.info(f"SOT service started with PID {sot_process.pid}")
 
         # Wait for the SOT service to be available
         if not wait_for_sot(args.sot_url):
-            print("Error: SOT service did not become available within the timeout period.")
+            logging.error("Error: SOT service did not become available within the timeout period.")
             sot_process.terminate()
             exit(1)
 
         # Print worker initialization stage
-        print("Starting worker processes...")
+        logging.info("Starting worker processes...")
 
         # Start worker.py for each subnet
         task_order = [
@@ -356,17 +397,17 @@ if __name__ == "__main__":
                 log_file = open(log_file_path, 'w')
                 worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
                 processes[f'worker_{task_type}'] = worker_process
-                print(f"Started worker process for task {task_type} with command: {' '.join(command)}")
+                logging.info(f"Started worker process for task {task_type} with command: {' '.join(command)}")
 
         try:
             # Wait for all workers to sync
             if not wait_for_workers_to_sync(num_wallets):
-                print("Error: Not all workers synced within the timeout period.")
+                logging.error("Error: Not all workers synced within the timeout period.")
                 terminate_processes(processes.values())
                 exit(1)
 
             # Print master initialization stage
-            print("Starting master process...")
+            logging.info("Starting master process...")
 
             # Start master.py
             master_log = open(os.path.join(log_dir, 'master.log'), 'w')
@@ -381,26 +422,24 @@ if __name__ == "__main__":
                 master_command.append('--detailed_logs')
             master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log)
             processes['master'] = master_process
-            print(f"Started master process with command: {' '.join(master_command)}")
+            logging.info(f"Started master process with command: {' '.join(master_command)}")
 
             # Print master started stage
-            print("Master process started.")
+            logging.info("Master process started.")
 
             # Start the curses interface in a new thread
-            curses.wrapper(monitor_processes, processes)
+            curses_thread = threading.Thread(target=curses.wrapper, args=(monitor_processes, processes, task_counts))
+            curses_thread.start()
 
-            # Wait for the master process to complete
-            master_process.wait()
+            # Run the task tracking in an asyncio loop
+            asyncio.run(track_tasks(web3, subnet_addresses, pool_contract, task_counts))
 
-        finally:
-            # Terminate all worker processes
-            terminate_processes(processes.values())
+        except Exception as e:
+            logging.error(f"Error: {e}")
+            terminate_processes(list(processes.values()))
+            exit(1)
 
-            # Print final stage
-            print("Test run completed.")
-
-    finally:
-        print("Terminating anvil process...")
-        anvil_process.terminate()
-        anvil_process.wait()
-        print("Anvil process terminated.")
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        terminate_processes(list(processes.values()))
+        exit(1)
