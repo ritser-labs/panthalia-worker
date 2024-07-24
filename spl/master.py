@@ -60,8 +60,8 @@ class Master:
         self.ax.legend()
         self.ax.grid(True)
 
-        # Run the main iterations in the main thread
-        asyncio.run(self.main())
+        # Run the main iterations in separate threads
+        asyncio.run(self.run_main())
 
     async def approve_tokens_at_start(self):
         for contract in self.contracts.values():
@@ -237,31 +237,27 @@ class Master:
         # Update the plot explicitly
         self.update_plot()
 
-    async def main(self):
+    async def run_iteration_thread(self, iteration_number):
+        while True:
+            try:
+                await self.main_iteration(iteration_number)
+                break
+            except Exception as e:
+                logging.error(f"Error in iteration {iteration_number}: {e}. Retrying...")
+
+    async def run_main(self):
         logging.info("Starting main process")
-        # Approve tokens once at the beginning
         await self.approve_tokens_at_start()
 
-        tasks = set()
-
+        threads = []
         for _ in range(self.max_simultaneous_iterations):
-            tasks.add(asyncio.create_task(self.main_iteration(self.iteration)))
+            thread = threading.Thread(target=lambda: asyncio.run(self.run_iteration_thread(self.iteration)))
+            threads.append(thread)
+            thread.start()
             self.iteration += 1
 
-        while tasks:
-            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-
-            for task in done:
-                try:
-                    await task
-                except Exception as e:
-                    logging.error(f"Iteration ended with error: {e}")
-
-                new_task = asyncio.create_task(self.main_iteration(self.iteration))
-                tasks.add(new_task)
-                self.iteration += 1
-
-        logging.info("All iterations completed")
+        for thread in threads:
+            thread.join()
 
     async def get_latest_model_params(self, current_version_number):
         async with aiohttp.ClientSession() as session:
