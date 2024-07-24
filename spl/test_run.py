@@ -16,7 +16,9 @@ import asyncio
 import logging
 
 # Configure logging
-logging.basicConfig(filename='test_run.log', level=logging.DEBUG)
+log_dir = 'logs'
+os.makedirs(log_dir, exist_ok=True)
+logging.basicConfig(filename=os.path.join(log_dir, 'test_run.log'), level=logging.DEBUG)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -174,6 +176,7 @@ def monitor_processes(stdscr, processes, task_counts):
     right_col_width = max_name_length + 2  # Additional padding
 
     def draw_screen():
+        stdscr.clear()
         height, width = stdscr.getmaxyx()
         split_point = width - right_col_width  # Right column width based on max name length
 
@@ -186,7 +189,16 @@ def monitor_processes(stdscr, processes, task_counts):
         else:
             log_lines = []
 
-        for i, line in enumerate(log_lines[-(height - 2):]):  # Leave space for instructions
+        main_log_file = os.path.join('logs', 'test_run.log')
+        if os.path.exists(main_log_file):
+            with open(main_log_file, 'r') as f:
+                main_log_lines = f.readlines()
+        else:
+            main_log_lines = []
+
+        combined_log_lines = log_lines + main_log_lines
+
+        for i, line in enumerate(combined_log_lines[-(height - 2):]):  # Leave space for instructions
             stdscr.addstr(i, 0, line[:split_point - 2])
 
         # Draw the separator line after all left side content is drawn
@@ -223,6 +235,8 @@ def monitor_processes(stdscr, processes, task_counts):
             selected_process = (selected_process - 1) % len(processes)
         elif key == curses.KEY_DOWN:
             selected_process = (selected_process + 1) % len(processes)
+        elif key == curses.KEY_RESIZE:
+            draw_screen()
         elif key == ord('q'):
             terminate_processes(list(processes.values()))
             break
