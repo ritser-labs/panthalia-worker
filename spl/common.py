@@ -254,7 +254,7 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
 
             return receipt
         except ContractLogicError as e:
-            logging.error(f"Contract Logic Error: {e}")
+            logging.error(f"Contract Logic Error - {function_name}: {e}")
             if 'tx_hash' in locals():
                 trace = get_debug_trace(web3, tx_hash)
                 logging.error(f"Transaction trace: {trace}")
@@ -269,10 +269,10 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                 logging.error(f"Nonce too low or replacement transaction underpriced, retrying with higher nonce...")
                 await asyncio.sleep(1)  # Wait for a while before retrying
             else:
-                logging.error(f"Transaction error: {e}")
+                logging.error(f"Transaction error - {function_name}: {e}")
                 raise
         except Exception as e:
-            logging.error(f"Unexpected error during transaction: {e}")
+            logging.error(f"Unexpected error during {function_name}: {e}")
             if 'tx_hash' in locals():
                 trace = get_debug_trace(web3, tx_hash)
                 logging.error(f"Transaction trace: {trace}")
@@ -280,7 +280,7 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                     revert_reason = decode_revert_reason(web3, trace['returnValue'])
                     logging.error(f"Revert reason: {revert_reason}")
             raise
-    raise RuntimeError("Failed to send transaction after multiple attempts")
+    raise RuntimeError(f'Failed to send transaction for {function_name} after multiple attempts')
 
 
 def decode_revert_reason(web3, revert_reason):
