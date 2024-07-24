@@ -80,7 +80,7 @@ class Master:
 
     async def approve_token(self, token_address, spender_address, amount):
         token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
-        receipt = await async_transact_with_contract_function(self.web3, token_contract, 'approve', self.account._private_key, spender_address, amount, gas=100000)
+        receipt = await async_transact_with_contract_function(self.web3, token_contract, 'approve', self.account._private_key, spender_address, amount)
         logging.info(f"Approved token transaction receipt: {receipt}")
 
     async def submit_task(self, task_type, params, iteration_number):
@@ -94,7 +94,7 @@ class Master:
             for _ in range(5):  # Retry up to 5 times
                 try:
                     await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
-                    receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.account._private_key, encoded_params, gas=1000000)
+                    receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.account._private_key, encoded_params)
                     logging.info(f"submitTaskRequest transaction receipt: {receipt}")
 
                     logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
@@ -128,7 +128,7 @@ class Master:
             await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
             logging.info("Submitting selection request")
 
-            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.account._private_key, gas=500000)
+            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.account._private_key)
             logging.info(f"submitSelectionReq transaction receipt: {receipt}")
 
             unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
@@ -167,7 +167,7 @@ class Master:
                 logging.info(f"Selecting solver for task ID: {task_id}, attempt {attempt}")
 
                 await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.account._private_key)
-                receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id, gas=1000000)
+                receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id)
                 logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
                 return
             except Exception as e:
@@ -180,7 +180,7 @@ class Master:
             logging.info(f"Removing solver stake for task ID: {task_id}")
 
             await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
-            receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.account._private_key, task_id, gas=1000000)
+            receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.account._private_key, task_id)
             logging.info(f"Iteration {iteration_number} - removeSolverStake transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error removing solver stake: {e}")

@@ -449,7 +449,7 @@ async def finalize_selections(web3, pool, private_key):
     vrf_coordinator_address = pool.functions.vrfCoordinator().call()
     vrf_coordinator = web3.eth.contract(address=vrf_coordinator_address, abi=load_abi('MockVRFCoordinator'))
     vrf_request_id = pool.functions.vrfRequestId().call()
-    receipt = await async_transact_with_contract_function(web3, vrf_coordinator, 'fulfillRandomWords', private_key, vrf_request_id, gas=500000, attempts=1)
+    receipt = await async_transact_with_contract_function(web3, vrf_coordinator, 'fulfillRandomWords', private_key, vrf_request_id, attempts=1)
     logging.info(f"fulfillRandomWords transaction receipt: {receipt}")
 
 async def trigger_lock_global_state(web3, pool, private_key):
@@ -463,7 +463,7 @@ async def trigger_lock_global_state(web3, pool, private_key):
         await asyncio.sleep(remaining_time)
 
     try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'lockGlobalState', private_key, gas=500000)
+        receipt = await async_transact_with_contract_function(web3, pool, 'lockGlobalState', private_key)
         logging.info(f"lockGlobalState transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error triggering lock global state: {e}")
@@ -480,7 +480,7 @@ async def trigger_remove_global_lock(web3, pool, private_key):
         await asyncio.sleep(remaining_time)
 
     try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', private_key, gas=500000)
+        receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', private_key)
         logging.info(f"removeGlobalLock transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error triggering remove global lock: {e}")
