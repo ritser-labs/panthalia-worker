@@ -165,6 +165,7 @@ def monitor_processes(stdscr, processes, task_counts):
     stdscr.nodelay(True)
     stdscr.keypad(True)
     selected_process = 0
+    last_resize = None
 
     # Initialize colors
     curses.start_color()
@@ -176,29 +177,25 @@ def monitor_processes(stdscr, processes, task_counts):
     right_col_width = max_name_length + 2  # Additional padding
 
     def draw_screen():
-        stdscr.clear()
+        stdscr.erase()
         height, width = stdscr.getmaxyx()
         split_point = width - right_col_width  # Right column width based on max name length
 
         # Display logs on the left side
         process_name = list(processes.keys())[selected_process]
         log_file = os.path.join('logs', f"{process_name}.log")
+        main_log_file = os.path.join('logs', 'test_run.log')
+
+        log_lines = []
         if os.path.exists(log_file):
             with open(log_file, 'r') as f:
-                log_lines = f.readlines()
-        else:
-            log_lines = []
+                log_lines.extend(f.readlines())
 
-        main_log_file = os.path.join('logs', 'test_run.log')
         if os.path.exists(main_log_file):
             with open(main_log_file, 'r') as f:
-                main_log_lines = f.readlines()
-        else:
-            main_log_lines = []
+                log_lines.extend(f.readlines())
 
-        combined_log_lines = log_lines + main_log_lines
-
-        for i, line in enumerate(combined_log_lines[-(height - 2):]):  # Leave space for instructions
+        for i, line in enumerate(log_lines[-(height - 2):]):  # Leave space for instructions
             stdscr.addstr(i, 0, line[:split_point - 2])
 
         # Draw the separator line after all left side content is drawn
@@ -228,19 +225,29 @@ def monitor_processes(stdscr, processes, task_counts):
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
         stdscr.refresh()
 
+    draw_screen()  # Initial draw
+
     while True:
-        draw_screen()
         key = stdscr.getch()
         if key == curses.KEY_UP:
             selected_process = (selected_process - 1) % len(processes)
+            draw_screen()
         elif key == curses.KEY_DOWN:
             selected_process = (selected_process + 1) % len(processes)
-        elif key == curses.KEY_RESIZE:
             draw_screen()
+        elif key == curses.KEY_RESIZE:
+            last_resize = time.time()
         elif key == ord('q'):
             terminate_processes(list(processes.values()))
             break
-        time.sleep(0.05)  # Reduce the sleep time for a more responsive interface
+
+        # Handle screen resize with a slight delay to prevent flashing
+        if last_resize and time.time() - last_resize > 0.1:
+            draw_screen()
+            last_resize = None
+
+        draw_screen()
+        time.sleep(0.05)  # Frequent updates
 
     stdscr.keypad(False)  # Reset keypad mode before exiting
     curses.endwin()
