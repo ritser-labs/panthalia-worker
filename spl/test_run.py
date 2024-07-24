@@ -138,7 +138,12 @@ def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, am
 def terminate_processes(processes):
     for process in processes:
         process.terminate()
-        process.wait()
+    for process in processes:
+        try:
+            process.wait(timeout=5)  # Wait up to 5 seconds for each process to terminate
+        except subprocess.TimeoutExpired:
+            process.kill()  # Forcefully kill the process if it doesn't terminate in time
+
 
 def reset_logs(log_dir):
     if os.path.exists(log_dir):
@@ -208,7 +213,7 @@ def monitor_processes(stdscr, processes):
         elif key == ord('q'):
             terminate_processes(list(processes.values()))
             break
-        time.sleep(0.1)
+        time.sleep(0.05)  # Reduce the sleep time for a more responsive interface
 
     stdscr.keypad(False)  # Reset keypad mode before exiting
     curses.endwin()
