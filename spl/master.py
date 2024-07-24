@@ -165,15 +165,26 @@ class Master:
 
             try:
                 logging.info(f"Selecting solver for task ID: {task_id}, attempt {attempt}")
-
+                
+                start_wait_time = time.time()
                 await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.account._private_key)
+                end_wait_time = time.time()
+                logging.info(f"wait_for_state_change duration: {end_wait_time - start_wait_time} seconds")
+                
+                start_transact_time = time.time()
                 receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id)
+                end_transact_time = time.time()
+                logging.info(f"Transaction duration: {end_transact_time - start_transact_time} seconds")
+                
                 logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
                 return
             except Exception as e:
                 logging.error(f"Error selecting solver on attempt {attempt}: {e}")
                 logging.info(f"Retrying in {retry_delay} seconds...")
                 await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)  # Exponential backoff
+
+
 
     async def remove_solver_stake(self, task_type, task_id, iteration_number):
         try:
@@ -237,6 +248,17 @@ class Master:
         # Update the plot explicitly
         self.update_plot()
 
+    async def run_main(self):
+        logging.info("Starting main process")
+        await self.approve_tokens_at_start()
+
+        tasks = []
+        for _ in range(self.max_simultaneous_iterations):
+            tasks.append(asyncio.create_task(self.run_iteration_thread(self.iteration)))
+            self.iteration += 1
+
+        await asyncio.gather(*tasks)
+
     async def run_iteration_thread(self, iteration_number):
         while True:
             try:
@@ -245,19 +267,6 @@ class Master:
             except Exception as e:
                 logging.error(f"Error in iteration {iteration_number}: {e}. Retrying...")
 
-    async def run_main(self):
-        logging.info("Starting main process")
-        await self.approve_tokens_at_start()
-
-        threads = []
-        for _ in range(self.max_simultaneous_iterations):
-            thread = threading.Thread(target=lambda: asyncio.run(self.run_iteration_thread(self.iteration)))
-            threads.append(thread)
-            thread.start()
-            self.iteration += 1
-
-        for thread in threads:
-            thread.join()
 
     async def get_latest_model_params(self, current_version_number):
         async with aiohttp.ClientSession() as session:
