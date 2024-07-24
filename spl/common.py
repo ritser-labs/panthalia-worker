@@ -206,7 +206,7 @@ def get_debug_trace(web3, tx_hash):
         logging.error(f"ERROR IN GET_DEBUG_TRACE: {e}")
         return {}
 
-async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, gas=500000, attempts=5):
+async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, attempts=5):
     account = web3.eth.account.from_key(private_key)
     gas_price = web3.eth.gas_price
 
@@ -215,9 +215,15 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
     for _ in range(attempts):  # Retry up to 5 times
         try:
             nonce = web3.eth.get_transaction_count(account.address)
+            # Dynamically estimate gas
+            estimated_gas = function.estimate_gas({
+                'from': account.address,
+                'value': value
+            })
+
             tx_params = {
                 'chainId': web3.eth.chain_id,
-                'gas': gas,
+                'gas': estimated_gas,
                 'gasPrice': gas_price,
                 'nonce': nonce,
                 'value': value
@@ -343,6 +349,8 @@ async def approve_token_once(web3, token_contract, private_key, spender_address,
 async def deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, group, worker_address, stake_amount, max_stakes, max_retries=10):
     stakes_deposited = pool_contract.functions.getStakeIds(subnet_id, group, worker_address).call()
     number_of_stakes_to_deposit = max_stakes - len(stakes_deposited)
+    
+    logging.info(f'Depositing {number_of_stakes_to_deposit} stakes for {worker_address}...')
 
     if number_of_stakes_to_deposit > 0:
         for attempt in range(max_retries):  # Use max_retries variable
