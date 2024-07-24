@@ -255,14 +255,15 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
             return receipt
         except ContractLogicError as e:
             logging.error(f"Contract Logic Error: {e}")
-            trace = get_debug_trace(web3, tx_hash)
-            logging.error(f"Transaction trace: {trace}")
-            if 'returnValue' in trace:
-                revert_reason = decode_revert_reason(web3, trace['returnValue'])
-                logging.error(f"Revert reason: {revert_reason}")
-                raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
-            else:
-                raise ValueError(f"Transaction failed without revert reason: {trace}")
+            if 'tx_hash' in locals():
+                trace = get_debug_trace(web3, tx_hash)
+                logging.error(f"Transaction trace: {trace}")
+                if 'returnValue' in trace:
+                    revert_reason = decode_revert_reason(web3, trace['returnValue'])
+                    logging.error(f"Revert reason: {revert_reason}")
+                    raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
+                else:
+                    raise ValueError(f"Transaction failed without revert reason: {trace}")
         except ValueError as e:
             if 'nonce too low' in str(e) or 'replacement transaction underpriced' in str(e):
                 logging.error(f"Nonce too low or replacement transaction underpriced, retrying with higher nonce...")
@@ -272,14 +273,15 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                 raise
         except Exception as e:
             logging.error(f"Unexpected error during transaction: {e}")
-            tx_hash = signed_tx.hash.hex()
-            trace = get_debug_trace(web3, tx_hash)
-            logging.error(f"Transaction trace: {trace}")
-            if 'returnValue' in trace:
-                revert_reason = decode_revert_reason(web3, trace['returnValue'])
-                logging.error(f"Revert reason: {revert_reason}")
+            if 'tx_hash' in locals():
+                trace = get_debug_trace(web3, tx_hash)
+                logging.error(f"Transaction trace: {trace}")
+                if 'returnValue' in trace:
+                    revert_reason = decode_revert_reason(web3, trace['returnValue'])
+                    logging.error(f"Revert reason: {revert_reason}")
             raise
     raise RuntimeError("Failed to send transaction after multiple attempts")
+
 
 def decode_revert_reason(web3, revert_reason):
     # Check if the revert reason starts with '0x' and remove it
