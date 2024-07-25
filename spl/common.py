@@ -155,7 +155,7 @@ def load_all_abis(abi_dir):
 
 def load_abi(name):
     abi_dir = 'abis'
-    contract_path = os.path.join(abi_dir, f'{name}.sol', f'{name}.json') 
+    contract_path = os.path.join(abi_dir, f'{name}.sol', f'{name}.json')
     with open(contract_path, 'r') as abi_file:
         return json.load(abi_file).get('abi', [])
 
@@ -212,7 +212,8 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
 
     function = getattr(contract.functions, function_name)(*args)
 
-    for _ in range(attempts):  # Retry up to 5 times
+    for attempt in range(attempts):  # Retry up to 5 times
+        tx_hash = None
         try:
             nonce = web3.eth.get_transaction_count(account.address)
             # Dynamically estimate gas
@@ -235,109 +236,96 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
             receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
 
             if receipt['status'] == 0:
-                logging.debug(f"Transaction dictionary: {tx}")
-                try:
-                    error_message = web3.eth.call({
-                        'to': tx['to'],
-                        'data': tx.get('input', b'')
-                    }, receipt.blockNumber)
-                except ContractLogicError as e:
-                    logging.error(f"Contract Logic Error: {e}")
-                    trace = get_debug_trace(web3, tx_hash)
-                    logging.error(f"Transaction trace: {trace}")
-                    if 'returnValue' in trace:
-                        revert_reason = decode_revert_reason(web3, trace['returnValue'])
-                        logging.error(f"Revert reason: {revert_reason}")
-                        raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
-                    else:
-                        raise ValueError(f"Transaction failed without revert reason: {trace}")
-
-            return receipt
-        except ContractLogicError as e:
-            logging.error(f"Contract Logic Error - {function_name}: {e}")
-            if 'tx_hash' in locals():
-                trace = get_debug_trace(web3, tx_hash)
-                logging.error(f"Transaction trace: {trace}")
-                if 'returnValue' in trace:
-                    revert_reason = decode_revert_reason(web3, trace['returnValue'])
-                    logging.error(f"Revert reason: {revert_reason}")
-                    raise ValueError(f"Transaction failed with revert reason: {revert_reason}")
-                else:
-                    raise ValueError(f"Transaction failed without revert reason: {trace}")
-        except ValueError as e:
-            if 'nonce too low' in str(e) or 'replacement transaction underpriced' in str(e):
-                logging.error(f"Nonce too low or replacement transaction underpriced, retrying with higher nonce...")
-                await asyncio.sleep(1)  # Wait for a while before retrying
+                error_message = decode_revert_reason(web3, web3.eth.call({
+                    'to': tx['to'],
+                    'data': tx.get('input', b'')
+                }, receipt.blockNumber))
+                logging.error(f"Transaction failed: {error_message}")
+                raise ContractLogicError(f"Transaction failed: {error_message}")
             else:
-                logging.error(f"Transaction error - {function_name}: {e}")
+                return receipt
+        except ContractLogicError as cle:
+            # Extract revert reason from ContractLogicError
+            try:
+                error_data = cle.args[0]  # Directly use the first argument
+                if isinstance(error_data, dict) and 'data' in error_data:
+                    error_data = error_data['data']
+                decoded_error = decode_revert_reason(web3, error_data)
+                logging.error(f"Contract logic error on attempt {attempt + 1}: {decoded_error}")
+            except Exception as e:
+                logging.error(f"Failed to decode contract logic error: {cle}, original error: {e}")
+            if attempt == attempts - 1:
                 raise
+            await asyncio.sleep(1)  # Wait before retrying
         except Exception as e:
-            logging.error(f"Unexpected error during {function_name}: {e}")
-            if 'tx_hash' in locals():
-                trace = get_debug_trace(web3, tx_hash)
-                logging.error(f"Transaction trace: {trace}")
-                if 'returnValue' in trace:
-                    revert_reason = decode_revert_reason(web3, trace['returnValue'])
-                    logging.error(f"Revert reason: {revert_reason}")
-            raise
-    raise RuntimeError(f'Failed to send transaction for {function_name} after multiple attempts')
-
+            logging.error(f"Error on attempt {attempt + 1}: {e}")
+            if attempt == attempts - 1:
+                raise
+            await asyncio.sleep(1)  # Wait before retrying
 
 def decode_revert_reason(web3, revert_reason):
-    # Check if the revert reason starts with '0x' and remove it
-    if revert_reason.startswith('0x'):
-        revert_reason = revert_reason[2:]
+    try:
+        # Ensure the revert reason starts with '0x' and remove it
+        if revert_reason.startswith('0x'):
+            revert_reason = revert_reason[2:]
 
-    selector = '0x' + revert_reason[:8]
-    encoded_data = revert_reason[8:]
+        if len(revert_reason) < 8:
+            logging.error(f"Invalid revert reason length: {revert_reason}")
+            return f"Unknown revert reason: {revert_reason}"
 
-    # Define the selector for the 'Error(string)' type
-    error_selector = '0x08c379a0'
+        selector = '0x' + revert_reason[:8]
+        encoded_data = revert_reason[8:]
 
-    # Check if the selector matches 'Error(string)'
-    if selector == error_selector:
-        # Decode the error message
-        try:
-            # Error(string) has a single argument of type string
+        # Define the selector for the 'Error(string)' type
+        error_selector = '0x08c379a0'
+
+        # Check if the selector matches 'Error(string)'
+        if selector == error_selector:
+            # Decode the error message
+            try:
+                # Error(string) has a single argument of type string
+                data_bytes = bytes.fromhex(encoded_data)
+                decoded = decode(['string'], data_bytes)
+                decoded_reason = f"Error: {decoded[0]}"
+                return decoded_reason
+            except Exception as e:
+                logging.error(f"Error decoding revert reason: {e}")
+                return f"Error decoding revert reason: {revert_reason}"
+        
+        # Define the selector for the 'Panic(uint256)' type
+        panic_selector = '0x4e487b71'
+
+        # Check if the selector matches 'Panic(uint256)'
+        if selector == panic_selector:
+            # Decode the panic code
+            try:
+                # Panic(uint256) has a single argument of type uint256
+                data_bytes = bytes.fromhex(encoded_data)
+                decoded = decode(['uint256'], data_bytes)
+                decoded_reason = f"Panic: {hex(decoded[0])}"
+                return decoded_reason
+            except Exception as e:
+                logging.error(f"Error decoding panic code: {e}")
+                return f"Error decoding panic code: {revert_reason}"
+        
+        error_selectors = load_error_selectors(web3)
+
+        if selector in error_selectors:
+            error_info = error_selectors[selector]
+            name = error_info['name']
+            types = [input['type'] for input in error_info['inputs']]
             data_bytes = bytes.fromhex(encoded_data)
-            decoded = decode(['string'], data_bytes)
-            decoded_reason = f"Error: {decoded[0]}"
+            decoded = decode(types, data_bytes)
+            decoded_reason = f"{name}({', '.join(map(str, decoded))})"
             return decoded_reason
-        except Exception as e:
-            logging.error(f"Error decoding revert reason: {e}")
-            return f"Error decoding revert reason: {revert_reason}"
-    
-    # Define the selector for the 'Panic(uint256)' type
-    panic_selector = '0x4e487b71'
+        else:
+            logging.error(f'Selector {selector} not found in error selectors')
+            logging.error(f'Selectors: {error_selectors}')
+            return f"Unknown revert reason: {revert_reason}"
+    except Exception as e:
+        logging.error(f"Exception in decode_revert_reason: {e}")
+        return f"Error decoding revert reason: {revert_reason}"
 
-    # Check if the selector matches 'Panic(uint256)'
-    if selector == panic_selector:
-        # Decode the panic code
-        try:
-            # Panic(uint256) has a single argument of type uint256
-            data_bytes = bytes.fromhex(encoded_data)
-            decoded = decode(['uint256'], data_bytes)
-            decoded_reason = f"Panic: {hex(decoded[0])}"
-            return decoded_reason
-        except Exception as e:
-            logging.error(f"Error decoding panic code: {e}")
-            return f"Error decoding panic code: {revert_reason}"
-    
-    # If the selector does not match 'Error(string)' or 'Panic(uint256)', proceed with other selectors
-    error_selectors = load_error_selectors(web3)
-
-    if selector in error_selectors:
-        error_info = error_selectors[selector]
-        name = error_info['name']
-        types = [input['type'] for input in error_info['inputs']]
-        data_bytes = bytes.fromhex(encoded_data)
-        decoded = decode(types, data_bytes)
-        decoded_reason = f"{name}({', '.join(map(str, decoded))})"
-        return decoded_reason
-    else:
-        logging.error(f'Selector {selector} not found in error selectors')
-        logging.error(f'Selectors: {error_selectors}')
-        return f"Unknown revert reason: {revert_reason}"
 
 async def approve_token_once(web3, token_contract, private_key, spender_address, amount):
     account = web3.eth.account.from_key(private_key)
