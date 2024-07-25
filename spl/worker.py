@@ -12,7 +12,7 @@ from web3.middleware import geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
-from common import Task, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, PoolState, approve_token_once, deposit_stake_without_approval
+from common import Task, TaskStatus, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, PoolState, approve_token_once, deposit_stake_without_approval
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional, Tuple
 from io import BytesIO
@@ -381,6 +381,35 @@ async def process_tasks():
 
     resume_gradient_updates()
 
+async def reclaim_stakes():
+    max_dispute_time = contract.functions.maxDisputeTime().call()
+    while True:
+        for task_id in list(processed_tasks):
+            task_tuple = contract.functions.getTask(task_id).call()
+            task = Task(*task_tuple)
+            task_status = task.status
+            time_status_changed = task.timeStatusChanged
+            blockchain_timestamp = web3.eth.get_block('latest')['timestamp']
+            time_elapsed = blockchain_timestamp- time_status_changed
+            
+            #logging.info(f"Processed task {task_id} status: {task_status}")
+            #logging.info(f"Time elapsed since status change: {time_elapsed}")
+            #logging.info(f"Max dispute time: {max_dispute_time}")
+            #logging.info(f'Local timestamp: {int(time.time())}')
+            #logging.info(f"Blockchain timestamp: {blockchain_timestamp}")
+            #logging.info(f'Time elapsed minus max_dispute_time: {time_elapsed - max_dispute_time}')
+
+            if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_time:
+                try:
+                    receipt = await async_transact_with_contract_function(web3, contract, 'resolveTask', args.private_key, task_id)
+                    logging.info(f"resolveTask transaction receipt: {receipt}")
+                    processed_tasks.remove(task_id)
+                except Exception as e:
+                    logging.error(f"Error resolving task {task_id}: {e}")
+                    raise
+
+        await asyncio.sleep(2)
+
 async def sync_tensors(sync_version_number):
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -619,25 +648,6 @@ async def upload_final_logits_results():
         'version_number': version_number
     }
 
-async def check_and_finalize_verifications():
-    current_time = int(time.time())
-    for task_id in list(processed_tasks):
-        task_tuple = contract.functions.getTask(task_id).call()
-        task = Task(*task_tuple)
-        task_status = task.status
-        time_status_changed = task.timeStatusChanged
-        max_dispute_time = contract.functions.maxDisputeTime().call()
-
-        if task_status == 2 and (current_time - time_status_changed) >= max_dispute_time:
-            if contract.functions.canVerificationBeFinalized(task_id).call():
-                try:
-                    receipt = await async_transact_with_contract_function(web3, contract, 'finalizeVerification', args.private_key, task_id)
-                    logging.info(f"finalizeVerification transaction receipt: {receipt}")
-                    processed_tasks.remove(task_id)
-                except Exception as e:
-                    logging.error(f"Error finalizing verification for task {task_id}: {e}")
-                    raise
-
 async def report_sync_status(status):
     try:
         if hasattr(args, 'layer_idx') and args.layer_idx is not None:
@@ -736,12 +746,12 @@ async def main():
 
     await report_sync_status('synced')
     reported = True
+    asyncio.create_task(reclaim_stakes())
 
     while True:
         await deposit_stake()
         for event in event_filter.get_new_entries():
             asyncio.create_task(handle_event(event))  # Schedule the event handling as a task
-        await check_and_finalize_verifications()
         await asyncio.sleep(1)
 
 if __name__ == "__main__":
