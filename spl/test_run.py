@@ -254,31 +254,41 @@ def monitor_processes(stdscr, processes, task_counts):
     os._exit(0)  # Force exit the program
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
-    tracked_tasks = set()
+    contracts = {}
+    filters = {}
+    tasks = {}
 
-    async def fetch_task_counts():
-        while True:
-            try:
-                for task_type, contract_address in subnet_addresses.items():
-                    contract = web3.eth.contract(address=contract_address, abi=load_abi('SubnetManager'))
-                    num_tasks = contract.functions.numTasks().call()
-                    task_count = 0
+    # Load the contracts and set up filters for events
+    for task_type, address in subnet_addresses.items():
+        abi = load_abi('SubnetManager')
+        contracts[task_type] = web3.eth.contract(address=address, abi=abi)
 
-                    for task_id in range(num_tasks):
-                        task = contract.functions.getTask(task_id).call()
-                        if task.status in [0, 1, 2]:  # Adjust status based on which ones you want to track
-                            tracked_tasks.add((contract_address, task_id))
-                            task_count += 1
-                        elif (contract_address, task_id) in tracked_tasks:
-                            tracked_tasks.remove((contract_address, task_id))
+        # Create filters for task-related events
+        filters[task_type] = {
+            'TaskRequestSubmitted': contracts[task_type].events.TaskRequestSubmitted.create_filter(fromBlock='latest'),
+            'SolutionSubmitted': contracts[task_type].events.SolutionSubmitted.create_filter(fromBlock='latest'),
+            'TaskResolved': contracts[task_type].events.TaskResolved.create_filter(fromBlock='latest')
+        }
 
-                    task_counts[task_type] = task_count
-                    logging.debug(f"Task count for {task_type}: {task_count}")
-                await asyncio.sleep(30)  # Fetch task counts every 30 seconds
-            except Exception as e:
-                logging.error(f"Error fetching task counts: {e}")
+    # Main tracking loop
+    while True:
+        for task_type, contract_filters in filters.items():
+            for event_name, event_filter in contract_filters.items():
+                for event in event_filter.get_new_entries():
+                    task_id = event['args']['taskId']
+                    if event_name == 'TaskRequestSubmitted':
+                        tasks[task_id] = {'active': True, 'task_type': task_type}
+                    elif event_name in ['SolutionSubmitted', 'TaskResolved']:
+                        if task_id in tasks and tasks[task_id]['active']:
+                            tasks[task_id]['active'] = False
+        
+        # Update the task counts
+        for task_type in subnet_addresses.keys():
+            active_tasks = sum(1 for task in tasks.values() if task['task_type'] == task_type and task['active'])
+            task_counts[task_type] = active_tasks
 
-    await fetch_task_counts()
+        await asyncio.sleep(0.5)  # Polling interval
+
 
 if __name__ == "__main__":
     processes = {}
