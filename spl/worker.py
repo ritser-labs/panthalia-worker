@@ -118,7 +118,7 @@ class TaskQueue:
 
     def add_task(self, task):
         self.queue.append(task)
-        self.queue.sort(key=lambda t: t['version_number'])  # Sort tasks by version_number
+        self.queue.sort(key=lambda t: t['time_status_changed'])
         logging.debug(f"Added task: {task}. Queue size is now {len(self.queue)}")
 
     def get_next_task(self):
@@ -292,8 +292,14 @@ async def handle_event(event):
     task_queue.add_task({
         'task_id': task_id,
         'task_params': task_params,
-        'version_number': task_params.get('version_number')
+        'version_number': task_params.get('version_number'),
+        'time_status_changed': task.timeStatusChanged
     })
+    
+    blockchain_timestamp = web3.eth.get_block('latest')['timestamp']
+    
+    time_since_change = blockchain_timestamp - task.timeStatusChanged
+    logging.debug(f"Time since status change: {time_since_change} seconds")
 
     await process_tasks()
 
