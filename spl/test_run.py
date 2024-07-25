@@ -15,10 +15,17 @@ import shutil
 import asyncio
 import logging
 
-# Configure logging
+# Configure logging to file and stdout
 log_dir = 'logs'
 os.makedirs(log_dir, exist_ok=True)
-logging.basicConfig(filename=os.path.join(log_dir, 'test_run.log'), level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+file_handler = logging.FileHandler(os.path.join(log_dir, 'test_run.log'))
+console_handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+logging.getLogger().addHandler(file_handler)
+logging.getLogger().addHandler(console_handler)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -161,6 +168,9 @@ def reset_logs(log_dir):
                 logging.debug(f"Error deleting log file {file_path}: {e}")
 
 def monitor_processes(stdscr, processes, task_counts):
+    # Remove console handler from logging
+    logging.getLogger().removeHandler(console_handler)
+
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
@@ -288,7 +298,6 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
             task_counts[task_type] = active_tasks
 
         await asyncio.sleep(0.5)  # Polling interval
-
 
 if __name__ == "__main__":
     processes = {}
