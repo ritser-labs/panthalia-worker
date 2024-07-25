@@ -20,6 +20,7 @@ import time
 import os
 from tqdm import tqdm
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 
 class SuppressTracebackFilter(logging.Filter):
@@ -256,7 +257,7 @@ async def upload_tensor(tensor, tensor_name):
         raise RuntimeError("Failed to upload tensor: request timed out")
 
     if response.status_code == 200:
-        return response.json().get('tensor_url')
+        return {'tensor_url': response.json().get('tensor_url')}
     else:
         raise RuntimeError(f"Failed to upload tensor: {response.text}")
 
@@ -343,26 +344,35 @@ async def process_tasks():
     layer_idx = args.layer_idx
     result = {}
     accumulation_steps = task_params.get('accumulation_steps', 1)
-    if task_type == 'embed':
-        logging.debug("Executing embed task")
-        embed_task(batch)
-        result['result_url'] = await upload_tensor(tensors['outputs'], 'embed_outputs')
-    elif task_type == 'forward':
-        logging.debug(f"Executing forward task for layer {layer_idx}")
-        forward_task(layer_idx, inputs)
-        result['result_url'] = await upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')
-    elif task_type == 'backward':
-        logging.debug(f"Executing backward task for layer {layer_idx}")
-        backward_task(layer_idx, error, inputs, accumulation_steps)
-        result = await upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
-    elif task_type == 'final_logits':
-        logging.debug("Executing final_logits task")
-        final_logits_task(inputs, targets, accumulation_steps)
-        result = await upload_final_logits_results()
-    elif task_type == 'embed_backward':
-        logging.debug("Executing embed_backward task")
-        embed_backward_task(error, batch, accumulation_steps)
-        result = await upload_tensors_and_grads(None, tensors['updates'], -2)
+    
+    # Use a thread pool to handle uploads/downloads and computations concurrently
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+        
+        if task_type == 'embed':
+            logging.debug("Executing embed task")
+            embed_task(batch)
+            futures.append(executor.submit(asyncio.run, upload_tensor(tensors['outputs'], 'embed_outputs')))
+        elif task_type == 'forward':
+            logging.debug(f"Executing forward task for layer {layer_idx}")
+            forward_task(layer_idx, inputs)
+            futures.append(executor.submit(asyncio.run, upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')))
+        elif task_type == 'backward':
+            logging.debug(f"Executing backward task for layer {layer_idx}")
+            backward_task(layer_idx, error, inputs, accumulation_steps)
+            futures.append(executor.submit(asyncio.run, upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)))
+        elif task_type == 'final_logits':
+            logging.debug("Executing final_logits task")
+            final_logits_task(inputs, targets, accumulation_steps)
+            futures.append(executor.submit(asyncio.run, upload_final_logits_results()))
+        elif task_type == 'embed_backward':
+            logging.debug("Executing embed_backward task")
+            embed_backward_task(error, batch, accumulation_steps)
+            futures.append(executor.submit(asyncio.run, upload_tensors_and_grads(None, tensors['updates'], -2)))
+        
+        for future in as_completed(futures):
+            result.update(future.result())
+    
     await submit_solution(task_id, result)
 
     processed_tasks.add(task_id)
@@ -373,8 +383,10 @@ async def process_tasks():
 
 async def sync_tensors(sync_version_number):
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
-    for tensor_name in relevant_tensors:
-        await initialize_tensor(tensor_name, sync_version_number)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(asyncio.run, initialize_tensor(tensor_name, sync_version_number)) for tensor_name in relevant_tensors]
+        for future in as_completed(futures):
+            future.result()
 
 async def submit_solution(task_id, result):
     try:
@@ -717,13 +729,16 @@ async def main():
     logging.info("Starting tensor synchronization...")
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
     reported = False
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(asyncio.run, initialize_tensor(tensor_name)) for tensor_name in relevant_tensors]
+        for future in as_completed(futures):
+            future.result()
+
+    await report_sync_status('synced')
+    reported = True
+
     while True:
         await deposit_stake()
-        if not reported:
-            for tensor_name in relevant_tensors:
-                await initialize_tensor(tensor_name)
-            await report_sync_status('synced')
-            reported = True
         for event in event_filter.get_new_entries():
             asyncio.create_task(handle_event(event))  # Schedule the event handling as a task
         await check_and_finalize_verifications()
