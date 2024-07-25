@@ -19,8 +19,8 @@ from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from model import VocabParallelEmbedding, RMSNorm, ColumnParallelLinear, TransformerBlock
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from web3 import Web3
 import functools
+import copy
 
 app = Flask(__name__)
 sync_status = {}
@@ -50,8 +50,11 @@ def load_block_timestamps():
     return {}
 
 def save_block_timestamps(block_timestamps):
+    # Make a deep copy of the dictionary to avoid modification issues
+    block_timestamps_copy = copy.deepcopy(block_timestamps)
+    
     with open(block_timestamps_file, 'w') as f:
-        json.dump(block_timestamps, f)
+        json.dump(block_timestamps_copy, f, indent=4)
 
 # Load existing block timestamps on startup
 block_timestamps = load_block_timestamps()
