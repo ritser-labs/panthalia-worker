@@ -203,7 +203,7 @@ class Master:
             task = Task(*task_tuple)
             logging.info(f"Iteration {iteration_number} - {task_type} Task status: {task.status}")
             logging.info(f"Expected status: {TaskStatus.SolutionSubmitted.value}")
-            if task.status == TaskStatus.SolutionSubmitted.value:
+            if task.status == TaskStatus.SolutionSubmitted.value or task.status == TaskStatus.ResolvedCorrect.value:
                 return json.loads(task.postedSolution.decode('utf-8'))
             return None
         except Exception as e:
