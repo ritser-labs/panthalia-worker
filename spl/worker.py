@@ -257,7 +257,7 @@ async def upload_tensor(tensor, tensor_name):
         raise RuntimeError("Failed to upload tensor: request timed out")
 
     if response.status_code == 200:
-        return {'tensor_url': response.json().get('tensor_url')}
+        return response.json().get('tensor_url')
     else:
         raise RuntimeError(f"Failed to upload tensor: {response.text}")
 
