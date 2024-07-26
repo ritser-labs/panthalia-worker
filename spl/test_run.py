@@ -299,6 +299,10 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
 
         await asyncio.sleep(0.5)  # Polling interval
 
+def set_interval_mining(web3, interval):
+    """Set the mining interval on the Ethereum node."""
+    web3.provider.make_request('evm_setIntervalMining', [interval])
+
 if __name__ == "__main__":
     processes = {}
     task_counts = {}  # Dictionary to store task counts
@@ -311,7 +315,9 @@ if __name__ == "__main__":
     # Start anvil process
     logging.info("Starting anvil...")
     anvil_log = open(os.path.join(log_dir, 'anvil.log'), 'w')
-    anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log)
+    anvil_process = subprocess.Popen(
+        ['anvil'], stdout=anvil_log, stderr=anvil_log
+    )
     processes['anvil'] = anvil_process
     logging.info(f"Anvil started with PID {anvil_process.pid}")
 
@@ -345,6 +351,10 @@ if __name__ == "__main__":
             '--private-key', args.private_key, '-vv'
         ]
         subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
+
+        # Set the mining interval to 1 second after the Forge script setup
+        web3 = Web3(Web3.HTTPProvider(args.rpc_url))
+        set_interval_mining(web3, 1)
 
         # Print deployment stage completion
         logging.info("Deployment completed successfully.")
