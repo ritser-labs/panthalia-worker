@@ -165,7 +165,7 @@ def initialize_tensor(name, sync_version_number=None, random_init=True):
     torch.save(tensor, file_path)
     with block_timestamps_lock:
         block_timestamps[name] = sync_version_number
-        save_block_timestamps(block_timestamps)
+    save_block_timestamps(block_timestamps)
 
 def initialize_all_tensors():
     # Initialize the embedding tensor
@@ -531,7 +531,7 @@ def update_state():
         # Update block timestamps and number of updates
         with block_timestamps_lock:
             block_timestamps[tensor_name] = future_version_number
-            save_block_timestamps(block_timestamps)
+        save_block_timestamps(block_timestamps)
 
         logging.debug(f"Updated state for {tensor_name}")
         return jsonify({'status': 'success', 'version_number': future_version_number})
