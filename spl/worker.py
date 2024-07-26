@@ -33,6 +33,15 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger()
 logger.addFilter(SuppressTracebackFilter())
 
+# Global counter for concurrent tasks
+concurrent_tasks_counter = 0
+
+# Global dictionary to store start times for task IDs
+task_start_times = {}
+
+# Global variable to store the last handle_event timestamp
+last_handle_event_timestamp = None
+
 @dataclass
 class ModelArgs:
     dim: int = 4096
@@ -273,6 +282,14 @@ async def deposit_stake():
     await deposit_stake_without_approval(web3, pool_contract, args.private_key, subnet_id, args.group, worker_address, stake_amount, args.max_stakes)
 
 async def handle_event(event):
+    global last_handle_event_timestamp
+
+    current_time = time.time()
+    if last_handle_event_timestamp is not None:
+        time_since_last_event = current_time - last_handle_event_timestamp
+        logging.debug(f"Time since last handle_event call: {time_since_last_event:.2f} seconds")
+    last_handle_event_timestamp = current_time
+
     task_id = event['args']['taskId']
     solver = event['args']['solver']
 
@@ -300,13 +317,27 @@ async def handle_event(event):
     
     time_since_change = blockchain_timestamp - task.timeStatusChanged
     logging.debug(f"Time since status change: {time_since_change} seconds")
+    
+    # Log the time difference between last block time and event time
+    event_block_number = event['blockNumber']
+    event_block = web3.eth.get_block(event_block_number)
+    event_block_time = event_block['timestamp']
+    last_block_time = blockchain_timestamp
+    time_diff = last_block_time - event_block_time
+    logging.debug(f"Time difference between last block time and event time: {time_diff} seconds")
 
+    task_start_times[task_id] = time.time()
     await process_tasks()
 
 async def process_tasks():
-    global task_queue
+    global task_queue, concurrent_tasks_counter
 
-    logging.debug("Processing tasks...")
+    start_time = time.time()
+
+    # Increase the counter when a new task is started
+    concurrent_tasks_counter += 1
+    logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
+
     next_task = task_queue.get_next_task()
     if not next_task:
         logging.debug("No tasks in the queue to process.")
@@ -315,7 +346,10 @@ async def process_tasks():
     if (task_queue.current_version is None
         or next_task['version_number'] != task_queue.current_version):
         logging.debug(f"Syncing tensors for version number: {next_task['version_number']}")
+        sync_start_time = time.time()
         await sync_tensors(next_task['version_number'])
+        sync_end_time = time.time()
+        logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
         task_queue.current_version = next_task['version_number']
 
     task_id = next_task['task_id']
@@ -327,22 +361,34 @@ async def process_tasks():
     batch = None
     if 'batch_url' in task_params:
         logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
+        download_start_time = time.time()
         batch = download_json(task_params['batch_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
 
     inputs = None
     if 'inputs_url' in task_params:
         logging.debug(f"Downloading inputs from URL: {task_params['inputs_url']}")
+        download_start_time = time.time()
         inputs = download_file(task_params['inputs_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading inputs took {download_end_time - download_start_time:.2f} seconds")
 
     error = None
     if 'error_url' in task_params:
         logging.debug(f"Downloading error from URL: {task_params['error_url']}")
+        download_start_time = time.time()
         error = download_file(task_params['error_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading error took {download_end_time - download_start_time:.2f} seconds")
 
     targets = None
     if 'targets_url' in task_params:
         logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
+        download_start_time = time.time()
         targets = download_json(task_params['targets_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
 
     pause_gradient_updates()
 
@@ -353,32 +399,62 @@ async def process_tasks():
     
     if task_type == 'embed':
         logging.debug("Executing embed task")
+        embed_start_time = time.time()
         embed_task(batch)
+        embed_end_time = time.time()
+        logging.debug(f"embed_task() took {embed_end_time - embed_start_time:.2f} seconds")
         result['result_url'] = await upload_tensor(tensors['outputs'], 'embed_outputs')
     elif task_type == 'forward':
         logging.debug(f"Executing forward task for layer {layer_idx}")
+        forward_start_time = time.time()
         forward_task(layer_idx, inputs)
+        forward_end_time = time.time()
+        logging.debug(f"forward_task() took {forward_end_time - forward_start_time:.2f} seconds")
         result['result_url'] = await upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')
     elif task_type == 'backward':
         logging.debug(f"Executing backward task for layer {layer_idx}")
+        backward_start_time = time.time()
         backward_task(layer_idx, error, inputs, accumulation_steps)
+        backward_end_time = time.time()
+        logging.debug(f"backward_task() took {backward_end_time - backward_start_time:.2f} seconds")
         result = await upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
     elif task_type == 'final_logits':
         logging.debug("Executing final_logits task")
+        final_logits_start_time = time.time()
         final_logits_task(inputs, targets, accumulation_steps)
+        final_logits_end_time = time.time()
+        logging.debug(f"final_logits_task() took {final_logits_end_time - final_logits_start_time:.2f} seconds")
         result = await upload_final_logits_results()
     elif task_type == 'embed_backward':
         logging.debug("Executing embed_backward task")
+        embed_backward_start_time = time.time()
         embed_backward_task(error, batch, accumulation_steps)
+        embed_backward_end_time = time.time()
+        logging.debug(f"embed_backward_task() took {embed_backward_end_time - embed_backward_start_time:.2f} seconds")
         result = await upload_tensors_and_grads(None, tensors['updates'], -2)
     
+    submit_solution_start_time = time.time()
     await submit_solution(task_id, result)
+    submit_solution_end_time = time.time()
+    logging.debug(f"submit_solution() took {submit_solution_end_time - submit_solution_start_time:.2f} seconds")
 
     processed_tasks.add(task_id)
 
     logging.info(f"Processed task {task_id} successfully")
 
+    # Log the time taken to process the task
+    task_start_time = task_start_times.pop(task_id, None)
+    if task_start_time:
+        total_time = time.time() - task_start_time
+        logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
+
     resume_gradient_updates()
+
+    end_time = time.time()
+    logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
+
+    # Decrease the counter when a task is completed
+    concurrent_tasks_counter -= 1
 
 async def reclaim_stakes():
     max_dispute_time = contract.functions.maxDisputeTime().call()
@@ -389,15 +465,8 @@ async def reclaim_stakes():
             task_status = task.status
             time_status_changed = task.timeStatusChanged
             blockchain_timestamp = web3.eth.get_block('latest')['timestamp']
-            time_elapsed = blockchain_timestamp- time_status_changed
+            time_elapsed = blockchain_timestamp - time_status_changed
             
-            #logging.info(f"Processed task {task_id} status: {task_status}")
-            #logging.info(f"Time elapsed since status change: {time_elapsed}")
-            #logging.info(f"Max dispute time: {max_dispute_time}")
-            #logging.info(f'Local timestamp: {int(time.time())}')
-            #logging.info(f"Blockchain timestamp: {blockchain_timestamp}")
-            #logging.info(f'Time elapsed minus max_dispute_time: {time_elapsed - max_dispute_time}')
-
             if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_time:
                 try:
                     receipt = await async_transact_with_contract_function(web3, contract, 'resolveTask', args.private_key, task_id)

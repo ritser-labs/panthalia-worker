@@ -19,8 +19,8 @@ from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from model import VocabParallelEmbedding, RMSNorm, ColumnParallelLinear, TransformerBlock
 from eth_account import Account
 from eth_account.messages import encode_defunct
+from web3 import Web3
 import functools
-import copy
 
 app = Flask(__name__)
 sync_status = {}
@@ -43,18 +43,20 @@ os.makedirs(temp_dir, exist_ok=True)
 # File to store block timestamps
 block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
 
+# Initialize a lock for block_timestamps
+block_timestamps_lock = threading.Lock()
+
 def load_block_timestamps():
-    if os.path.exists(block_timestamps_file):
-        with open(block_timestamps_file, 'r') as f:
-            return json.load(f)
-    return {}
+    with block_timestamps_lock:
+        if os.path.exists(block_timestamps_file):
+            with open(block_timestamps_file, 'r') as f:
+                return json.load(f)
+        return {}
 
 def save_block_timestamps(block_timestamps):
-    # Make a deep copy of the dictionary to avoid modification issues
-    block_timestamps_copy = copy.deepcopy(block_timestamps)
-    
-    with open(block_timestamps_file, 'w') as f:
-        json.dump(block_timestamps_copy, f, indent=4)
+    with block_timestamps_lock:
+        with open(block_timestamps_file, 'w') as f:
+            json.dump(block_timestamps, f)
 
 # Load existing block timestamps on startup
 block_timestamps = load_block_timestamps()
@@ -161,8 +163,9 @@ def initialize_tensor(name, sync_version_number=None, random_init=True):
         tensor = torch.cat([tensor.view(-1) for tensor in tensors])
 
     torch.save(tensor, file_path)
-    block_timestamps[name] = sync_version_number
-    save_block_timestamps(block_timestamps)
+    with block_timestamps_lock:
+        block_timestamps[name] = sync_version_number
+        save_block_timestamps(block_timestamps)
 
 def initialize_all_tensors():
     # Initialize the embedding tensor
@@ -526,8 +529,9 @@ def update_state():
                 os.remove(os.path.join(state_dir, filename))
 
         # Update block timestamps and number of updates
-        block_timestamps[tensor_name] = future_version_number
-        save_block_timestamps(block_timestamps)
+        with block_timestamps_lock:
+            block_timestamps[tensor_name] = future_version_number
+            save_block_timestamps(block_timestamps)
 
         logging.debug(f"Updated state for {tensor_name}")
         return jsonify({'status': 'success', 'version_number': future_version_number})
@@ -546,7 +550,8 @@ def latest_state():
 
     latest_version_number = request.args.get('version_number')
     if latest_version_number is None:
-        latest_version_number = block_timestamps.get(tensor_name, 0)
+        with block_timestamps_lock:
+            latest_version_number = block_timestamps.get(tensor_name, 0)
     else:
         latest_version_number = int(latest_version_number)
 
@@ -591,7 +596,8 @@ def tensor_block_timestamp():
     if not tensor_name:
         return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-    latest_version_number = block_timestamps.get(tensor_name, 0)
+    with block_timestamps_lock:
+        latest_version_number = block_timestamps.get(tensor_name, 0)
     return jsonify({'version_number': latest_version_number})
 
 @app.route('/tensor_size', methods=['GET'])
@@ -650,8 +656,9 @@ def upload_tensor():
     torch.save(tensor_state, os.path.join(temp_dir, filename))  # Use filename directly
 
     # Update block version_number
-    block_timestamps[tensor_name] = update_version_number
-    save_block_timestamps(block_timestamps)
+    with block_timestamps_lock:
+        block_timestamps[tensor_name] = update_version_number
+        save_block_timestamps(block_timestamps)
 
     logging.debug(f"Tensor {tensor_name} uploaded and saved with version_number {update_version_number}")
 
