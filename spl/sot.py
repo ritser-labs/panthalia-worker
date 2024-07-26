@@ -658,7 +658,7 @@ def upload_tensor():
     # Update block version_number
     with block_timestamps_lock:
         block_timestamps[tensor_name] = update_version_number
-        save_block_timestamps(block_timestamps)
+    save_block_timestamps(block_timestamps)
 
     logging.debug(f"Tensor {tensor_name} uploaded and saved with version_number {update_version_number}")
 
