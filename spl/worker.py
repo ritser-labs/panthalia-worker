@@ -75,6 +75,7 @@ def parse_args():
     parser.add_argument('--sync_url', type=str, required=False, help="URL for reporting sync status", default='http://localhost:5002')
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
     parser.add_argument('--max_stakes', type=int, default=8, help="Maximum number of stakes to maintain")
+    parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     return parser.parse_args()
 
 args = parse_args()
@@ -281,17 +282,17 @@ def resume_gradient_updates():
 async def deposit_stake():
     await deposit_stake_without_approval(web3, pool_contract, args.private_key, subnet_id, args.group, worker_address, stake_amount, args.max_stakes)
 
-async def handle_event(event):
+async def handle_event(task_id, task, time_invoked):
     global last_handle_event_timestamp
 
     current_time = time.time()
+    logging.debug(f'Time since invocation: {current_time - time_invoked:.2f} seconds')
     if last_handle_event_timestamp is not None:
         time_since_last_event = current_time - last_handle_event_timestamp
         logging.debug(f"Time since last handle_event call: {time_since_last_event:.2f} seconds")
     last_handle_event_timestamp = current_time
 
-    task_id = event['args']['taskId']
-    solver = event['args']['solver']
+    solver = task.solver
 
     logging.info(f"Received event for task {args.task_type} and id {task_id} and layer {args.layer_idx}")
 
@@ -299,8 +300,6 @@ async def handle_event(event):
         logging.debug("Solver address does not match worker address. Ignoring event.")
         return
 
-    task_tuple = contract.functions.getTask(task_id).call()
-    task = Task(*task_tuple)
     task_params_bytes = task.params
     task_params = json.loads(task_params_bytes.decode('utf-8'))
 
@@ -318,13 +317,6 @@ async def handle_event(event):
     time_since_change = blockchain_timestamp - task.timeStatusChanged
     logging.debug(f"Time since status change: {time_since_change} seconds")
     
-    # Log the time difference between last block time and event time
-    event_block_number = event['blockNumber']
-    event_block = web3.eth.get_block(event_block_number)
-    event_block_time = event_block['timestamp']
-    last_block_time = blockchain_timestamp
-    time_diff = last_block_time - event_block_time
-    logging.debug(f"Time difference between last block time and event time: {time_diff} seconds")
 
     task_start_times[task_id] = time.time()
     await process_tasks()
@@ -793,11 +785,15 @@ def get_relevant_tensors_for_task(task_type):
         raise ValueError(f"Invalid task type: {task_type}")
     return relevant_tensors
 
+async def fetch_task(task_id):
+    task_tuple = contract.functions.getTask(task_id).call()
+    task = Task(*task_tuple)
+    return task_id, task
+
 async def main():
     logging.info("Starting main process")
     torch.set_default_device(device)
     initialize_distributed_environment_and_globals()
-    event_filter = contract.events.SolverSelected.create_filter(fromBlock='latest')
 
     # Approve tokens once at the start
     await approve_token_once(web3, token_contract, args.private_key, args.pool_address, 2**256 - 1)
@@ -805,19 +801,46 @@ async def main():
     logging.info("Starting tensor synchronization...")
     relevant_tensors = get_relevant_tensors_for_task(args.task_type)
     reported = False
+
+    # Initialize the last checked task ID and pending tasks
+    last_checked_task_id = contract.functions.numTasks().call() - 1
+    pending_tasks = set()
     
     asyncio.create_task(reclaim_stakes())
+    
+    last_loop_time = time.time()
 
     while True:
+        logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
+        last_loop_time = time.time()
         await deposit_stake()
         if not reported:
             for tensor_name in relevant_tensors:
                 await initialize_tensor(tensor_name)
             await report_sync_status('synced')
             reported = True
-        for event in event_filter.get_new_entries():
-            asyncio.create_task(handle_event(event))  # Schedule the event handling as a task
-        await asyncio.sleep(1)
+
+        latest_task_id = contract.functions.numTasks().call() - 1
+
+        # Gather all task fetching coroutines
+        all_task_ids = list(range(last_checked_task_id + 1, latest_task_id + 1)) + list(pending_tasks)
+        fetch_tasks = [fetch_task(task_id) for task_id in all_task_ids]
+        fetched_tasks = await asyncio.gather(*fetch_tasks)
+
+        # Clear pending tasks to update with new statuses
+        pending_tasks.clear()
+
+        # Handle events for tasks
+        for task_id, task in fetched_tasks:
+            if task.solver == worker_address and task.status == TaskStatus.SolverSelected.value:
+                asyncio.create_task(handle_event(task_id, task, time.time()))
+            elif task.status < TaskStatus.SolverSelected.value:
+                pending_tasks.add(task_id)
+        
+        # Update the last checked task ID
+        last_checked_task_id = latest_task_id
+        
+        await asyncio.sleep(args.poll_interval)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
