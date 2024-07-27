@@ -182,7 +182,6 @@ def monitor_processes(stdscr, processes, task_counts):
     for handler in logger.handlers:
         if isinstance(handler, logging.StreamHandler):
             logger.removeHandler(handler)
-        
 
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -196,7 +195,7 @@ def monitor_processes(stdscr, processes, task_counts):
     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
     curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)  # Cool color for the simulator text
 
-    max_name_length = max(len(name) for name in processes.keys()) + 11  # Increased padding by 3 more characters
+    max_name_length = max(len(name) for name in processes.keys()) + 7  # Increased padding by 3 more characters
     right_col_width = max_name_length + 2  # Additional padding
 
     def draw_screen():
@@ -232,9 +231,9 @@ def monitor_processes(stdscr, processes, task_counts):
 
             # Only display task count for worker processes
             if name.startswith('worker_'):
-                task_count = task_counts.get(task_name, 0)
+                task_count = task_counts.get(task_name, (0, 0))
                 logging.debug(f"Displaying task count for {name}: {task_count}")
-                stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count} tasks)", color)
+                stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count[0]}/{task_count[1]})", color)
             else:
                 stdscr.addstr(i, split_point, f"{indicator} {name}", color)
         
@@ -286,6 +285,7 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
         filters[task_type] = {
             'TaskRequestSubmitted': await contracts[task_type].events.TaskRequestSubmitted.create_filter(fromBlock='latest'),
             'SolutionSubmitted': await contracts[task_type].events.SolutionSubmitted.create_filter(fromBlock='latest'),
+            'SolverSelected': await contracts[task_type].events.SolverSelected.create_filter(fromBlock='latest'),
             'TaskResolved': await contracts[task_type].events.TaskResolved.create_filter(fromBlock='latest')
         }
 
@@ -296,16 +296,25 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
                 new_entries = await event_filter.get_new_entries()
                 for event in new_entries:
                     task_id = event['args']['taskId']
+                    if task_type not in tasks:
+                        tasks[task_type] = {}
                     if event_name == 'TaskRequestSubmitted':
-                        tasks[task_id] = {'active': True, 'task_type': task_type}
-                    elif event_name in ['SolutionSubmitted', 'TaskResolved']:
-                        if task_id in tasks and tasks[task_id]['active']:
-                            tasks[task_id]['active'] = False
+                        tasks[task_type][task_id] = {'active': True, 'solver_selected': False}
+                    elif event_name == 'SolverSelected':
+                        if task_id in tasks[task_type]:
+                            tasks[task_type][task_id]['solver_selected'] = True
+                    elif event_name == 'SolutionSubmitted':
+                        if task_id in tasks[task_type]:
+                            tasks[task_type][task_id]['active'] = False
+                    elif event_name == 'TaskResolved':
+                        if task_id in tasks[task_type]:
+                            tasks[task_type][task_id]['active'] = False
         
         # Update the task counts
         for task_type in subnet_addresses.keys():
-            active_tasks = sum(1 for task in tasks.values() if task['task_type'] == task_type and task['active'])
-            task_counts[task_type] = active_tasks
+            active_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['active'])
+            solver_selected_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['solver_selected'] and task['active'])
+            task_counts[task_type] = (solver_selected_tasks, active_tasks)
 
         await asyncio.sleep(0.5)  # Polling interval
 
