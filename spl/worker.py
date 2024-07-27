@@ -305,7 +305,7 @@ async def handle_event(task_id, task, time_invoked):
         'time_status_changed': task.timeStatusChanged
     })
     
-    blockchain_timestamp = await web3.eth.get_block('latest')['timestamp']
+    blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
     
     time_since_change = blockchain_timestamp - task.timeStatusChanged
     logging.debug(f"Time since status change: {time_since_change} seconds")
@@ -449,7 +449,7 @@ async def reclaim_stakes():
             task = Task(*task_tuple)
             task_status = task.status
             time_status_changed = task.timeStatusChanged
-            blockchain_timestamp = await web3.eth.get_block('latest')['timestamp']
+            blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
             time_elapsed = blockchain_timestamp - time_status_changed
             
             if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_time:
@@ -488,7 +488,7 @@ async def upload_tensors_and_grads(error_output, grads, layer_idx):
 
     grads_url = await upload_tensor(grads_flat, f'{layer_label}_grads')
     
-    block_timestamp = await web3.eth.get_block('latest')['timestamp']
+    block_timestamp = (await web3.eth.get_block('latest'))['timestamp']
     version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
     result = {
@@ -689,7 +689,7 @@ async def upload_final_logits_results():
     grads_url = await upload_tensor(torch.cat([grad.view(-1).to(device) for grad in tensors['updates']]), 'final_logits_grads')
     loss = tensors['loss']
 
-    block_timestamp = await web3.eth.get_block('latest')['timestamp']
+    block_timestamp = (await web3.eth.get_block('latest'))['timestamp']
     version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
     return {
