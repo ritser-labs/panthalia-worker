@@ -8,7 +8,6 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import math
 import aiohttp
-import threading
 import queue
 from web3 import AsyncWeb3
 from web3.middleware import async_geth_poa_middleware
@@ -23,17 +22,18 @@ import uuid
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class Master:
-    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, max_simultaneous_iterations=1, detailed_logs=False):
+    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, desired_unresolved_tasks=2, detailed_logs=False):
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
-        self.max_simultaneous_iterations = max_simultaneous_iterations
+        self.desired_unresolved_tasks = desired_unresolved_tasks
         self.iteration = 1  # Track the number of iterations
         self.perplexities = []  # Initialize perplexity list
         self.perplexity_queue = queue.Queue()
         self.load_wallets(wallets_file)
         self.current_wallet_index = 0
+        self.unresolved_tasks = []
 
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -88,7 +88,6 @@ class Master:
             await asyncio.gather(*tasks)
             tasks = []
 
-
     def update_plot(self, frame=None):
         while not self.perplexity_queue.empty():
             perplexity = self.perplexity_queue.get()
@@ -120,6 +119,8 @@ class Master:
 
                     task_id = logs[0]['args']['taskId']
                     logging.info(f"Iteration {iteration_number} - Task submitted successfully. Task ID: {task_id}")
+
+                    self.unresolved_tasks.append((task_type, task_id))
 
                     selection_id = await self.submit_selection_req()
                     logging.info(f"Selection ID: {selection_id}")
@@ -191,7 +192,7 @@ class Master:
                 
                 start_transact_time = time.time()
                 receipt = await async_transact_with_contract_function(
-                    self.web3, self.contracts[task_type], 'selectSolver', self.get_next_wallet()['private_key'], task_id, attempt=1)
+                    self.web3, self.contracts[task_type], 'selectSolver', self.get_next_wallet()['private_key'], task_id, attempts=1)
                 end_transact_time = time.time()
                 logging.info(f"Transaction duration: {end_transact_time - start_transact_time} seconds")
                 
@@ -270,20 +271,29 @@ class Master:
         logging.info("Starting main process")
         await self.approve_tokens_at_start()
 
-        tasks = []
-        for _ in range(self.max_simultaneous_iterations):
-            tasks.append(asyncio.create_task(self.run_iteration_thread(self.iteration)))
-            self.iteration += 1
-
-        await asyncio.gather(*tasks)
-
-    async def run_iteration_thread(self, iteration_number):
         while True:
-            try:
-                await self.main_iteration(iteration_number)
-                break
-            except Exception as e:
-                logging.error(f"Error in iteration {iteration_number}: {e}. Retrying...")
+            await self.check_and_submit_tasks()
+            await asyncio.sleep(5)  # Check every 5 seconds
+
+    async def check_and_submit_tasks(self):
+        # Filter unresolved tasks
+        unresolved_tasks = []
+        for task_type, task_id in self.unresolved_tasks:
+            if task_type != 'embed':
+                continue
+            task_tuple = await self.contracts[task_type].functions.getTask(task_id).call()
+            task = Task(*task_tuple)
+            if task.status not in [TaskStatus.ResolvedCorrect.value, TaskStatus.ResolvedIncorrect.value]:
+                unresolved_tasks.append((task_type, task_id))
+
+        self.unresolved_tasks = unresolved_tasks
+
+        # Submit new tasks if necessary
+        if len(self.unresolved_tasks) < self.desired_unresolved_tasks:
+            tasks_to_submit = self.desired_unresolved_tasks - len(self.unresolved_tasks)
+            for _ in range(tasks_to_submit):
+                asyncio.create_task(self.main_iteration(self.iteration))
+                self.iteration += 1
 
     async def get_latest_model_params(self, current_version_number):
         async with aiohttp.ClientSession() as session:
@@ -408,7 +418,7 @@ if __name__ == "__main__":
     parser.add_argument('--wallets_file', type=str, required=True, help="Path to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--max_simultaneous_iterations', type=int, default=40, help="Maximum number of simultaneous iterations")
+    parser.add_argument('--desired_unresolved_tasks', type=int, default=2, help="Desired number of unresolved tasks to maintain")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()
@@ -416,4 +426,4 @@ if __name__ == "__main__":
     with open(args.subnet_addresses, 'r') as file:
         subnet_addresses = json.load(file)
 
-    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, max_simultaneous_iterations=args.max_simultaneous_iterations, detailed_logs=args.detailed_logs)
+    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, desired_unresolved_tasks=args.desired_unresolved_tasks, detailed_logs=args.detailed_logs)
