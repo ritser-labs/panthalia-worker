@@ -463,9 +463,9 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
             finally:
                 state_changing = False
                 await update_current_global_state(pool)
-
-        # Wait for the state to change
-        await state_change_event.wait()
+        else:
+            # Wait for the state to change
+            await state_change_event.wait()
 
         retries += 1
 
