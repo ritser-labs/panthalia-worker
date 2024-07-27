@@ -13,5 +13,7 @@ spl/out.txt
 spl/abis/*
 spl/sot.log
 spl/perplexity_plot.png
+spl/master_wallets.json
+spl/master_public_keys.json
 
 spl/logs/*

@@ -16,11 +16,22 @@ import asyncio
 import logging
 import traceback
 
+# Define file paths and other configurations
+LOG_DIR = 'logs'
+STATE_DIR = os.path.join('data', 'state')
+TEMP_DIR = os.path.join(STATE_DIR, 'temp')
+MASTER_WALLETS_FILE = 'master_wallets.json'
+MASTER_PUBLIC_KEYS_FILE = 'master_public_keys.json'
+DEPLOY_SCRIPT = 'script/Deploy.s.sol'
+LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
+ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
+SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
+BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
+
 # Configure logging to file and stdout
-log_dir = 'logs'
-os.makedirs(log_dir, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
-file_handler = logging.FileHandler(os.path.join(log_dir, 'test_run.log'))
+file_handler = logging.FileHandler(LOG_FILE)
 console_handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)
@@ -37,9 +48,10 @@ def parse_args():
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the deployer's Ethereum account")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
-    parser.add_argument('--forge_script', type=str, default='script/Deploy.s.sol', help="Path to the Forge deploy script")
+    parser.add_argument('--forge_script', type=str, default=DEPLOY_SCRIPT, help="Path to the Forge deploy script")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
+    parser.add_argument('--num_master_wallets', type=int, default=10, help="Number of wallets to generate for the master process")
     return parser.parse_args()
 
 args = parse_args()
@@ -166,6 +178,11 @@ def reset_logs(log_dir):
 def monitor_processes(stdscr, processes, task_counts):
     # Remove console handler from logging
     logging.getLogger().removeHandler(console_handler)
+    logger = logging.getLogger()
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler):
+            logger.removeHandler(handler)
+        
 
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -299,30 +316,23 @@ async def set_interval_mining(web3, interval):
 async def main():
     processes = {}
     task_counts = {}  # Dictionary to store task counts
-    log_dir = 'logs'
-    os.makedirs(log_dir, exist_ok=True)
 
     # Reset logs
-    reset_logs(log_dir)
+    reset_logs(LOG_DIR)
 
     # Start anvil process
     logging.info("Starting anvil...")
-    anvil_log = open(os.path.join(log_dir, 'anvil.log'), 'w')
-    anvil_process = subprocess.Popen(
-        ['anvil'], stdout=anvil_log, stderr=anvil_log
-    )
+    anvil_log = open(ANVIL_LOG_FILE, 'w')
+    anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log)
     processes['anvil'] = anvil_process
     logging.info(f"Anvil started with PID {anvil_process.pid}")
 
     try:
         # Delete all .pt files in the state directory except for the latest version for each tensor
-        state_dir = os.path.join(args.local_storage_dir, 'state')
-        block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
-        delete_old_tensor_files(state_dir, block_timestamps_file)
+        delete_old_tensor_files(STATE_DIR, BLOCK_TIMESTAMPS_FILE)
 
         # Delete the temp directory
-        temp_dir = os.path.join(state_dir, 'temp')
-        delete_directory_contents(temp_dir)
+        delete_directory_contents(TEMP_DIR)
 
         # Start Flask server in a separate thread
         flask_thread = threading.Thread(target=lambda: app.run(port=5002))
@@ -371,10 +381,21 @@ async def main():
         # Initialize sync_status with all subnet addresses
         sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
 
-        # Generate wallets and fund them
-        num_wallets = len(subnet_addresses)
-        wallets = generate_wallets(num_wallets)
-        await fund_wallets(web3, wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+        # Generate wallets for the master and fund them
+        master_wallets = generate_wallets(args.num_master_wallets)
+        await fund_wallets(web3, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+
+        with open(MASTER_WALLETS_FILE, 'w') as f:
+            json.dump(master_wallets, f)
+
+        # Save the public keys of the master wallets
+        master_public_keys = [wallet['address'] for wallet in master_wallets]
+        with open(MASTER_PUBLIC_KEYS_FILE, 'w') as f:
+            json.dump(master_public_keys, f)
+
+        # Generate wallets for workers and fund them
+        worker_wallets = generate_wallets(len(subnet_addresses))
+        await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
@@ -383,8 +404,8 @@ async def main():
         logging.info("Starting SOT service...")
 
         # Start the SOT service
-        sot_log = open(os.path.join(log_dir, 'sot.log'), 'w')
-        sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address], stdout=sot_log, stderr=sot_log)
+        sot_log = open(SOT_LOG_FILE, 'w')
+        sot_process = subprocess.Popen(['python', 'sot.py', '--public_keys_file', MASTER_PUBLIC_KEYS_FILE], stdout=sot_log, stderr=sot_log)
         processes['sot'] = sot_process
         logging.info(f"SOT service started with PID {sot_process.pid}")
 
@@ -420,7 +441,7 @@ async def main():
                     layer_idx = None
 
                 # Select the corresponding wallet for each worker
-                wallet = wallets.pop(0)
+                wallet = worker_wallets.pop(0)
 
                 command = [
                     'python', 'worker.py',
@@ -436,7 +457,7 @@ async def main():
                 ]
                 if layer_idx is not None:
                     command.extend(['--layer_idx', str(layer_idx)])
-                log_file_path = os.path.join(log_dir, f'worker_{task_type}.log')
+                log_file_path = os.path.join(LOG_DIR, f'worker_{task_type}.log')
                 log_file = open(log_file_path, 'w')
                 worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
                 processes[f'worker_{task_type}'] = worker_process
@@ -444,7 +465,7 @@ async def main():
 
         try:
             # Wait for all workers to sync
-            if not wait_for_workers_to_sync(num_wallets):
+            if not wait_for_workers_to_sync(len(worker_wallets)):
                 logging.error("Error: Not all workers synced within the timeout period.")
                 terminate_processes(processes.values())
                 exit(1)
@@ -453,11 +474,11 @@ async def main():
             logging.info("Starting master process...")
 
             # Start master.py
-            master_log = open(os.path.join(log_dir, 'master.log'), 'w')
+            master_log = open(os.path.join(LOG_DIR, 'master.log'), 'w')
             master_command = [
                 'python', 'master.py',
                 '--rpc_url', args.rpc_url,
-                '--private_key', args.private_key,
+                '--wallets_file', MASTER_WALLETS_FILE,
                 '--sot_url', args.sot_url,
                 '--subnet_addresses', args.subnet_addresses,
             ]

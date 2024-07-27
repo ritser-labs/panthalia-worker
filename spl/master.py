@@ -20,19 +20,20 @@ from eth_account.messages import encode_defunct
 from eth_account import Account
 import uuid
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class Master:
-    def __init__(self, rpc_url, private_key, sot_url, subnet_addresses, max_simultaneous_iterations=1, detailed_logs=False):
+    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, max_simultaneous_iterations=1, detailed_logs=False):
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
-        self.account = self.web3.eth.account.from_key(private_key)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
         self.max_simultaneous_iterations = max_simultaneous_iterations
         self.iteration = 1  # Track the number of iterations
         self.perplexities = []  # Initialize perplexity list
         self.perplexity_queue = queue.Queue()
+        self.load_wallets(wallets_file)
+        self.current_wallet_index = 0
 
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -52,6 +53,15 @@ class Master:
         # Run the main iterations in separate threads
         asyncio.run(self.run_main())
 
+    def load_wallets(self, wallets_file):
+        with open(wallets_file, 'r') as f:
+            self.wallets = json.load(f)
+
+    def get_next_wallet(self):
+        wallet = self.wallets[self.current_wallet_index]
+        self.current_wallet_index = (self.current_wallet_index + 1) % len(self.wallets)
+        return wallet
+
     async def initialize_contracts(self):
         self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, self.subnet_addresses)
         if not self.contracts:
@@ -68,9 +78,16 @@ class Master:
         self.pool = self.web3.eth.contract(address=self.pool_address, abi=self.abis['Pool'])
 
     async def approve_tokens_at_start(self):
+        tasks = []
         for contract in self.contracts.values():
             token_address = await contract.functions.token().call()
-            await approve_token_once(self.web3, self.web3.eth.contract(address=token_address, abi=self.abis['ERC20']), self.account._private_key, contract.address, 2**256 - 1)
+            token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
+            for wallet in self.wallets:
+                task = approve_token_once(self.web3, token_contract, wallet['private_key'], contract.address, 2**256 - 1)
+                tasks.append(task)
+            await asyncio.gather(*tasks)
+            tasks = []
+
 
     def update_plot(self, frame=None):
         while not self.perplexity_queue.empty():
@@ -82,11 +99,6 @@ class Master:
         self.ax.autoscale_view()
         self.fig.savefig('perplexity_plot.png')  # Save the figure after each update
 
-    async def approve_token(self, token_address, spender_address, amount):
-        token_contract = self.web3.eth.contract(address=token_address, abi=self.abis['ERC20'])
-        receipt = await async_transact_with_contract_function(self.web3, token_contract, 'approve', self.account._private_key, spender_address, amount)
-        logging.info(f"Approved token transaction receipt: {receipt}")
-
     async def submit_task(self, task_type, params, iteration_number):
         try:
             if task_type not in self.contracts:
@@ -97,8 +109,8 @@ class Master:
 
             for _ in range(5):  # Retry up to 5 times
                 try:
-                    await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
-                    receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.account._private_key, encoded_params)
+                    await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
+                    receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.get_next_wallet()['private_key'], encoded_params)
                     logging.info(f"submitTaskRequest transaction receipt: {receipt}")
 
                     logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
@@ -129,10 +141,10 @@ class Master:
             if await self.pool.functions.state().call() != PoolState.Unlocked.value:
                 return await self.pool.functions.currentSelectionId().call()
 
-            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
+            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
             logging.info("Submitting selection request")
 
-            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.account._private_key)
+            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.get_next_wallet()['private_key'])
             logging.info(f"submitSelectionReq transaction receipt: {receipt}")
 
             unlocked_min_period = await self.pool.functions.UNLOCKED_MIN_PERIOD().call()
@@ -171,12 +183,12 @@ class Master:
                 logging.info(f"Selecting solver for task ID: {task_id}, attempt {attempt}")
                 
                 start_wait_time = time.time()
-                await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.account._private_key)
+                await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.get_next_wallet()['private_key'])
                 end_wait_time = time.time()
                 logging.info(f"wait_for_state_change duration: {end_wait_time - start_wait_time} seconds")
                 
                 start_transact_time = time.time()
-                receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.account._private_key, task_id)
+                receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.get_next_wallet()['private_key'], task_id)
                 end_transact_time = time.time()
                 logging.info(f"Transaction duration: {end_transact_time - start_transact_time} seconds")
                 
@@ -192,8 +204,8 @@ class Master:
         try:
             logging.info(f"Removing solver stake for task ID: {task_id}")
 
-            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
-            receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.account._private_key, task_id)
+            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
+            receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.get_next_wallet()['private_key'], task_id)
             logging.info(f"Iteration {iteration_number} - removeSolverStake transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error removing solver stake: {e}")
@@ -274,9 +286,10 @@ class Master:
             async with session.get(f"{self.sot_url}/latest_model_params", params={'version_number': current_version_number}) as response:
                 return await response.json()
 
-    def sign_message(self, message):
+    def sign_message(self, message, wallet):
         message = encode_defunct(text=message)
-        signed_message = self.account.sign_message(message)
+        account = self.web3.eth.account.from_key(wallet['private_key'])
+        signed_message = account.sign_message(message)
         return signed_message.signature.hex()
 
     def generate_message(self, endpoint):
@@ -350,8 +363,9 @@ class Master:
             **learning_params
         }
 
+        wallet = self.get_next_wallet()
         message = json.dumps(self.generate_message('update_state'), sort_keys=True)
-        signature = self.sign_message(message)
+        signature = self.sign_message(message, wallet)
         headers = {'Authorization': f'{message}:{signature}'}
 
         async with aiohttp.ClientSession() as session:
@@ -371,8 +385,9 @@ class Master:
         await self.update_sot(tensor_name, result)
 
     async def get_batch_and_targets_url(self):
+        wallet = self.get_next_wallet()
         message = json.dumps(self.generate_message('get_batch'), sort_keys=True)
-        signature = self.sign_message(message)
+        signature = self.sign_message(message, wallet)
         headers = {'Authorization': f'{message}:{signature}'}
 
         url = os.path.join(self.sot_url, 'get_batch')
@@ -386,7 +401,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Master process for task submission")
     parser.add_argument('--rpc_url', type=str, required=True, help="RPC URL for Ethereum node")
-    parser.add_argument('--private_key', type=str, required=True, help="Private key for Ethereum account")
+    parser.add_argument('--wallets_file', type=str, required=True, help="Path to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
     parser.add_argument('--max_simultaneous_iterations', type=int, default=40, help="Maximum number of simultaneous iterations")
@@ -397,4 +412,4 @@ if __name__ == "__main__":
     with open(args.subnet_addresses, 'r') as file:
         subnet_addresses = json.load(file)
 
-    master = Master(args.rpc_url, args.private_key, args.sot_url, subnet_addresses, max_simultaneous_iterations=args.max_simultaneous_iterations, detailed_logs=args.detailed_logs)
+    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, max_simultaneous_iterations=args.max_simultaneous_iterations, detailed_logs=args.detailed_logs)

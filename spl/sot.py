@@ -67,8 +67,8 @@ executor = ThreadPoolExecutor(max_workers=10)
 # Replace hardcoded URL with a variable
 BASE_URL = 'http://localhost:5001'
 
-# Global variable to store master's public key
-master_public_key = None
+# Global variable to store master's public keys
+master_public_keys = []
 
 # Dictionary to store used nonces
 used_nonces = {}
@@ -193,7 +193,7 @@ preloaded_batch_lock = threading.Lock()
 preloaded_batch_condition = threading.Condition(lock=preloaded_batch_lock)
 
 def truncate_tokens(tokens, max_seq_len, pad_token=tokenizer.pad_id):
-    if len(tokens) < max_seq_len:
+    if (len(tokens)) < max_seq_len:
         tokens += [pad_token] * (max_seq_len - len(tokens))
     elif len(tokens) > max_seq_len:
         tokens = tokens[:max_seq_len]
@@ -288,8 +288,8 @@ def fetch(session, url):
 def verify_signature(message, signature):
     message = encode_defunct(text=message)
     recovered_address = Account.recover_message(message, signature=signature)
-    logging.debug(f"Recovered address: {recovered_address}, Expected address: {master_public_key}")
-    return recovered_address.lower() == master_public_key.lower()
+    logging.debug(f"Recovered address: {recovered_address}, Expected addresses: {master_public_keys}")
+    return recovered_address.lower() in [key.lower() for key in master_public_keys]
 
 def requires_authentication(f):
     @functools.wraps(f)
@@ -669,11 +669,12 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
-    parser.add_argument('--public_key', type=str, required=True, help="Public key of the master for verifying requests")
+    parser.add_argument('--public_keys_file', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
 
     args = parser.parse_args()
 
-    master_public_key = args.public_key
+    with open(args.public_keys_file, 'r') as f:
+        master_public_keys = json.load(f)
 
     logging.info("Starting SOT service...")
     initialize_service()
