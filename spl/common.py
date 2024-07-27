@@ -261,13 +261,12 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                 raise
 
         # Wait for the next block before retrying
-        block_filter = web3.eth.filter('latest')
-        await web3.eth.wait_for_block(block_filter.get_new_entries()[0])
+        await wait_for_block(web3)
 
 async def wait_for_block(web3):
-    block_filter = web3.eth.filter('latest')
+    block_filter = await web3.eth.filter('latest')
     while True:
-        new_entries = block_filter.get_new_entries()
+        new_entries = await block_filter.get_new_entries()
         if new_entries:
             return new_entries[0]
         await asyncio.sleep(1)
@@ -494,7 +493,7 @@ async def trigger_lock_global_state(web3, pool, private_key):
         logging.info("UNLOCKED_MIN_PERIOD is already over, proceeding with lockGlobalState")
 
     try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'lockGlobalState', private_key)
+        receipt = await async_transact_with_contract_function(web3, pool, 'lockGlobalState', private_key, attempts=1)
         logging.info(f"lockGlobalState transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error triggering lock global state: {e}")
@@ -514,7 +513,7 @@ async def trigger_remove_global_lock(web3, pool, private_key):
         logging.info("SELECTIONS_FINALIZING_MIN_PERIOD is already over, proceeding with removeGlobalLock")
 
     try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', private_key)
+        receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', private_key, attempts=1)
         logging.info(f"removeGlobalLock transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error triggering remove global lock: {e}")
