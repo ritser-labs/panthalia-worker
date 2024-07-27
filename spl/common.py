@@ -8,7 +8,7 @@ import torch.distributed as dist
 import time
 from io import BytesIO
 import requests
-from web3 import Web3
+from web3 import AsyncWeb3
 from enum import Enum
 import web3 as Web3Module
 from collections import namedtuple
@@ -176,7 +176,6 @@ def initialize_distributed_environment(backend, master_addr='localhost', master_
     if not dist.is_initialized():
         dist.init_process_group(backend=backend)
 
-
 def process_trace(trace):
     if isinstance(trace, AttributeDict):
         return {k: process_trace(v) for k, v in trace.items()}
@@ -189,7 +188,7 @@ def process_trace(trace):
     else:
         return trace
 
-def get_debug_trace(web3, tx_hash):
+async def get_debug_trace(web3, tx_hash):
     try:
         # Ensure tx_hash is in string format
         if isinstance(tx_hash, HexBytes):
@@ -197,7 +196,7 @@ def get_debug_trace(web3, tx_hash):
         elif isinstance(tx_hash, bytes):
             tx_hash = tx_hash.hex()
         
-        trace = web3.manager.request_blocking('debug_traceTransaction', [tx_hash])
+        trace = await web3.manager.request_blocking('debug_traceTransaction', [tx_hash])
         processed_trace = process_trace(trace)
         for key, value in processed_trace.items():
             logging.info(f"{key}: {value}")
@@ -208,35 +207,35 @@ def get_debug_trace(web3, tx_hash):
 
 async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, attempts=5):
     account = web3.eth.account.from_key(private_key)
-    gas_price = web3.eth.gas_price
+    gas_price = await web3.eth.gas_price
 
     function = getattr(contract.functions, function_name)(*args)
 
     for attempt in range(attempts):  # Retry up to 5 times
         tx_hash = None
         try:
-            nonce = web3.eth.get_transaction_count(account.address)
+            nonce = await web3.eth.get_transaction_count(account.address)
             # Dynamically estimate gas
-            estimated_gas = function.estimate_gas({
+            estimated_gas = await function.estimate_gas({
                 'from': account.address,
                 'value': value
             })
 
             tx_params = {
-                'chainId': web3.eth.chain_id,
+                'chainId': await web3.eth.chain_id,
                 'gas': estimated_gas,
                 'gasPrice': gas_price,
                 'nonce': nonce,
                 'value': value
             }
 
-            tx = function.build_transaction(tx_params)
+            tx = await function.build_transaction(tx_params)
             signed_tx = account.sign_transaction(tx)
-            tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-            receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+            tx_hash = await web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            receipt = await web3.eth.wait_for_transaction_receipt(tx_hash)
 
             if receipt['status'] == 0:
-                error_message = decode_revert_reason(web3, web3.eth.call({
+                error_message = await decode_revert_reason(web3, await web3.eth.call({
                     'to': tx['to'],
                     'data': tx.get('input', b'')
                 }, receipt.blockNumber))
@@ -250,7 +249,7 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                 error_data = cle.args[0]  # Directly use the first argument
                 if isinstance(error_data, dict) and 'data' in error_data:
                     error_data = error_data['data']
-                decoded_error = decode_revert_reason(web3, error_data)
+                decoded_error = await decode_revert_reason(web3, error_data)
                 logging.error(f"Contract logic error on attempt {attempt + 1}: {decoded_error}")
             except Exception as e:
                 logging.error(f"Failed to decode contract logic error: {cle}, original error: {e}")
@@ -263,7 +262,7 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                 raise
             await asyncio.sleep(1)  # Wait before retrying
 
-def decode_revert_reason(web3, revert_reason):
+async def decode_revert_reason(web3, revert_reason):
     try:
         # Ensure the revert reason starts with '0x' and remove it
         if revert_reason.startswith('0x'):
@@ -326,10 +325,9 @@ def decode_revert_reason(web3, revert_reason):
         logging.error(f"Exception in decode_revert_reason: {e}")
         return f"Error decoding revert reason: {revert_reason}"
 
-
 async def approve_token_once(web3, token_contract, private_key, spender_address, amount):
     account = web3.eth.account.from_key(private_key)
-    current_allowance = token_contract.functions.allowance(account.address, spender_address).call()
+    current_allowance = await token_contract.functions.allowance(account.address, spender_address).call()
     if current_allowance < amount:
         receipt = await async_transact_with_contract_function(web3, token_contract, 'approve', private_key, spender_address, amount)
         logging.info(f"Approved token transaction receipt: {receipt}")
@@ -337,7 +335,7 @@ async def approve_token_once(web3, token_contract, private_key, spender_address,
         logging.info("Current allowance is sufficient, no need to approve more tokens.")
 
 async def deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, group, worker_address, stake_amount, max_stakes, max_retries=10):
-    stakes_deposited = pool_contract.functions.getStakeIds(subnet_id, group, worker_address).call()
+    stakes_deposited = await pool_contract.functions.getStakeIds(subnet_id, group, worker_address).call()
     number_of_stakes_to_deposit = max_stakes - len(stakes_deposited)
     
     logging.info(f'Depositing {number_of_stakes_to_deposit} stakes for {worker_address}...')
@@ -363,7 +361,6 @@ async def deposit_stake_without_approval(web3, pool_contract, private_key, subne
                 if attempt == max_retries - 1:
                     raise  # Rethrow the exception after the last attempt
                 await asyncio.sleep(1)  # Wait before retrying
-
 
 def get_learning_hyperparameters(current_iteration):
     """
@@ -405,7 +402,7 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
     retries = 0
     while retries < max_retries:
         try:
-            current_state = PoolState(pool.functions.state().call())
+            current_state = PoolState(await pool.functions.state().call())
             logging.info(f"Current pool state: {current_state.name}, target state: {PoolState(target_state).name}")
 
             if current_state == PoolState(target_state):
@@ -416,7 +413,7 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
                 logging.info("Triggering lockGlobalState to change state to Locked")
                 await trigger_lock_global_state(web3, pool, private_key)
             elif current_state == PoolState.Locked:
-                #logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
+                # logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
                 # Todo in prod you just wait instead of calling the function
                 logging.info("Triggering finalizeSelections to change state to SelectionsFinalizing")
                 await finalize_selections(web3, pool, private_key)
@@ -436,16 +433,17 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
     raise RuntimeError(f"Failed to change state to {PoolState(target_state).name} after multiple attempts")
 
 async def finalize_selections(web3, pool, private_key):
-    vrf_coordinator_address = pool.functions.vrfCoordinator().call()
+    vrf_coordinator_address = await pool.functions.vrfCoordinator().call()
     vrf_coordinator = web3.eth.contract(address=vrf_coordinator_address, abi=load_abi('MockVRFCoordinator'))
-    vrf_request_id = pool.functions.vrfRequestId().call()
+    vrf_request_id = await pool.functions.vrfRequestId().call()
     receipt = await async_transact_with_contract_function(web3, vrf_coordinator, 'fulfillRandomWords', private_key, vrf_request_id, attempts=1)
     logging.info(f"fulfillRandomWords transaction receipt: {receipt}")
 
 async def trigger_lock_global_state(web3, pool, private_key):
-    unlocked_min_period = pool.functions.UNLOCKED_MIN_PERIOD().call()
-    last_state_change_time = pool.functions.lastStateChangeTime().call()
-    current_time = web3.eth.get_block('latest')['timestamp']
+    unlocked_min_period = await pool.functions.UNLOCKED_MIN_PERIOD().call()
+    last_state_change_time = await pool.functions.lastStateChangeTime().call()
+    latest_block = await web3.eth.get_block('latest')
+    current_time = latest_block['timestamp']
     remaining_time = (last_state_change_time + unlocked_min_period) - current_time
 
     if remaining_time > 0:
@@ -460,9 +458,10 @@ async def trigger_lock_global_state(web3, pool, private_key):
         raise
 
 async def trigger_remove_global_lock(web3, pool, private_key):
-    selections_finalizing_min_period = pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
-    last_state_change_time = pool.functions.lastStateChangeTime().call()
-    current_time = web3.eth.get_block('latest')['timestamp']
+    selections_finalizing_min_period = await pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
+    last_state_change_time = await pool.functions.lastStateChangeTime().call()
+    latest_block = await web3.eth.get_block('latest')
+    current_time = latest_block['timestamp']
     remaining_time = (last_state_change_time + selections_finalizing_min_period) - current_time
 
     if remaining_time > 0:

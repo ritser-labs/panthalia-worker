@@ -6,9 +6,9 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from dataclasses import dataclass
-from web3 import Web3
+from web3 import AsyncWeb3
 from web3.exceptions import ContractCustomError
-from web3.middleware import geth_poa_middleware
+from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
@@ -82,8 +82,8 @@ args = parse_args()
 
 os.makedirs(args.local_storage_dir, exist_ok=True)
 
-web3 = Web3(Web3.HTTPProvider(args.rpc_url))
-web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
+web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
 
 worker_account = web3.eth.account.from_key(args.private_key)
 worker_address = worker_account.address
@@ -94,13 +94,6 @@ pool_abi = load_abi('Pool')
 contract_address = args.subnet_address
 contract = web3.eth.contract(address=contract_address, abi=subnet_manager_abi)
 pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
-
-token_address = contract.functions.token().call()
-token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
-
-stake_amount = contract.functions.solverStakeAmount().call()
-
-subnet_id = contract.functions.subnetId().call()
 
 model_initialized = False
 embedding_initialized = False
@@ -312,7 +305,7 @@ async def handle_event(task_id, task, time_invoked):
         'time_status_changed': task.timeStatusChanged
     })
     
-    blockchain_timestamp = web3.eth.get_block('latest')['timestamp']
+    blockchain_timestamp = await web3.eth.get_block('latest')['timestamp']
     
     time_since_change = blockchain_timestamp - task.timeStatusChanged
     logging.debug(f"Time since status change: {time_since_change} seconds")
@@ -449,14 +442,14 @@ async def process_tasks():
     concurrent_tasks_counter -= 1
 
 async def reclaim_stakes():
-    max_dispute_time = contract.functions.maxDisputeTime().call()
+    max_dispute_time = await contract.functions.maxDisputeTime().call()
     while True:
         for task_id in list(processed_tasks):
-            task_tuple = contract.functions.getTask(task_id).call()
+            task_tuple = await contract.functions.getTask(task_id).call()
             task = Task(*task_tuple)
             task_status = task.status
             time_status_changed = task.timeStatusChanged
-            blockchain_timestamp = web3.eth.get_block('latest')['timestamp']
+            blockchain_timestamp = await web3.eth.get_block('latest')['timestamp']
             time_elapsed = blockchain_timestamp - time_status_changed
             
             if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_time:
@@ -495,7 +488,7 @@ async def upload_tensors_and_grads(error_output, grads, layer_idx):
 
     grads_url = await upload_tensor(grads_flat, f'{layer_label}_grads')
     
-    block_timestamp = web3.eth.get_block('latest')['timestamp']
+    block_timestamp = await web3.eth.get_block('latest')['timestamp']
     version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
     result = {
@@ -696,7 +689,7 @@ async def upload_final_logits_results():
     grads_url = await upload_tensor(torch.cat([grad.view(-1).to(device) for grad in tensors['updates']]), 'final_logits_grads')
     loss = tensors['loss']
 
-    block_timestamp = web3.eth.get_block('latest')['timestamp']
+    block_timestamp = await web3.eth.get_block('latest')['timestamp']
     version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
     return {
@@ -786,14 +779,25 @@ def get_relevant_tensors_for_task(task_type):
     return relevant_tensors
 
 async def fetch_task(task_id):
-    task_tuple = contract.functions.getTask(task_id).call()
+    task_tuple = await contract.functions.getTask(task_id).call()
     task = Task(*task_tuple)
     return task_id, task
+
+async def initialize_contracts():
+    global token_address, token_contract, stake_amount, subnet_id
+    token_address = await contract.functions.token().call()
+    token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+
+    stake_amount = await contract.functions.solverStakeAmount().call()
+
+    subnet_id = await contract.functions.subnetId().call()
 
 async def main():
     logging.info("Starting main process")
     torch.set_default_device(device)
     initialize_distributed_environment_and_globals()
+
+    await initialize_contracts()
 
     # Approve tokens once at the start
     await approve_token_once(web3, token_contract, args.private_key, args.pool_address, 2**256 - 1)
@@ -803,7 +807,7 @@ async def main():
     reported = False
 
     # Initialize the last checked task ID and pending tasks
-    last_checked_task_id = contract.functions.numTasks().call() - 1
+    last_checked_task_id = await contract.functions.numTasks().call() - 1
     pending_tasks = set()
     
     asyncio.create_task(reclaim_stakes())
@@ -820,7 +824,7 @@ async def main():
             await report_sync_status('synced')
             reported = True
 
-        latest_task_id = contract.functions.numTasks().call() - 1
+        latest_task_id = await contract.functions.numTasks().call() - 1
 
         # Gather all task fetching coroutines
         all_task_ids = list(range(last_checked_task_id + 1, latest_task_id + 1)) + list(pending_tasks)

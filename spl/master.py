@@ -10,8 +10,8 @@ import math
 import aiohttp
 import threading
 import queue
-from web3 import Web3
-from web3.middleware import geth_poa_middleware
+from web3 import AsyncWeb3
+from web3.middleware import async_geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
 from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SOLVER_SELECTION_DURATION
 from io import BytesIO
@@ -24,32 +24,21 @@ logging.basicConfig(level=logging.INFO)
 
 class Master:
     def __init__(self, rpc_url, private_key, sot_url, subnet_addresses, max_simultaneous_iterations=1, detailed_logs=False):
-        self.web3 = Web3(Web3.HTTPProvider(rpc_url))
-        self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
+        self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
         self.account = self.web3.eth.account.from_key(private_key)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
         self.max_simultaneous_iterations = max_simultaneous_iterations
-        self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, subnet_addresses)
         self.iteration = 1  # Track the number of iterations
         self.perplexities = []  # Initialize perplexity list
         self.perplexity_queue = queue.Queue()
 
-        if not self.contracts:
-            raise ValueError("SubnetManager contracts not found. Please check the subnet_addresses configuration.")
-
-        self.pool_address = None
-        for contract in self.contracts.values():
-            if hasattr(contract.functions, 'pool'):
-                self.pool_address = contract.functions.pool().call()
-                break
-        if not self.pool_address:
-            raise ValueError("Pool contract address not found in any of the SubnetManager contracts.")
-
-        self.pool = self.web3.eth.contract(address=self.pool_address, abi=self.abis['Pool'])
-
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
+
+        # Initialize contracts
+        asyncio.run(self.initialize_contracts())
 
         # Set up the plot
         self.fig, self.ax = plt.subplots()
@@ -63,9 +52,24 @@ class Master:
         # Run the main iterations in separate threads
         asyncio.run(self.run_main())
 
+    async def initialize_contracts(self):
+        self.abis, self.contracts, self.error_selectors = load_contracts(self.web3, self.subnet_addresses)
+        if not self.contracts:
+            raise ValueError("SubnetManager contracts not found. Please check the subnet_addresses configuration.")
+
+        self.pool_address = None
+        for contract in self.contracts.values():
+            if hasattr(contract.functions, 'pool'):
+                self.pool_address = await contract.functions.pool().call()
+                break
+        if not self.pool_address:
+            raise ValueError("Pool contract address not found in any of the SubnetManager contracts.")
+
+        self.pool = self.web3.eth.contract(address=self.pool_address, abi=self.abis['Pool'])
+
     async def approve_tokens_at_start(self):
         for contract in self.contracts.values():
-            token_address = contract.functions.token().call()
+            token_address = await contract.functions.token().call()
             await approve_token_once(self.web3, self.web3.eth.contract(address=token_address, abi=self.abis['ERC20']), self.account._private_key, contract.address, 2**256 - 1)
 
     def update_plot(self, frame=None):
@@ -122,8 +126,8 @@ class Master:
 
     async def submit_selection_req(self):
         try:
-            if self.pool.functions.state().call() != PoolState.Unlocked.value:
-                return self.pool.functions.currentSelectionId().call()
+            if await self.pool.functions.state().call() != PoolState.Unlocked.value:
+                return await self.pool.functions.currentSelectionId().call()
 
             await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.account._private_key)
             logging.info("Submitting selection request")
@@ -131,9 +135,9 @@ class Master:
             receipt = await async_transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.account._private_key)
             logging.info(f"submitSelectionReq transaction receipt: {receipt}")
 
-            unlocked_min_period = self.pool.functions.UNLOCKED_MIN_PERIOD().call()
-            last_state_change_time = self.pool.functions.lastStateChangeTime().call()
-            current_time = web3.eth.get_block('latest')['timestamp']
+            unlocked_min_period = await self.pool.functions.UNLOCKED_MIN_PERIOD().call()
+            last_state_change_time = await self.pool.functions.lastStateChangeTime().call()
+            current_time = await self.web3.eth.get_block('latest')['timestamp']
             remaining_time = (last_state_change_time + unlocked_min_period) - current_time
 
             if remaining_time > 0:
@@ -184,8 +188,6 @@ class Master:
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 60)  # Exponential backoff
 
-
-
     async def remove_solver_stake(self, task_type, task_id, iteration_number):
         try:
             logging.info(f"Removing solver stake for task ID: {task_id}")
@@ -199,7 +201,7 @@ class Master:
 
     async def get_task_result(self, task_type, task_id, iteration_number):
         try:
-            task_tuple = self.contracts[task_type].functions.getTask(task_id).call()
+            task_tuple = await self.contracts[task_type].functions.getTask(task_id).call()
             task = Task(*task_tuple)
             logging.info(f"Iteration {iteration_number} - {task_type} Task status: {task.status}")
             logging.info(f"Expected status: {TaskStatus.SolutionSubmitted.value}")
@@ -266,7 +268,6 @@ class Master:
                 break
             except Exception as e:
                 logging.error(f"Error in iteration {iteration_number}: {e}. Retrying...")
-
 
     async def get_latest_model_params(self, current_version_number):
         async with aiohttp.ClientSession() as session:

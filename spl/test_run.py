@@ -7,13 +7,14 @@ import requests
 import threading
 import curses
 from flask import Flask, request, jsonify
-from common import model_args, load_abi
-from web3 import Web3
+from common import model_args, load_abi, async_transact_with_contract_function
+from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
 import shutil
 import asyncio
 import logging
+import traceback
 
 # Configure logging to file and stdout
 log_dir = 'logs'
@@ -125,28 +126,22 @@ def delete_directory_contents(directory):
         except Exception as e:
             logging.debug(f"Error deleting directory {directory}: {e}")
 
-def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token):
+async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token):
     for wallet in wallets:
         tx = {
             'to': wallet['address'],
             'value': web3.to_wei(amount_eth, 'ether'),
             'gas': 21000,
-            'gasPrice': web3.eth.gas_price,
-            'nonce': web3.eth.get_transaction_count(deployer_address)
+            'gasPrice': await web3.eth.gas_price,
+            'nonce': await web3.eth.get_transaction_count(deployer_address)
         }
         signed_tx = web3.eth.account.sign_transaction(tx, args.private_key)
-        web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        web3.eth.wait_for_transaction_receipt(signed_tx.hash)
-        
-        tx = token_contract.functions.transfer(wallet['address'], amount_token).build_transaction({
-            'chainId': web3.eth.chain_id,
-            'gas': 100000,
-            'gasPrice': web3.eth.gas_price,
-            'nonce': web3.eth.get_transaction_count(deployer_address)
-        })
-        signed_tx = web3.eth.account.sign_transaction(tx, args.private_key)
-        web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        web3.eth.wait_for_transaction_receipt(signed_tx.hash)
+        await web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        await web3.eth.wait_for_transaction_receipt(signed_tx.hash)
+
+        await async_transact_with_contract_function(
+            web3, token_contract, 'transfer', args.private_key, wallet['address'], amount_token
+        )
 
 def terminate_processes(processes):
     for process in processes:
@@ -162,10 +157,11 @@ def reset_logs(log_dir):
         for file_name in os.listdir(log_dir):
             file_path = os.path.join(log_dir, file_name)
             try:
-                os.remove(file_path)
-                logging.debug(f"Deleted log file: {file_path}")
+                with open(file_path, 'w') as file:
+                    pass  # This will truncate the file to zero length
+                logging.debug(f"Erased log file: {file_path}")
             except Exception as e:
-                logging.debug(f"Error deleting log file {file_path}: {e}")
+                logging.debug(f"Error erasing log file {file_path}: {e}")
 
 def monitor_processes(stdscr, processes, task_counts):
     # Remove console handler from logging
@@ -275,16 +271,17 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
 
         # Create filters for task-related events
         filters[task_type] = {
-            'TaskRequestSubmitted': contracts[task_type].events.TaskRequestSubmitted.create_filter(fromBlock='latest'),
-            'SolutionSubmitted': contracts[task_type].events.SolutionSubmitted.create_filter(fromBlock='latest'),
-            'TaskResolved': contracts[task_type].events.TaskResolved.create_filter(fromBlock='latest')
+            'TaskRequestSubmitted': await contracts[task_type].events.TaskRequestSubmitted.create_filter(fromBlock='latest'),
+            'SolutionSubmitted': await contracts[task_type].events.SolutionSubmitted.create_filter(fromBlock='latest'),
+            'TaskResolved': await contracts[task_type].events.TaskResolved.create_filter(fromBlock='latest')
         }
 
     # Main tracking loop
     while True:
         for task_type, contract_filters in filters.items():
             for event_name, event_filter in contract_filters.items():
-                for event in event_filter.get_new_entries():
+                new_entries = await event_filter.get_new_entries()
+                for event in new_entries:
                     task_id = event['args']['taskId']
                     if event_name == 'TaskRequestSubmitted':
                         tasks[task_id] = {'active': True, 'task_type': task_type}
@@ -299,11 +296,11 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
 
         await asyncio.sleep(0.5)  # Polling interval
 
-def set_interval_mining(web3, interval):
+async def set_interval_mining(web3, interval):
     """Set the mining interval on the Ethereum node."""
-    web3.provider.make_request('evm_setIntervalMining', [interval])
+    await web3.provider.make_request('evm_setIntervalMining', [interval])
 
-if __name__ == "__main__":
+async def main():
     processes = {}
     task_counts = {}  # Dictionary to store task counts
     log_dir = 'logs'
@@ -353,8 +350,8 @@ if __name__ == "__main__":
         subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
 
         # Set the mining interval to 1 second after the Forge script setup
-        web3 = Web3(Web3.HTTPProvider(args.rpc_url))
-        set_interval_mining(web3, 1)
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
+        await set_interval_mining(web3, 1)
 
         # Print deployment stage completion
         logging.info("Deployment completed successfully.")
@@ -368,11 +365,11 @@ if __name__ == "__main__":
 
         pool_address = deployment_config['pool']
 
-        web3 = Web3(Web3.HTTPProvider(args.rpc_url))
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
         deployer_account = web3.eth.account.from_key(args.private_key)
         deployer_address = deployer_account.address
         pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
-        token_address = pool_contract.functions.token().call()
+        token_address = await pool_contract.functions.token().call()
         token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
 
         # Initialize sync_status with all subnet addresses
@@ -381,7 +378,7 @@ if __name__ == "__main__":
         # Generate wallets and fund them
         num_wallets = len(subnet_addresses)
         wallets = generate_wallets(num_wallets)
-        fund_wallets(web3, wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+        await fund_wallets(web3, wallets, deployer_address, token_contract, 1, 10000 * 10**18)
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
@@ -482,7 +479,7 @@ if __name__ == "__main__":
             curses_thread.start()
 
             # Run the task tracking in an asyncio loop
-            asyncio.run(track_tasks(web3, subnet_addresses, pool_contract, task_counts))
+            await track_tasks(web3, subnet_addresses, pool_contract, task_counts)
 
         except Exception as e:
             logging.error(f"Error: {e}")
@@ -493,3 +490,6 @@ if __name__ == "__main__":
         logging.error(f"Error: {e}")
         terminate_processes(list(processes.values()))
         exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())
