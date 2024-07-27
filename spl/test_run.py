@@ -190,15 +190,10 @@ def monitor_processes(stdscr, processes, task_counts):
         # Display logs on the left side
         process_name = list(processes.keys())[selected_process]
         log_file = os.path.join('logs', f"{process_name}.log")
-        main_log_file = os.path.join('logs', 'test_run.log')
-
         log_lines = []
+
         if os.path.exists(log_file):
             with open(log_file, 'r') as f:
-                log_lines.extend(f.readlines())
-
-        if os.path.exists(main_log_file):
-            with open(main_log_file, 'r') as f:
                 log_lines.extend(f.readlines())
 
         for i, line in enumerate(log_lines[-(height - 2):]):  # Leave space for instructions
@@ -258,6 +253,7 @@ def monitor_processes(stdscr, processes, task_counts):
     stdscr.keypad(False)  # Reset keypad mode before exiting
     curses.endwin()
     os._exit(0)  # Force exit the program
+
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
     contracts = {}
