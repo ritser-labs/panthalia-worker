@@ -110,7 +110,8 @@ class Master:
             for _ in range(5):  # Retry up to 5 times
                 try:
                     await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
-                    receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'submitTaskRequest', self.get_next_wallet()['private_key'], encoded_params)
+                    receipt = await async_transact_with_contract_function(
+                        self.web3, self.contracts[task_type], 'submitTaskRequest', self.get_next_wallet()['private_key'], encoded_params, attempts=1)
                     logging.info(f"submitTaskRequest transaction receipt: {receipt}")
 
                     logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
@@ -144,7 +145,8 @@ class Master:
             await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
             logging.info("Submitting selection request")
 
-            receipt = await async_transact_with_contract_function(self.web3, self.pool, 'submitSelectionReq', self.get_next_wallet()['private_key'])
+            receipt = await async_transact_with_contract_function(
+                self.web3, self.pool, 'submitSelectionReq', self.get_next_wallet()['private_key'], attempts=1)
             logging.info(f"submitSelectionReq transaction receipt: {receipt}")
 
             unlocked_min_period = await self.pool.functions.UNLOCKED_MIN_PERIOD().call()
@@ -188,7 +190,8 @@ class Master:
                 logging.info(f"wait_for_state_change duration: {end_wait_time - start_wait_time} seconds")
                 
                 start_transact_time = time.time()
-                receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'selectSolver', self.get_next_wallet()['private_key'], task_id)
+                receipt = await async_transact_with_contract_function(
+                    self.web3, self.contracts[task_type], 'selectSolver', self.get_next_wallet()['private_key'], task_id, attempt=1)
                 end_transact_time = time.time()
                 logging.info(f"Transaction duration: {end_transact_time - start_transact_time} seconds")
                 
@@ -205,7 +208,8 @@ class Master:
             logging.info(f"Removing solver stake for task ID: {task_id}")
 
             await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
-            receipt = await async_transact_with_contract_function(self.web3, self.contracts[task_type], 'removeSolverStake', self.get_next_wallet()['private_key'], task_id)
+            receipt = await async_transact_with_contract_function(
+                self.web3, self.contracts[task_type], 'removeSolverStake', self.get_next_wallet()['private_key'], task_id, attempts=1)
             logging.info(f"Iteration {iteration_number} - removeSolverStake transaction receipt: {receipt}")
         except Exception as e:
             logging.error(f"Error removing solver stake: {e}")
