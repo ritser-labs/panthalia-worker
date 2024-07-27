@@ -250,17 +250,28 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
                 if isinstance(error_data, dict) and 'data' in error_data:
                     error_data = error_data['data']
                 decoded_error = await decode_revert_reason(web3, error_data)
-                logging.error(f"Contract logic error on attempt {attempt + 1}: {decoded_error}")
+                logging.error(f"Contract logic error on attempt {attempt + 1} - {function_name}: {decoded_error}")
             except Exception as e:
-                logging.error(f"Failed to decode contract logic error: {cle}, original error: {e}")
+                logging.error(f"Failed to decode contract logic error - {function_name}: {cle}, original error: {e}")
             if attempt == attempts - 1:
                 raise
-            await asyncio.sleep(1)  # Wait before retrying
         except Exception as e:
-            logging.error(f"Error on attempt {attempt + 1}: {e}")
+            logging.error(f"Error on attempt {attempt + 1} - {function_name}: {e}")
             if attempt == attempts - 1:
                 raise
-            await asyncio.sleep(1)  # Wait before retrying
+
+        # Wait for the next block before retrying
+        block_filter = web3.eth.filter('latest')
+        await web3.eth.wait_for_block(block_filter.get_new_entries()[0])
+
+async def wait_for_block(web3):
+    block_filter = web3.eth.filter('latest')
+    while True:
+        new_entries = block_filter.get_new_entries()
+        if new_entries:
+            return new_entries[0]
+        await asyncio.sleep(1)
+
 
 async def decode_revert_reason(web3, revert_reason):
     try:
@@ -397,49 +408,68 @@ def get_learning_hyperparameters(current_iteration):
         'accumulation_steps': 1  # Set the accumulation steps to 1
     }
 
+# Global state tracking variable
+current_global_state = None
+# Event to notify all waiting tasks of a state change
+state_change_event = asyncio.Event()
+# Flag to ensure only one state-changing transaction at a time
+state_changing = False
+
+async def update_current_global_state(pool):
+    global current_global_state
+    current_global_state = PoolState(await pool.functions.state().call())
+    state_change_event.set()
+    state_change_event.clear()
+
 async def wait_for_state_change(web3, pool, target_state, private_key):
     max_retries = 300
     retries = 0
-    
-    # Global lock for synchronizing transaction sending
-    global_state_change_lock = asyncio.Lock()
+
+    global current_global_state
+    global state_change_event
+    global state_changing
+
+    await update_current_global_state(pool)
 
     while retries < max_retries:
-        try:
-            current_state = PoolState(await pool.functions.state().call())
-            logging.info(f"Current pool state: {current_state.name}, target state: {PoolState(target_state).name}")
+        # Check if the current state matches the target state
+        if current_global_state == PoolState(target_state):
+            logging.info(f'Pool state is now {PoolState(target_state).name}')
+            return
 
-            if current_state == PoolState(target_state):
-                logging.info(f'Pool state changed to {PoolState(target_state).name}')
-                return
-
-            async with global_state_change_lock:
-                # Double-check state within the lock to ensure the transaction is necessary
-                current_state = PoolState(await pool.functions.state().call())
-                if current_state == PoolState(target_state):
-                    logging.info(f'Pool state changed to {PoolState(target_state).name}')
+        # Try to perform the state transition if needed
+        if not state_changing:
+            state_changing = True
+            try:
+                # Re-check the current state inside the critical section
+                if current_global_state == PoolState(target_state):
+                    logging.info(f'Pool state is now {PoolState(target_state).name}')
+                    state_changing = False
+                    await update_current_global_state(pool)
                     return
 
-                if current_state == PoolState.Unlocked:
+                # Perform state transition based on the current state
+                if current_global_state == PoolState.Unlocked:
                     logging.info("Triggering lockGlobalState to change state to Locked")
                     await trigger_lock_global_state(web3, pool, private_key)
-                elif current_state == PoolState.Locked:
-                    # logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
-                    # Todo in prod you just wait instead of calling the function
+                elif current_global_state == PoolState.Locked:
                     logging.info("Triggering finalizeSelections to change state to SelectionsFinalizing")
                     await finalize_selections(web3, pool, private_key)
-                elif current_state == PoolState.SelectionsFinalizing:
+                elif current_global_state == PoolState.SelectionsFinalizing:
                     logging.info("Triggering removeGlobalLock to change state to Unlocked")
                     await trigger_remove_global_lock(web3, pool, private_key)
-                else:
-                    logging.info(f"Waiting for the pool state to change to {PoolState(target_state).name}")
-                    await asyncio.sleep(5)
 
-            retries += 1
-        except Exception as e:
-            logging.error(f"Error during wait for state change: {e}. Retrying...")
-            retries += 1
-            await asyncio.sleep(1)  # Wait for a while before retrying
+                # Update the global state after the transaction
+                await update_current_global_state(pool)
+            finally:
+                state_changing = False
+                await update_current_global_state(pool)
+
+        # Wait for the state to change
+        await state_change_event.wait()
+
+        retries += 1
+
 
     raise RuntimeError(f"Failed to change state to {PoolState(target_state).name} after multiple attempts")
 
@@ -460,6 +490,8 @@ async def trigger_lock_global_state(web3, pool, private_key):
     if remaining_time > 0:
         logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
         await asyncio.sleep(remaining_time)
+    else:
+        logging.info("UNLOCKED_MIN_PERIOD is already over, proceeding with lockGlobalState")
 
     try:
         receipt = await async_transact_with_contract_function(web3, pool, 'lockGlobalState', private_key)
@@ -478,6 +510,8 @@ async def trigger_remove_global_lock(web3, pool, private_key):
     if remaining_time > 0:
         logging.info(f"Waiting for {remaining_time} seconds until SELECTIONS_FINALIZING_MIN_PERIOD is over")
         await asyncio.sleep(remaining_time)
+    else:
+        logging.info("SELECTIONS_FINALIZING_MIN_PERIOD is already over, proceeding with removeGlobalLock")
 
     try:
         receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', private_key)
