@@ -400,6 +400,10 @@ def get_learning_hyperparameters(current_iteration):
 async def wait_for_state_change(web3, pool, target_state, private_key):
     max_retries = 300
     retries = 0
+    
+    # Global lock for synchronizing transaction sending
+    global_state_change_lock = asyncio.Lock()
+
     while retries < max_retries:
         try:
             current_state = PoolState(await pool.functions.state().call())
@@ -409,20 +413,27 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
                 logging.info(f'Pool state changed to {PoolState(target_state).name}')
                 return
 
-            if current_state == PoolState.Unlocked:
-                logging.info("Triggering lockGlobalState to change state to Locked")
-                await trigger_lock_global_state(web3, pool, private_key)
-            elif current_state == PoolState.Locked:
-                # logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
-                # Todo in prod you just wait instead of calling the function
-                logging.info("Triggering finalizeSelections to change state to SelectionsFinalizing")
-                await finalize_selections(web3, pool, private_key)
-            elif current_state == PoolState.SelectionsFinalizing:
-                logging.info("Triggering removeGlobalLock to change state to Unlocked")
-                await trigger_remove_global_lock(web3, pool, private_key)
-            else:
-                logging.info(f"Waiting for the pool state to change to {PoolState(target_state).name}")
-                await asyncio.sleep(5)
+            async with global_state_change_lock:
+                # Double-check state within the lock to ensure the transaction is necessary
+                current_state = PoolState(await pool.functions.state().call())
+                if current_state == PoolState(target_state):
+                    logging.info(f'Pool state changed to {PoolState(target_state).name}')
+                    return
+
+                if current_state == PoolState.Unlocked:
+                    logging.info("Triggering lockGlobalState to change state to Locked")
+                    await trigger_lock_global_state(web3, pool, private_key)
+                elif current_state == PoolState.Locked:
+                    # logging.info("Waiting for state to change from Locked to SelectionsFinalizing (handled by fulfillRandomWords)")
+                    # Todo in prod you just wait instead of calling the function
+                    logging.info("Triggering finalizeSelections to change state to SelectionsFinalizing")
+                    await finalize_selections(web3, pool, private_key)
+                elif current_state == PoolState.SelectionsFinalizing:
+                    logging.info("Triggering removeGlobalLock to change state to Unlocked")
+                    await trigger_remove_global_lock(web3, pool, private_key)
+                else:
+                    logging.info(f"Waiting for the pool state to change to {PoolState(target_state).name}")
+                    await asyncio.sleep(5)
 
             retries += 1
         except Exception as e:
