@@ -152,7 +152,8 @@ class Master:
 
             unlocked_min_period = await self.pool.functions.UNLOCKED_MIN_PERIOD().call()
             last_state_change_time = await self.pool.functions.lastStateChangeTime().call()
-            current_time = await self.web3.eth.get_block('latest')['timestamp']
+            latest_block = await self.web3.eth.get_block('latest')
+            current_time = latest_block['timestamp']
             remaining_time = (last_state_change_time + unlocked_min_period) - current_time
 
             if remaining_time > 0:
