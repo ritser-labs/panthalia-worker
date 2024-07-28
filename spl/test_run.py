@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument('--forge_script', type=str, default=DEPLOY_SCRIPT, help="Path to the Forge deploy script")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
-    parser.add_argument('--num_master_wallets', type=int, default=10, help="Number of wallets to generate for the master process")
+    parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
     return parser.parse_args()
 
 args = parse_args()
