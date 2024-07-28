@@ -156,10 +156,6 @@ class Master:
             current_time = latest_block['timestamp']
             remaining_time = (last_state_change_time + unlocked_min_period) - current_time
 
-            if remaining_time > 0:
-                logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
-                await asyncio.sleep(remaining_time)
-
             logs = self.pool.events.SelectionRequested().process_receipt(receipt)
             if not logs:
                 raise ValueError("No SelectionRequested event found in the receipt")
