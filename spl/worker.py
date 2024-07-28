@@ -29,7 +29,11 @@ class SuppressTracebackFilter(logging.Filter):
             return False
         return True
 
-logging.basicConfig(level=logging.DEBUG)
+# Set up logging with timestamps
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger()
 logger.addFilter(SuppressTracebackFilter())
 
