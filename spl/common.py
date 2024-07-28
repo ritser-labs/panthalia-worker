@@ -450,7 +450,8 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
                 logging.info(f'Pool state is now {PoolState(target_state).name} with {remaining_time} seconds remaining')
                 return
             else:
-                logging.info(f'Not enough remaining time {remaining_time} seconds in {PoolState(target_state).name}, rechecking state')
+                logging.info(f'Not enough remaining time {remaining_time} seconds in {PoolState(target_state).name}, sleeping and rechecking state')
+                await asyncio.sleep(max(remaining_time, SLEEP_TIME))
                 await update_current_global_state(pool)
 
         # Try to perform the state transition if needed
