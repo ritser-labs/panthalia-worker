@@ -48,6 +48,8 @@ TENSOR_VERSION_INTERVAL = 30
 
 MAX_SOLVER_SELECTION_DURATION = 300
 
+MIN_REMAINING_TIME_SECONDS = 3
+
 SLEEP_TIME = 1
 
 # Define Enums
@@ -436,20 +438,25 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
     while retries < max_retries:
         # Check if the current state matches the target state
         if current_global_state == PoolState(target_state):
-            logging.info(f'Pool state is now {PoolState(target_state).name}')
-            return
+            # Check if there are at least MIN_REMAINING_TIME_SECONDS remaining in the target state
+            latest_block = await web3.eth.get_block('latest')
+            current_time = latest_block['timestamp']
+            remaining_time = (await pool.functions.lastStateChangeTime().call() + 
+                              (await pool.functions.UNLOCKED_MIN_PERIOD().call() 
+                              if current_global_state == PoolState.Unlocked else 
+                              await pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call())) - current_time
+
+            if remaining_time >= MIN_REMAINING_TIME_SECONDS:
+                logging.info(f'Pool state is now {PoolState(target_state).name} with {remaining_time} seconds remaining')
+                return
+            else:
+                logging.info(f'Not enough remaining time {remaining_time} seconds in {PoolState(target_state).name}, rechecking state')
+                await update_current_global_state(pool)
 
         # Try to perform the state transition if needed
         if not state_changing:
             state_changing = True
             try:
-                # Re-check the current state inside the critical section
-                if current_global_state == PoolState(target_state):
-                    logging.info(f'Pool state is now {PoolState(target_state).name}')
-                    state_changing = False
-                    await update_current_global_state(pool)
-                    return
-
                 # Perform state transition based on the current state
                 if current_global_state == PoolState.Unlocked:
                     logging.info("Triggering lockGlobalState to change state to Locked")
@@ -474,7 +481,6 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
             await state_change_event.wait()
 
         retries += 1
-
 
     raise RuntimeError(f"Failed to change state to {PoolState(target_state).name} after multiple attempts")
 
