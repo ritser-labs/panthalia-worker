@@ -22,18 +22,18 @@ import uuid
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class Master:
-    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, desired_unresolved_tasks=2, detailed_logs=False):
+    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, desired_pending_tasks=2, detailed_logs=False):
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
-        self.desired_unresolved_tasks = desired_unresolved_tasks
+        self.desired_pending_tasks = desired_pending_tasks
         self.iteration = 1  # Track the number of iterations
         self.perplexities = []  # Initialize perplexity list
         self.perplexity_queue = queue.Queue()
         self.load_wallets(wallets_file)
         self.current_wallet_index = 0
-        self.unresolved_tasks = []
+        self.pending_embed_tasks = 0
 
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -119,8 +119,6 @@ class Master:
 
                     task_id = logs[0]['args']['taskId']
                     logging.info(f"Iteration {iteration_number} - Task submitted successfully. Task ID: {task_id}")
-
-                    self.unresolved_tasks.append((task_type, task_id))
 
                     selection_id = await self.submit_selection_req()
                     logging.info(f"Selection ID: {selection_id}")
@@ -234,7 +232,11 @@ class Master:
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
         logging.info(f"Iteration {iteration_number}: Starting embed forward task")
-        embed_result = await self.handle_embed_forward(model_params, batch_url, current_version_number, iteration_number)
+        self.pending_embed_tasks += 1
+        try:
+            embed_result = await self.handle_embed_forward(model_params, batch_url, current_version_number, iteration_number)
+        finally:
+            self.pending_embed_tasks -= 1
 
         layer_inputs_url = [embed_result['result_url']]
         for layer_idx in range(model_params['n_layers']):
@@ -270,27 +272,16 @@ class Master:
 
         while True:
             await self.check_and_submit_tasks()
-            await asyncio.sleep(5)  # Check every 5 seconds
+            await asyncio.sleep(1)  # Check every second
 
     async def check_and_submit_tasks(self):
-        # Filter unresolved tasks
-        unresolved_tasks = []
-        for task_type, task_id in self.unresolved_tasks:
-            if task_type != 'embed':
-                continue
-            task_tuple = await self.contracts[task_type].functions.getTask(task_id).call()
-            task = Task(*task_tuple)
-            if task.status not in [TaskStatus.ResolvedCorrect.value, TaskStatus.ResolvedIncorrect.value]:
-                unresolved_tasks.append((task_type, task_id))
-
-        self.unresolved_tasks = unresolved_tasks
-
         # Submit new tasks if necessary
-        if len(self.unresolved_tasks) < self.desired_unresolved_tasks:
-            tasks_to_submit = self.desired_unresolved_tasks - len(self.unresolved_tasks)
+        if self.pending_embed_tasks < self.desired_pending_tasks:
+            tasks_to_submit = self.desired_pending_tasks - self.pending_embed_tasks
             for _ in range(tasks_to_submit):
                 asyncio.create_task(self.main_iteration(self.iteration))
                 self.iteration += 1
+
 
     async def get_latest_model_params(self, current_version_number):
         async with aiohttp.ClientSession() as session:
@@ -415,7 +406,7 @@ if __name__ == "__main__":
     parser.add_argument('--wallets_file', type=str, required=True, help="Path to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--desired_unresolved_tasks', type=int, default=2, help="Desired number of unresolved tasks to maintain")
+    parser.add_argument('--desired_pending_tasks', type=int, default=2, help="Desired number of unresolved tasks to maintain")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()
@@ -423,4 +414,4 @@ if __name__ == "__main__":
     with open(args.subnet_addresses, 'r') as file:
         subnet_addresses = json.load(file)
 
-    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, desired_unresolved_tasks=args.desired_unresolved_tasks, detailed_logs=args.detailed_logs)
+    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, desired_pending_tasks=args.desired_pending_tasks, detailed_logs=args.detailed_logs)
