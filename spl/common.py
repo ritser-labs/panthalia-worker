@@ -48,6 +48,8 @@ TENSOR_VERSION_INTERVAL = 30
 
 MAX_SOLVER_SELECTION_DURATION = 300
 
+SLEEP_TIME = 1
+
 # Define Enums
 class TaskStatus(Enum):
     SelectingSolver = 0
@@ -269,7 +271,7 @@ async def wait_for_block(web3):
         new_entries = await block_filter.get_new_entries()
         if new_entries:
             return new_entries[0]
-        await asyncio.sleep(1)
+        await asyncio.sleep(SLEEP_TIME)
 
 
 async def decode_revert_reason(web3, revert_reason):
@@ -370,7 +372,7 @@ async def deposit_stake_without_approval(web3, pool_contract, private_key, subne
                 logging.error(f"Failed to deposit stakes on attempt {attempt + 1}: {e}")
                 if attempt == max_retries - 1:
                     raise  # Rethrow the exception after the last attempt
-                await asyncio.sleep(1)  # Wait before retrying
+                await asyncio.sleep(SLEEP_TIME)  # Wait before retrying
 
 def get_learning_hyperparameters(current_iteration):
     """
@@ -417,6 +419,7 @@ state_changing = False
 async def update_current_global_state(pool):
     global current_global_state
     current_global_state = PoolState(await pool.functions.state().call())
+    logging.info(f'New global state: {current_global_state.name}')
     state_change_event.set()
     state_change_event.clear()
 
@@ -460,6 +463,9 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
 
                 # Update the global state after the transaction
                 await update_current_global_state(pool)
+            except Exception as e:
+                logging.info(f"Caught error changing state: {e}")
+                await asyncio.sleep(SLEEP_TIME)
             finally:
                 state_changing = False
                 await update_current_global_state(pool)
