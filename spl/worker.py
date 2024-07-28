@@ -279,7 +279,7 @@ def resume_gradient_updates():
 async def deposit_stake():
     await deposit_stake_without_approval(web3, pool_contract, args.private_key, subnet_id, args.group, worker_address, stake_amount, args.max_stakes)
 
-async def handle_event(task_id, task, time_invoked):
+def handle_event(task_id, task, time_invoked):
     global last_handle_event_timestamp
 
     current_time = time.time()
@@ -309,14 +309,14 @@ async def handle_event(task_id, task, time_invoked):
         'time_status_changed': task.timeStatusChanged
     })
     
-    blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
+    blockchain_timestamp = asyncio.run(web3.eth.get_block('latest'))['timestamp']
     
     time_since_change = blockchain_timestamp - task.timeStatusChanged
     logging.debug(f"Time since status change: {time_since_change} seconds")
     
 
     task_start_times[task_id] = time.time()
-    await process_tasks()
+    asyncio.run(process_tasks())
 
 async def process_tasks():
     global task_queue, concurrent_tasks_counter
@@ -818,37 +818,39 @@ async def main():
     
     last_loop_time = time.time()
 
-    while True:
-        logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
-        last_loop_time = time.time()
-        await deposit_stake()
-        if not reported:
-            for tensor_name in relevant_tensors:
-                await initialize_tensor(tensor_name)
-            await report_sync_status('synced')
-            reported = True
+    # Create a ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        while True:
+            logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
+            last_loop_time = time.time()
+            await deposit_stake()
+            if not reported:
+                for tensor_name in relevant_tensors:
+                    await initialize_tensor(tensor_name)
+                await report_sync_status('synced')
+                reported = True
 
-        latest_task_id = await contract.functions.numTasks().call() - 1
+            latest_task_id = await contract.functions.numTasks().call() - 1
 
-        # Gather all task fetching coroutines
-        all_task_ids = list(range(last_checked_task_id + 1, latest_task_id + 1)) + list(pending_tasks)
-        fetch_tasks = [fetch_task(task_id) for task_id in all_task_ids]
-        fetched_tasks = await asyncio.gather(*fetch_tasks)
+            # Gather all task fetching coroutines
+            all_task_ids = list(range(last_checked_task_id + 1, latest_task_id + 1)) + list(pending_tasks)
+            fetch_tasks = [fetch_task(task_id) for task_id in all_task_ids]
+            fetched_tasks = await asyncio.gather(*fetch_tasks)
 
-        # Clear pending tasks to update with new statuses
-        pending_tasks.clear()
+            # Clear pending tasks to update with new statuses
+            pending_tasks.clear()
 
-        # Handle events for tasks
-        for task_id, task in fetched_tasks:
-            if task.solver == worker_address and task.status == TaskStatus.SolverSelected.value:
-                asyncio.create_task(handle_event(task_id, task, time.time()))
-            elif task.status < TaskStatus.SolverSelected.value:
-                pending_tasks.add(task_id)
-        
-        # Update the last checked task ID
-        last_checked_task_id = latest_task_id
-        
-        await asyncio.sleep(args.poll_interval)
+            # Handle events for tasks
+            for task_id, task in fetched_tasks:
+                if task.solver == worker_address and task.status == TaskStatus.SolverSelected.value:
+                    executor.submit(handle_event, task_id, task, time.time())
+                elif task.status < TaskStatus.SolverSelected.value:
+                    pending_tasks.add(task_id)
+            
+            # Update the last checked task ID
+            last_checked_task_id = latest_task_id
+            
+            await asyncio.sleep(args.poll_interval)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
