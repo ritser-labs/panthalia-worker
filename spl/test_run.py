@@ -364,9 +364,7 @@ async def main():
         ]
         subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
 
-        # Set the mining interval to 1 second after the Forge script setup
         web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
-        await set_interval_mining(web3, 1)
 
         # Print deployment stage completion
         logging.info("Deployment completed successfully.")
@@ -405,6 +403,7 @@ async def main():
         # Generate wallets for workers and fund them
         worker_wallets = generate_wallets(len(subnet_addresses))
         await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+        await set_interval_mining(web3, 1)
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
