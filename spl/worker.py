@@ -22,6 +22,7 @@ from tqdm import tqdm
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+import threading  # Add threading module
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):
@@ -39,12 +40,15 @@ logger.addFilter(SuppressTracebackFilter())
 
 # Global counter for concurrent tasks
 concurrent_tasks_counter = 0
+concurrent_tasks_counter_lock = threading.Lock()  # Lock for concurrent_tasks_counter
 
 # Global dictionary to store start times for task IDs
 task_start_times = {}
+task_start_times_lock = threading.Lock()  # Lock for task_start_times
 
 # Global variable to store the last handle_event timestamp
 last_handle_event_timestamp = None
+last_handle_event_timestamp_lock = threading.Lock()  # Lock for last_handle_event_timestamp
 
 @dataclass
 class ModelArgs:
@@ -117,24 +121,29 @@ final_logits_norm = None
 # Global variable for TransformerBlock layer
 transformer_layer = None
 
+tensors_lock = threading.Lock()  # Lock for tensors
+
 class TaskQueue:
     def __init__(self):
         self.queue = []
         self.current_version = None
+        self.lock = threading.Lock()  # Add a lock for the queue
         logging.debug("Initialized TaskQueue")
 
     def add_task(self, task):
-        self.queue.append(task)
-        self.queue.sort(key=lambda t: t['time_status_changed'])
-        logging.debug(f"Added task: {task}. Queue size is now {len(self.queue)}")
+        with self.lock:  # Ensure thread-safe access to the queue
+            self.queue.append(task)
+            self.queue.sort(key=lambda t: t['time_status_changed'])
+            logging.debug(f"Added task: {task}. Queue size is now {len(self.queue)}")
 
     def get_next_task(self):
-        if self.queue:
-            task = self.queue.pop(0)
-            logging.debug(f"Retrieved task: {task}. Queue size is now {len(self.queue)}")
-            return task
-        logging.debug("No tasks in the queue.")
-        return None
+        with self.lock:  # Ensure thread-safe access to the queue
+            if self.queue:
+                task = self.queue.pop(0)
+                logging.debug(f"Retrieved task: {task}. Queue size is now {len(self.queue)}")
+                return task
+            logging.debug("No tasks in the queue.")
+            return None
 
 task_queue = TaskQueue()
 
@@ -284,10 +293,11 @@ def handle_event(task_id, task, time_invoked):
 
     current_time = time.time()
     logging.debug(f'Time since invocation: {current_time - time_invoked:.2f} seconds')
-    if last_handle_event_timestamp is not None:
-        time_since_last_event = current_time - last_handle_event_timestamp
-        logging.debug(f"Time since last handle_event call: {time_since_last_event:.2f} seconds")
-    last_handle_event_timestamp = current_time
+    with last_handle_event_timestamp_lock:
+        if last_handle_event_timestamp is not None:
+            time_since_last_event = current_time - last_handle_event_timestamp
+            logging.debug(f"Time since last handle_event call: {time_since_last_event:.2f} seconds")
+        last_handle_event_timestamp = current_time
 
     solver = task.solver
 
@@ -314,8 +324,8 @@ def handle_event(task_id, task, time_invoked):
     time_since_change = blockchain_timestamp - task.timeStatusChanged
     logging.debug(f"Time since status change: {time_since_change} seconds")
     
-
-    task_start_times[task_id] = time.time()
+    with task_start_times_lock:
+        task_start_times[task_id] = time.time()
     asyncio.run(process_tasks())
 
 async def process_tasks():
@@ -323,13 +333,16 @@ async def process_tasks():
 
     start_time = time.time()
 
-    # Increase the counter when a new task is started
-    concurrent_tasks_counter += 1
+    with concurrent_tasks_counter_lock:
+        # Increase the counter when a new task is started
+        concurrent_tasks_counter += 1
     logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
 
     next_task = task_queue.get_next_task()
     if not next_task:
         logging.debug("No tasks in the queue to process.")
+        with concurrent_tasks_counter_lock:
+            concurrent_tasks_counter -= 1
         return
 
     if (task_queue.current_version is None
@@ -432,7 +445,8 @@ async def process_tasks():
     logging.info(f"Processed task {task_id} successfully")
 
     # Log the time taken to process the task
-    task_start_time = task_start_times.pop(task_id, None)
+    with task_start_times_lock:
+        task_start_time = task_start_times.pop(task_id, None)
     if task_start_time:
         total_time = time.time() - task_start_time
         logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
@@ -442,8 +456,9 @@ async def process_tasks():
     end_time = time.time()
     logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
 
-    # Decrease the counter when a task is completed
-    concurrent_tasks_counter -= 1
+    with concurrent_tasks_counter_lock:
+        # Decrease the counter when a task is completed
+        concurrent_tasks_counter -= 1
 
 async def reclaim_stakes():
     max_dispute_time = await contract.functions.maxDisputeTime().call()
