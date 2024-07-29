@@ -21,6 +21,8 @@ import uuid
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+BACKLOG_THRESHOLD = 2
+
 class Master:
     def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, desired_pending_tasks=2, detailed_logs=False):
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
@@ -34,6 +36,15 @@ class Master:
         self.load_wallets(wallets_file)
         self.current_wallet_index = 0
         self.pending_embed_tasks = 0
+
+        # Dictionary to track the number of waiting iterations for each stage
+        self.stage_backlog = {
+            'embed': 0,
+            'forward': {},
+            'final_logits': 0,
+            'backward': {},
+            'embed_backward': 0
+        }
 
         self.condition = asyncio.Condition()  # Initialize condition variable
 
@@ -233,22 +244,52 @@ class Master:
         model_params = await self.get_latest_model_params(current_version_number)
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
+        # Track the backlog at the embed stage
+        async with self.condition:
+            if self.stage_backlog['embed'] >= BACKLOG_THRESHOLD:
+                logging.info(f"Backlog detected at embed stage. Waiting to submit new tasks.")
+                await self.condition.wait()
+
         logging.info(f"Iteration {iteration_number}: Starting embed forward task")
+        self.stage_backlog['embed'] += 1  # Increment backlog count for the embed stage
         try:
             embed_result = await self.handle_embed_forward(model_params, batch_url, current_version_number, iteration_number)
         finally:
             async with self.condition:
+                self.stage_backlog['embed'] -= 1  # Decrement backlog count
                 self.pending_embed_tasks -= 1
                 self.condition.notify_all()
 
         layer_inputs_url = [embed_result['result_url']]
         for layer_idx in range(model_params['n_layers']):
+            async with self.condition:
+                if self.stage_backlog['forward'].get(layer_idx, 0) >= BACKLOG_THRESHOLD:
+                    logging.info(f"Backlog detected at forward layer {layer_idx}. Waiting to submit new tasks.")
+                    await self.condition.wait()
+
             logging.info(f"Iteration {iteration_number}: Starting forward task for layer {layer_idx}")
-            layer_result = await self.handle_layer_forward(layer_idx, layer_inputs_url[-1], model_params, current_version_number, iteration_number)
+            self.stage_backlog['forward'][layer_idx] = self.stage_backlog['forward'].get(layer_idx, 0) + 1
+            try:
+                layer_result = await self.handle_layer_forward(layer_idx, layer_inputs_url[-1], model_params, current_version_number, iteration_number)
+            finally:
+                async with self.condition:
+                    self.stage_backlog['forward'][layer_idx] -= 1
+                    self.condition.notify_all()
             layer_inputs_url.append(layer_result['result_url'])
 
+        async with self.condition:
+            if self.stage_backlog['final_logits'] >= BACKLOG_THRESHOLD:
+                logging.info("Backlog detected at final logits stage. Waiting to submit new tasks.")
+                await self.condition.wait()
+
         logging.info(f"Iteration {iteration_number}: Starting final_logits task")
-        final_logits_result = await self.handle_final_logits(layer_inputs_url[-1], targets_url, current_version_number, iteration_number)
+        self.stage_backlog['final_logits'] += 1
+        try:
+            final_logits_result = await self.handle_final_logits(layer_inputs_url[-1], targets_url, current_version_number, iteration_number)
+        finally:
+            async with self.condition:
+                self.stage_backlog['final_logits'] -= 1
+                self.condition.notify_all()
 
         # Update perplexity list and plot
         perplexity = math.exp(final_logits_result['loss'])
@@ -257,12 +298,34 @@ class Master:
         error_url = final_logits_result['error_output_url']
 
         for layer_idx in reversed(range(model_params['n_layers'])):
+            async with self.condition:
+                if self.stage_backlog['backward'].get(layer_idx, 0) >= BACKLOG_THRESHOLD:
+                    logging.info(f"Backlog detected at backward layer {layer_idx}. Waiting to submit new tasks.")
+                    await self.condition.wait()
+
             logging.info(f"Iteration {iteration_number}: Starting backward task for layer {layer_idx}")
-            layer_result = await self.handle_layer_backward(layer_idx, error_url, layer_inputs_url[layer_idx], current_version_number, iteration_number)
+            self.stage_backlog['backward'][layer_idx] = self.stage_backlog['backward'].get(layer_idx, 0) + 1
+            try:
+                layer_result = await self.handle_layer_backward(layer_idx, error_url, layer_inputs_url[layer_idx], current_version_number, iteration_number)
+            finally:
+                async with self.condition:
+                    self.stage_backlog['backward'][layer_idx] -= 1
+                    self.condition.notify_all()
             error_url = layer_result['error_output_url']
 
+        async with self.condition:
+            if self.stage_backlog['embed_backward'] >= BACKLOG_THRESHOLD:
+                logging.info("Backlog detected at embed backward stage. Waiting to submit new tasks.")
+                await self.condition.wait()
+
         logging.info(f"Iteration {iteration_number}: Starting embed backward task")
-        await self.handle_embed_backward(error_url, batch_url, current_version_number, iteration_number)
+        self.stage_backlog['embed_backward'] += 1
+        try:
+            await self.handle_embed_backward(error_url, batch_url, current_version_number, iteration_number)
+        finally:
+            async with self.condition:
+                self.stage_backlog['embed_backward'] -= 1
+                self.condition.notify_all()
 
         logging.info(f"Iteration {iteration_number} done, loss: {final_logits_result['loss']}")
 
@@ -279,14 +342,16 @@ class Master:
                 await self.condition.wait()
 
     async def check_and_submit_tasks(self):
-        # Submit new tasks if necessary
-        if self.pending_embed_tasks < self.desired_pending_tasks:
-            tasks_to_submit = self.desired_pending_tasks - self.pending_embed_tasks
-            for _ in range(tasks_to_submit):
-                self.pending_embed_tasks += 1
-                asyncio.create_task(self.main_iteration(self.iteration))
-                self.iteration += 1
-
+        if self.stage_backlog['embed'] < BACKLOG_THRESHOLD:
+            # Submit new tasks if the embed stage is not experiencing a backlog
+            if self.pending_embed_tasks < self.desired_pending_tasks:
+                tasks_to_submit = self.desired_pending_tasks - self.pending_embed_tasks
+                for _ in range(tasks_to_submit):
+                    self.pending_embed_tasks += 1
+                    asyncio.create_task(self.main_iteration(self.iteration))
+                    self.iteration += 1
+        else:
+            logging.info("Backlog detected at the first stage. Holding task submissions.")
 
     async def get_latest_model_params(self, current_version_number):
         async with aiohttp.ClientSession() as session:
