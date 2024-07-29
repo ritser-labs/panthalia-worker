@@ -35,6 +35,8 @@ class Master:
         self.current_wallet_index = 0
         self.pending_embed_tasks = 0
 
+        self.condition = asyncio.Condition()  # Initialize condition variable
+
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
@@ -232,11 +234,12 @@ class Master:
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
         logging.info(f"Iteration {iteration_number}: Starting embed forward task")
-        self.pending_embed_tasks += 1
         try:
             embed_result = await self.handle_embed_forward(model_params, batch_url, current_version_number, iteration_number)
         finally:
-            self.pending_embed_tasks -= 1
+            async with self.condition:
+                self.pending_embed_tasks -= 1
+                self.condition.notify_all()
 
         layer_inputs_url = [embed_result['result_url']]
         for layer_idx in range(model_params['n_layers']):
@@ -272,13 +275,15 @@ class Master:
 
         while True:
             await self.check_and_submit_tasks()
-            await asyncio.sleep(1)  # Check every second
+            async with self.condition:
+                await self.condition.wait()
 
     async def check_and_submit_tasks(self):
         # Submit new tasks if necessary
         if self.pending_embed_tasks < self.desired_pending_tasks:
             tasks_to_submit = self.desired_pending_tasks - self.pending_embed_tasks
             for _ in range(tasks_to_submit):
+                self.pending_embed_tasks += 1
                 asyncio.create_task(self.main_iteration(self.iteration))
                 self.iteration += 1
 
