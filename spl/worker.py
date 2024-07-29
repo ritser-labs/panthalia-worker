@@ -6,9 +6,9 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from dataclasses import dataclass
-from web3 import Web3
+from web3 import AsyncWeb3
 from web3.exceptions import ContractCustomError
-from web3.middleware import geth_poa_middleware
+from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from model import TransformerBlock, VocabParallelEmbedding, ColumnParallelLinear, precompute_freqs_cis, RMSNorm
 from device import device
@@ -22,6 +22,7 @@ from tqdm import tqdm
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+import threading  # Add threading module
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):
@@ -29,18 +30,25 @@ class SuppressTracebackFilter(logging.Filter):
             return False
         return True
 
-logging.basicConfig(level=logging.DEBUG)
+# Set up logging with timestamps
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger()
 logger.addFilter(SuppressTracebackFilter())
 
 # Global counter for concurrent tasks
 concurrent_tasks_counter = 0
+concurrent_tasks_counter_lock = threading.Lock()  # Lock for concurrent_tasks_counter
 
 # Global dictionary to store start times for task IDs
 task_start_times = {}
+task_start_times_lock = threading.Lock()  # Lock for task_start_times
 
 # Global variable to store the last handle_event timestamp
 last_handle_event_timestamp = None
+last_handle_event_timestamp_lock = threading.Lock()  # Lock for last_handle_event_timestamp
 
 @dataclass
 class ModelArgs:
@@ -82,8 +90,8 @@ args = parse_args()
 
 os.makedirs(args.local_storage_dir, exist_ok=True)
 
-web3 = Web3(Web3.HTTPProvider(args.rpc_url))
-web3.middleware_onion.inject(geth_poa_middleware, layer=0)
+web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
+web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
 
 worker_account = web3.eth.account.from_key(args.private_key)
 worker_address = worker_account.address
@@ -94,13 +102,6 @@ pool_abi = load_abi('Pool')
 contract_address = args.subnet_address
 contract = web3.eth.contract(address=contract_address, abi=subnet_manager_abi)
 pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
-
-token_address = contract.functions.token().call()
-token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
-
-stake_amount = contract.functions.solverStakeAmount().call()
-
-subnet_id = contract.functions.subnetId().call()
 
 model_initialized = False
 embedding_initialized = False
@@ -120,24 +121,29 @@ final_logits_norm = None
 # Global variable for TransformerBlock layer
 transformer_layer = None
 
+tensors_lock = threading.Lock()  # Lock for tensors
+
 class TaskQueue:
     def __init__(self):
         self.queue = []
         self.current_version = None
+        self.lock = threading.Lock()  # Add a lock for the queue
         logging.debug("Initialized TaskQueue")
 
     def add_task(self, task):
-        self.queue.append(task)
-        self.queue.sort(key=lambda t: t['time_status_changed'])
-        logging.debug(f"Added task: {task}. Queue size is now {len(self.queue)}")
+        with self.lock:  # Ensure thread-safe access to the queue
+            self.queue.append(task)
+            self.queue.sort(key=lambda t: t['time_status_changed'])
+            logging.debug(f"Added task: {task}. Queue size is now {len(self.queue)}")
 
     def get_next_task(self):
-        if self.queue:
-            task = self.queue.pop(0)
-            logging.debug(f"Retrieved task: {task}. Queue size is now {len(self.queue)}")
-            return task
-        logging.debug("No tasks in the queue.")
-        return None
+        with self.lock:  # Ensure thread-safe access to the queue
+            if self.queue:
+                task = self.queue.pop(0)
+                logging.debug(f"Retrieved task: {task}. Queue size is now {len(self.queue)}")
+                return task
+            logging.debug("No tasks in the queue.")
+            return None
 
 task_queue = TaskQueue()
 
@@ -282,15 +288,16 @@ def resume_gradient_updates():
 async def deposit_stake():
     await deposit_stake_without_approval(web3, pool_contract, args.private_key, subnet_id, args.group, worker_address, stake_amount, args.max_stakes)
 
-async def handle_event(task_id, task, time_invoked):
+def handle_event(task_id, task, time_invoked):
     global last_handle_event_timestamp
 
     current_time = time.time()
     logging.debug(f'Time since invocation: {current_time - time_invoked:.2f} seconds')
-    if last_handle_event_timestamp is not None:
-        time_since_last_event = current_time - last_handle_event_timestamp
-        logging.debug(f"Time since last handle_event call: {time_since_last_event:.2f} seconds")
-    last_handle_event_timestamp = current_time
+    with last_handle_event_timestamp_lock:
+        if last_handle_event_timestamp is not None:
+            time_since_last_event = current_time - last_handle_event_timestamp
+            logging.debug(f"Time since last handle_event call: {time_since_last_event:.2f} seconds")
+        last_handle_event_timestamp = current_time
 
     solver = task.solver
 
@@ -312,27 +319,30 @@ async def handle_event(task_id, task, time_invoked):
         'time_status_changed': task.timeStatusChanged
     })
     
-    blockchain_timestamp = web3.eth.get_block('latest')['timestamp']
+    blockchain_timestamp = asyncio.run(web3.eth.get_block('latest'))['timestamp']
     
     time_since_change = blockchain_timestamp - task.timeStatusChanged
     logging.debug(f"Time since status change: {time_since_change} seconds")
     
-
-    task_start_times[task_id] = time.time()
-    await process_tasks()
+    with task_start_times_lock:
+        task_start_times[task_id] = time.time()
+    asyncio.run(process_tasks())
 
 async def process_tasks():
     global task_queue, concurrent_tasks_counter
 
     start_time = time.time()
 
-    # Increase the counter when a new task is started
-    concurrent_tasks_counter += 1
+    with concurrent_tasks_counter_lock:
+        # Increase the counter when a new task is started
+        concurrent_tasks_counter += 1
     logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
 
     next_task = task_queue.get_next_task()
     if not next_task:
         logging.debug("No tasks in the queue to process.")
+        with concurrent_tasks_counter_lock:
+            concurrent_tasks_counter -= 1
         return
 
     if (task_queue.current_version is None
@@ -435,7 +445,8 @@ async def process_tasks():
     logging.info(f"Processed task {task_id} successfully")
 
     # Log the time taken to process the task
-    task_start_time = task_start_times.pop(task_id, None)
+    with task_start_times_lock:
+        task_start_time = task_start_times.pop(task_id, None)
     if task_start_time:
         total_time = time.time() - task_start_time
         logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
@@ -445,18 +456,19 @@ async def process_tasks():
     end_time = time.time()
     logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
 
-    # Decrease the counter when a task is completed
-    concurrent_tasks_counter -= 1
+    with concurrent_tasks_counter_lock:
+        # Decrease the counter when a task is completed
+        concurrent_tasks_counter -= 1
 
 async def reclaim_stakes():
-    max_dispute_time = contract.functions.maxDisputeTime().call()
+    max_dispute_time = await contract.functions.maxDisputeTime().call()
     while True:
         for task_id in list(processed_tasks):
-            task_tuple = contract.functions.getTask(task_id).call()
+            task_tuple = await contract.functions.getTask(task_id).call()
             task = Task(*task_tuple)
             task_status = task.status
             time_status_changed = task.timeStatusChanged
-            blockchain_timestamp = web3.eth.get_block('latest')['timestamp']
+            blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
             time_elapsed = blockchain_timestamp - time_status_changed
             
             if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_time:
@@ -495,7 +507,7 @@ async def upload_tensors_and_grads(error_output, grads, layer_idx):
 
     grads_url = await upload_tensor(grads_flat, f'{layer_label}_grads')
     
-    block_timestamp = web3.eth.get_block('latest')['timestamp']
+    block_timestamp = (await web3.eth.get_block('latest'))['timestamp']
     version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
     result = {
@@ -696,7 +708,7 @@ async def upload_final_logits_results():
     grads_url = await upload_tensor(torch.cat([grad.view(-1).to(device) for grad in tensors['updates']]), 'final_logits_grads')
     loss = tensors['loss']
 
-    block_timestamp = web3.eth.get_block('latest')['timestamp']
+    block_timestamp = (await web3.eth.get_block('latest'))['timestamp']
     version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
     return {
@@ -786,14 +798,25 @@ def get_relevant_tensors_for_task(task_type):
     return relevant_tensors
 
 async def fetch_task(task_id):
-    task_tuple = contract.functions.getTask(task_id).call()
+    task_tuple = await contract.functions.getTask(task_id).call()
     task = Task(*task_tuple)
     return task_id, task
+
+async def initialize_contracts():
+    global token_address, token_contract, stake_amount, subnet_id
+    token_address = await contract.functions.token().call()
+    token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+
+    stake_amount = await contract.functions.solverStakeAmount().call()
+
+    subnet_id = await contract.functions.subnetId().call()
 
 async def main():
     logging.info("Starting main process")
     torch.set_default_device(device)
     initialize_distributed_environment_and_globals()
+
+    await initialize_contracts()
 
     # Approve tokens once at the start
     await approve_token_once(web3, token_contract, args.private_key, args.pool_address, 2**256 - 1)
@@ -803,44 +826,46 @@ async def main():
     reported = False
 
     # Initialize the last checked task ID and pending tasks
-    last_checked_task_id = contract.functions.numTasks().call() - 1
+    last_checked_task_id = await contract.functions.numTasks().call() - 1
     pending_tasks = set()
     
     asyncio.create_task(reclaim_stakes())
     
     last_loop_time = time.time()
 
-    while True:
-        logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
-        last_loop_time = time.time()
-        await deposit_stake()
-        if not reported:
-            for tensor_name in relevant_tensors:
-                await initialize_tensor(tensor_name)
-            await report_sync_status('synced')
-            reported = True
+    # Create a ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        while True:
+            logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
+            last_loop_time = time.time()
+            await deposit_stake()
+            if not reported:
+                for tensor_name in relevant_tensors:
+                    await initialize_tensor(tensor_name)
+                await report_sync_status('synced')
+                reported = True
 
-        latest_task_id = contract.functions.numTasks().call() - 1
+            latest_task_id = await contract.functions.numTasks().call() - 1
 
-        # Gather all task fetching coroutines
-        all_task_ids = list(range(last_checked_task_id + 1, latest_task_id + 1)) + list(pending_tasks)
-        fetch_tasks = [fetch_task(task_id) for task_id in all_task_ids]
-        fetched_tasks = await asyncio.gather(*fetch_tasks)
+            # Gather all task fetching coroutines
+            all_task_ids = list(range(last_checked_task_id + 1, latest_task_id + 1)) + list(pending_tasks)
+            fetch_tasks = [fetch_task(task_id) for task_id in all_task_ids]
+            fetched_tasks = await asyncio.gather(*fetch_tasks)
 
-        # Clear pending tasks to update with new statuses
-        pending_tasks.clear()
+            # Clear pending tasks to update with new statuses
+            pending_tasks.clear()
 
-        # Handle events for tasks
-        for task_id, task in fetched_tasks:
-            if task.solver == worker_address and task.status == TaskStatus.SolverSelected.value:
-                asyncio.create_task(handle_event(task_id, task, time.time()))
-            elif task.status < TaskStatus.SolverSelected.value:
-                pending_tasks.add(task_id)
-        
-        # Update the last checked task ID
-        last_checked_task_id = latest_task_id
-        
-        await asyncio.sleep(args.poll_interval)
+            # Handle events for tasks
+            for task_id, task in fetched_tasks:
+                if task.solver == worker_address and task.status == TaskStatus.SolverSelected.value:
+                    executor.submit(handle_event, task_id, task, time.time())
+                elif task.status < TaskStatus.SolverSelected.value:
+                    pending_tasks.add(task_id)
+            
+            # Update the last checked task ID
+            last_checked_task_id = latest_task_id
+            
+            await asyncio.sleep(args.poll_interval)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)

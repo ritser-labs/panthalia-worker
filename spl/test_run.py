@@ -7,19 +7,31 @@ import requests
 import threading
 import curses
 from flask import Flask, request, jsonify
-from common import model_args, load_abi
-from web3 import Web3
+from common import model_args, load_abi, async_transact_with_contract_function
+from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
 import shutil
 import asyncio
 import logging
+import traceback
+
+# Define file paths and other configurations
+LOG_DIR = 'logs'
+STATE_DIR = os.path.join('data', 'state')
+TEMP_DIR = os.path.join(STATE_DIR, 'temp')
+MASTER_WALLETS_FILE = 'master_wallets.json'
+MASTER_PUBLIC_KEYS_FILE = 'master_public_keys.json'
+DEPLOY_SCRIPT = 'script/Deploy.s.sol'
+LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
+ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
+SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
+BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
 # Configure logging to file and stdout
-log_dir = 'logs'
-os.makedirs(log_dir, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
-file_handler = logging.FileHandler(os.path.join(log_dir, 'test_run.log'))
+file_handler = logging.FileHandler(LOG_FILE)
 console_handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)
@@ -36,9 +48,10 @@ def parse_args():
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the deployer's Ethereum account")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
-    parser.add_argument('--forge_script', type=str, default='script/Deploy.s.sol', help="Path to the Forge deploy script")
+    parser.add_argument('--forge_script', type=str, default=DEPLOY_SCRIPT, help="Path to the Forge deploy script")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
+    parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
     return parser.parse_args()
 
 args = parse_args()
@@ -125,28 +138,22 @@ def delete_directory_contents(directory):
         except Exception as e:
             logging.debug(f"Error deleting directory {directory}: {e}")
 
-def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token):
+async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token):
     for wallet in wallets:
         tx = {
             'to': wallet['address'],
             'value': web3.to_wei(amount_eth, 'ether'),
             'gas': 21000,
-            'gasPrice': web3.eth.gas_price,
-            'nonce': web3.eth.get_transaction_count(deployer_address)
+            'gasPrice': await web3.eth.gas_price,
+            'nonce': await web3.eth.get_transaction_count(deployer_address)
         }
         signed_tx = web3.eth.account.sign_transaction(tx, args.private_key)
-        web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        web3.eth.wait_for_transaction_receipt(signed_tx.hash)
-        
-        tx = token_contract.functions.transfer(wallet['address'], amount_token).build_transaction({
-            'chainId': web3.eth.chain_id,
-            'gas': 100000,
-            'gasPrice': web3.eth.gas_price,
-            'nonce': web3.eth.get_transaction_count(deployer_address)
-        })
-        signed_tx = web3.eth.account.sign_transaction(tx, args.private_key)
-        web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        web3.eth.wait_for_transaction_receipt(signed_tx.hash)
+        await web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        await web3.eth.wait_for_transaction_receipt(signed_tx.hash)
+
+        await async_transact_with_contract_function(
+            web3, token_contract, 'transfer', args.private_key, wallet['address'], amount_token
+        )
 
 def terminate_processes(processes):
     for process in processes:
@@ -162,14 +169,19 @@ def reset_logs(log_dir):
         for file_name in os.listdir(log_dir):
             file_path = os.path.join(log_dir, file_name)
             try:
-                os.remove(file_path)
-                logging.debug(f"Deleted log file: {file_path}")
+                with open(file_path, 'w') as file:
+                    pass  # This will truncate the file to zero length
+                logging.debug(f"Erased log file: {file_path}")
             except Exception as e:
-                logging.debug(f"Error deleting log file {file_path}: {e}")
+                logging.debug(f"Error erasing log file {file_path}: {e}")
 
 def monitor_processes(stdscr, processes, task_counts):
     # Remove console handler from logging
     logging.getLogger().removeHandler(console_handler)
+    logger = logging.getLogger()
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler):
+            logger.removeHandler(handler)
 
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -183,7 +195,7 @@ def monitor_processes(stdscr, processes, task_counts):
     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
     curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)  # Cool color for the simulator text
 
-    max_name_length = max(len(name) for name in processes.keys()) + 11  # Increased padding by 3 more characters
+    max_name_length = max(len(name) for name in processes.keys()) + 7  # Increased padding by 3 more characters
     right_col_width = max_name_length + 2  # Additional padding
 
     def draw_screen():
@@ -194,15 +206,10 @@ def monitor_processes(stdscr, processes, task_counts):
         # Display logs on the left side
         process_name = list(processes.keys())[selected_process]
         log_file = os.path.join('logs', f"{process_name}.log")
-        main_log_file = os.path.join('logs', 'test_run.log')
-
         log_lines = []
+
         if os.path.exists(log_file):
             with open(log_file, 'r') as f:
-                log_lines.extend(f.readlines())
-
-        if os.path.exists(main_log_file):
-            with open(main_log_file, 'r') as f:
                 log_lines.extend(f.readlines())
 
         for i, line in enumerate(log_lines[-(height - 2):]):  # Leave space for instructions
@@ -224,9 +231,9 @@ def monitor_processes(stdscr, processes, task_counts):
 
             # Only display task count for worker processes
             if name.startswith('worker_'):
-                task_count = task_counts.get(task_name, 0)
+                task_count = task_counts.get(task_name, (0, 0))
                 logging.debug(f"Displaying task count for {name}: {task_count}")
-                stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count} tasks)", color)
+                stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count[0]}/{task_count[1]})", color)
             else:
                 stdscr.addstr(i, split_point, f"{indicator} {name}", color)
         
@@ -263,6 +270,7 @@ def monitor_processes(stdscr, processes, task_counts):
     curses.endwin()
     os._exit(0)  # Force exit the program
 
+
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
     contracts = {}
     filters = {}
@@ -275,61 +283,65 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
 
         # Create filters for task-related events
         filters[task_type] = {
-            'TaskRequestSubmitted': contracts[task_type].events.TaskRequestSubmitted.create_filter(fromBlock='latest'),
-            'SolutionSubmitted': contracts[task_type].events.SolutionSubmitted.create_filter(fromBlock='latest'),
-            'TaskResolved': contracts[task_type].events.TaskResolved.create_filter(fromBlock='latest')
+            'TaskRequestSubmitted': await contracts[task_type].events.TaskRequestSubmitted.create_filter(fromBlock='latest'),
+            'SolutionSubmitted': await contracts[task_type].events.SolutionSubmitted.create_filter(fromBlock='latest'),
+            'SolverSelected': await contracts[task_type].events.SolverSelected.create_filter(fromBlock='latest'),
+            'TaskResolved': await contracts[task_type].events.TaskResolved.create_filter(fromBlock='latest')
         }
 
     # Main tracking loop
     while True:
         for task_type, contract_filters in filters.items():
             for event_name, event_filter in contract_filters.items():
-                for event in event_filter.get_new_entries():
+                new_entries = await event_filter.get_new_entries()
+                for event in new_entries:
                     task_id = event['args']['taskId']
+                    if task_type not in tasks:
+                        tasks[task_type] = {}
                     if event_name == 'TaskRequestSubmitted':
-                        tasks[task_id] = {'active': True, 'task_type': task_type}
-                    elif event_name in ['SolutionSubmitted', 'TaskResolved']:
-                        if task_id in tasks and tasks[task_id]['active']:
-                            tasks[task_id]['active'] = False
+                        tasks[task_type][task_id] = {'active': True, 'solver_selected': False}
+                    elif event_name == 'SolverSelected':
+                        if task_id in tasks[task_type]:
+                            tasks[task_type][task_id]['solver_selected'] = True
+                    elif event_name == 'SolutionSubmitted':
+                        if task_id in tasks[task_type]:
+                            tasks[task_type][task_id]['active'] = False
+                    elif event_name == 'TaskResolved':
+                        if task_id in tasks[task_type]:
+                            tasks[task_type][task_id]['active'] = False
         
         # Update the task counts
         for task_type in subnet_addresses.keys():
-            active_tasks = sum(1 for task in tasks.values() if task['task_type'] == task_type and task['active'])
-            task_counts[task_type] = active_tasks
+            active_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['active'])
+            solver_selected_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['solver_selected'] and task['active'])
+            task_counts[task_type] = (solver_selected_tasks, active_tasks)
 
         await asyncio.sleep(0.5)  # Polling interval
 
-def set_interval_mining(web3, interval):
+async def set_interval_mining(web3, interval):
     """Set the mining interval on the Ethereum node."""
-    web3.provider.make_request('evm_setIntervalMining', [interval])
+    await web3.provider.make_request('evm_setIntervalMining', [interval])
 
-if __name__ == "__main__":
+async def main():
     processes = {}
     task_counts = {}  # Dictionary to store task counts
-    log_dir = 'logs'
-    os.makedirs(log_dir, exist_ok=True)
 
     # Reset logs
-    reset_logs(log_dir)
+    reset_logs(LOG_DIR)
 
     # Start anvil process
     logging.info("Starting anvil...")
-    anvil_log = open(os.path.join(log_dir, 'anvil.log'), 'w')
-    anvil_process = subprocess.Popen(
-        ['anvil'], stdout=anvil_log, stderr=anvil_log
-    )
+    anvil_log = open(ANVIL_LOG_FILE, 'w')
+    anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log)
     processes['anvil'] = anvil_process
     logging.info(f"Anvil started with PID {anvil_process.pid}")
 
     try:
         # Delete all .pt files in the state directory except for the latest version for each tensor
-        state_dir = os.path.join(args.local_storage_dir, 'state')
-        block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
-        delete_old_tensor_files(state_dir, block_timestamps_file)
+        delete_old_tensor_files(STATE_DIR, BLOCK_TIMESTAMPS_FILE)
 
         # Delete the temp directory
-        temp_dir = os.path.join(state_dir, 'temp')
-        delete_directory_contents(temp_dir)
+        delete_directory_contents(TEMP_DIR)
 
         # Start Flask server in a separate thread
         flask_thread = threading.Thread(target=lambda: app.run(port=5002))
@@ -352,9 +364,7 @@ if __name__ == "__main__":
         ]
         subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
 
-        # Set the mining interval to 1 second after the Forge script setup
-        web3 = Web3(Web3.HTTPProvider(args.rpc_url))
-        set_interval_mining(web3, 1)
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
 
         # Print deployment stage completion
         logging.info("Deployment completed successfully.")
@@ -368,20 +378,32 @@ if __name__ == "__main__":
 
         pool_address = deployment_config['pool']
 
-        web3 = Web3(Web3.HTTPProvider(args.rpc_url))
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
         deployer_account = web3.eth.account.from_key(args.private_key)
         deployer_address = deployer_account.address
         pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
-        token_address = pool_contract.functions.token().call()
+        token_address = await pool_contract.functions.token().call()
         token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
 
         # Initialize sync_status with all subnet addresses
         sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
 
-        # Generate wallets and fund them
-        num_wallets = len(subnet_addresses)
-        wallets = generate_wallets(num_wallets)
-        fund_wallets(web3, wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+        # Generate wallets for the master and fund them
+        master_wallets = generate_wallets(args.num_master_wallets)
+        await fund_wallets(web3, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+
+        with open(MASTER_WALLETS_FILE, 'w') as f:
+            json.dump(master_wallets, f)
+
+        # Save the public keys of the master wallets
+        master_public_keys = [wallet['address'] for wallet in master_wallets]
+        with open(MASTER_PUBLIC_KEYS_FILE, 'w') as f:
+            json.dump(master_public_keys, f)
+
+        # Generate wallets for workers and fund them
+        worker_wallets = generate_wallets(len(subnet_addresses))
+        await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+        await set_interval_mining(web3, 1)
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
@@ -390,8 +412,8 @@ if __name__ == "__main__":
         logging.info("Starting SOT service...")
 
         # Start the SOT service
-        sot_log = open(os.path.join(log_dir, 'sot.log'), 'w')
-        sot_process = subprocess.Popen(['python', 'sot.py', '--public_key', deployer_account.address], stdout=sot_log, stderr=sot_log)
+        sot_log = open(SOT_LOG_FILE, 'w')
+        sot_process = subprocess.Popen(['python', 'sot.py', '--public_keys_file', MASTER_PUBLIC_KEYS_FILE], stdout=sot_log, stderr=sot_log)
         processes['sot'] = sot_process
         logging.info(f"SOT service started with PID {sot_process.pid}")
 
@@ -427,7 +449,7 @@ if __name__ == "__main__":
                     layer_idx = None
 
                 # Select the corresponding wallet for each worker
-                wallet = wallets.pop(0)
+                wallet = worker_wallets.pop(0)
 
                 command = [
                     'python', 'worker.py',
@@ -443,7 +465,7 @@ if __name__ == "__main__":
                 ]
                 if layer_idx is not None:
                     command.extend(['--layer_idx', str(layer_idx)])
-                log_file_path = os.path.join(log_dir, f'worker_{task_type}.log')
+                log_file_path = os.path.join(LOG_DIR, f'worker_{task_type}.log')
                 log_file = open(log_file_path, 'w')
                 worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
                 processes[f'worker_{task_type}'] = worker_process
@@ -451,7 +473,7 @@ if __name__ == "__main__":
 
         try:
             # Wait for all workers to sync
-            if not wait_for_workers_to_sync(num_wallets):
+            if not wait_for_workers_to_sync(len(worker_wallets)):
                 logging.error("Error: Not all workers synced within the timeout period.")
                 terminate_processes(processes.values())
                 exit(1)
@@ -460,11 +482,11 @@ if __name__ == "__main__":
             logging.info("Starting master process...")
 
             # Start master.py
-            master_log = open(os.path.join(log_dir, 'master.log'), 'w')
+            master_log = open(os.path.join(LOG_DIR, 'master.log'), 'w')
             master_command = [
                 'python', 'master.py',
                 '--rpc_url', args.rpc_url,
-                '--private_key', args.private_key,
+                '--wallets_file', MASTER_WALLETS_FILE,
                 '--sot_url', args.sot_url,
                 '--subnet_addresses', args.subnet_addresses,
             ]
@@ -482,7 +504,7 @@ if __name__ == "__main__":
             curses_thread.start()
 
             # Run the task tracking in an asyncio loop
-            asyncio.run(track_tasks(web3, subnet_addresses, pool_contract, task_counts))
+            await track_tasks(web3, subnet_addresses, pool_contract, task_counts)
 
         except Exception as e:
             logging.error(f"Error: {e}")
@@ -493,3 +515,6 @@ if __name__ == "__main__":
         logging.error(f"Error: {e}")
         terminate_processes(list(processes.values()))
         exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())
