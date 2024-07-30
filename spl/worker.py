@@ -616,8 +616,7 @@ def final_logits_task(inputs, targets, accumulation_steps):
     inputs = inputs.clone().detach().requires_grad_(True)
 
     # Apply RMSNorm to the inputs
-    with torch.no_grad():
-        normalized_inputs = final_logits_norm(inputs)
+    normalized_inputs = final_logits_norm(inputs)
 
     # Pass the normalized inputs through the final logits layer
     logits = final_logits_layer(normalized_inputs)
@@ -640,9 +639,8 @@ def final_logits_task(inputs, targets, accumulation_steps):
         # Clone microbatch_inputs to make them leaf tensors
         microbatch_inputs = microbatch_inputs.clone().detach().requires_grad_(True)
 
-        with torch.no_grad():
-            normalized_inputs = final_logits_norm(microbatch_inputs)
-            logits = final_logits_layer(normalized_inputs)
+        normalized_inputs = final_logits_norm(microbatch_inputs)
+        logits = final_logits_layer(normalized_inputs)
         logits.retain_grad()
 
         # Reshape logits to [batch_size * seq_len, vocab_size]
