@@ -6,3 +6,4 @@ blobfile
 eth-abi
 web3
 quart
+datasets
