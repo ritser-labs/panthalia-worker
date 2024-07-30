@@ -85,6 +85,7 @@ def parse_args():
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
     parser.add_argument('--max_stakes', type=int, default=8, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
+    parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
     return parser.parse_args()
 
 args = parse_args()
@@ -773,27 +774,46 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
             state_dict = {'weight': reshaped_tensor}
             embedding.load_state_dict(state_dict)
 
-            # Compile the embedding after loading state_dict
-            embedding = torch.compile(embedding)
+            if args.torch_compile:
+                # Compile the embedding after loading state_dict
+                embedding = torch.compile(embedding)
+                # Warmup
+                dummy_input = torch.randint(0, vocab_size, (1, model_args.max_seq_len)).to(device)
+                _ = embedding(dummy_input)
+                logging.info("VocabParallelEmbedding compiled and warmed up")
 
-            logging.info("VocabParallelEmbedding initialized, state_dict loaded, and compiled")
+            logging.info("VocabParallelEmbedding initialized and state_dict loaded")
 
         if tensor_name == 'final_logits':
             final_logits_norm, final_logits_layer = tensor_to_final_logits(tensor)
 
-            # Compile the final logits layer and RMSNorm after loading state_dict
-            final_logits_layer = torch.compile(final_logits_layer)
-            final_logits_norm = torch.compile(final_logits_norm)
-            
-            logging.info("Final logits layer and RMSNorm initialized, state_dict loaded, and compiled")
+            if args.torch_compile:
+                # Compile the final logits layer and RMSNorm after loading state_dict
+                final_logits_layer = torch.compile(final_logits_layer)
+                final_logits_norm = torch.compile(final_logits_norm)
+                # Warmup
+                dummy_input = torch.randn(1, model_args.max_seq_len, model_args.dim).to(device)
+                normalized = final_logits_norm(dummy_input)
+                _ = final_logits_layer(normalized)
+                logging.info("Final logits layer and RMSNorm compiled and warmed up")
+
+            logging.info("Final logits layer and RMSNorm initialized and state_dict loaded")
+
         elif "layer_" in tensor_name and "adam_m" not in tensor_name and "adam_v" not in tensor_name:
             layer_idx = int(tensor_name.split('_')[1])
             transformer_layer = tensor_to_block(tensor, layer_idx)
-            
-            # Compile the TransformerBlock layer after loading state_dict
-            transformer_layer = torch.compile(transformer_layer)
 
-            logging.info(f"TransformerBlock layer {layer_idx} initialized, state_dict loaded, and compiled")
+            if args.torch_compile:
+                # Compile the TransformerBlock layer after loading state_dict
+                transformer_layer = torch.compile(transformer_layer)
+                # Warmup
+                dummy_input = torch.randn(1, model_args.max_seq_len, model_args.dim).to(device)
+                freqs_cis_slice = freqs_cis[:model_args.max_seq_len]
+                mask_slice = mask[:model_args.max_seq_len, :model_args.max_seq_len]
+                _ = transformer_layer(dummy_input, 0, freqs_cis_slice.to(device), mask_slice.to(device))
+                logging.info(f"TransformerBlock layer {layer_idx} compiled and warmed up")
+
+            logging.info(f"TransformerBlock layer {layer_idx} initialized and state_dict loaded")
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
@@ -801,7 +821,6 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
     except Exception as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to error: {e}")
         raise
-
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
