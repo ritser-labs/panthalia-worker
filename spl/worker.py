@@ -23,6 +23,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 import threading
+import torch._dynamo
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):
@@ -765,20 +766,34 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
             # Reshape the tensor to the correct shape
             reshaped_tensor = tensor.view(vocab_size, embedding_dim)
 
+            # Initialize VocabParallelEmbedding
             embedding = VocabParallelEmbedding(vocab_size, model_args.dim).to(device)
 
             # Convert reshaped tensor to state_dict format
             state_dict = {'weight': reshaped_tensor}
             embedding.load_state_dict(state_dict)
-            logging.info("VocabParallelEmbedding initialized and loaded")
+
+            # Compile the embedding after loading state_dict
+            embedding = torch.compile(embedding)
+
+            logging.info("VocabParallelEmbedding initialized, state_dict loaded, and compiled")
 
         if tensor_name == 'final_logits':
             final_logits_norm, final_logits_layer = tensor_to_final_logits(tensor)
-            logging.info("Final logits layer and RMSNorm initialized and loaded")
+
+            # Compile the final logits layer and RMSNorm after loading state_dict
+            final_logits_layer = torch.compile(final_logits_layer)
+            final_logits_norm = torch.compile(final_logits_norm)
+            
+            logging.info("Final logits layer and RMSNorm initialized, state_dict loaded, and compiled")
         elif "layer_" in tensor_name and "adam_m" not in tensor_name and "adam_v" not in tensor_name:
             layer_idx = int(tensor_name.split('_')[1])
             transformer_layer = tensor_to_block(tensor, layer_idx)
-            logging.info(f"TransformerBlock layer {layer_idx} initialized and loaded")
+            
+            # Compile the TransformerBlock layer after loading state_dict
+            transformer_layer = torch.compile(transformer_layer)
+
+            logging.info(f"TransformerBlock layer {layer_idx} initialized, state_dict loaded, and compiled")
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
@@ -786,6 +801,7 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
     except Exception as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to error: {e}")
         raise
+
 
 def get_relevant_tensors_for_task(task_type):
     relevant_tensors = []
