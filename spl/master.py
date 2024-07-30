@@ -22,14 +22,17 @@ import uuid
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 BACKLOG_THRESHOLD = 2
+INITIAL_SUBMISSION_INTERVAL = 45  # Initial submission interval in seconds (assuming the slowest stage processes a task every 30 seconds)
+MIN_SUBMISSION_INTERVAL = 5  # Minimum submission interval in seconds
+MAX_SUBMISSION_INTERVAL = 90  # Maximum submission interval in seconds
+
 
 class Master:
-    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, desired_pending_tasks=2, detailed_logs=False):
+    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, detailed_logs=False):
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
-        self.desired_pending_tasks = desired_pending_tasks
         self.iteration = 1  # Track the number of iterations
         self.perplexities = []  # Initialize perplexity list
         self.perplexity_queue = queue.Queue()
@@ -62,6 +65,11 @@ class Master:
         self.ax.set_title('Perplexity over Iterations')
         self.ax.legend()
         self.ax.grid(True)
+
+        # Initialize submission interval
+        self.submission_interval = INITIAL_SUBMISSION_INTERVAL
+        self.last_submission_time = time.time()
+        self.submitted_first = False
 
         # Run the main iterations in separate threads
         asyncio.run(self.run_main())
@@ -332,6 +340,9 @@ class Master:
         # Update the plot explicitly
         self.update_plot()
 
+        # Adjust the submission rate based on backlog
+        self.adjust_submission_rate()
+
     async def run_main(self):
         logging.info("Starting main process")
         await self.approve_tokens_at_start()
@@ -342,16 +353,25 @@ class Master:
                 await self.condition.wait()
 
     async def check_and_submit_tasks(self):
-        if self.stage_backlog['embed'] < BACKLOG_THRESHOLD:
-            # Submit new tasks if the embed stage is not experiencing a backlog
-            if self.pending_embed_tasks < self.desired_pending_tasks:
-                tasks_to_submit = self.desired_pending_tasks - self.pending_embed_tasks
-                for _ in range(tasks_to_submit):
-                    self.pending_embed_tasks += 1
-                    asyncio.create_task(self.main_iteration(self.iteration))
-                    self.iteration += 1
+        if time.time() - self.last_submission_time >= self.submission_interval or not self.submitted_first:
+            self.pending_embed_tasks += 1
+            asyncio.create_task(self.main_iteration(self.iteration))
+            self.iteration += 1
+            self.last_submission_time = time.time()
+            self.submitted_first = True
+
+    def adjust_submission_rate(self):
+        # Calculate average processing time for the slowest stage
+        slowest_stage = max(self.stage_backlog, key=lambda k: self.stage_backlog[k] if isinstance(self.stage_backlog[k], int) else 0)
+        average_processing_time = self.submission_interval  # Placeholder for actual average processing time calculation
+
+        # Adjust submission interval
+        if any(v >= BACKLOG_THRESHOLD for v in self.stage_backlog.values() if isinstance(v, int)):
+            self.submission_interval = min(self.submission_interval * 1.1, MAX_SUBMISSION_INTERVAL)  # Increase interval with a cap
+            logging.info(f"Increasing submission interval to {self.submission_interval} seconds due to backlog")
         else:
-            logging.info("Backlog detected at the first stage. Holding task submissions.")
+            self.submission_interval = max(self.submission_interval * 0.9, MIN_SUBMISSION_INTERVAL)  # Decrease interval with a floor
+            logging.info(f"Decreasing submission interval to {self.submission_interval} seconds as there's no backlog")
 
     async def get_latest_model_params(self, current_version_number):
         async with aiohttp.ClientSession() as session:
@@ -476,12 +496,12 @@ if __name__ == "__main__":
     parser.add_argument('--wallets_file', type=str, required=True, help="Path to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--desired_pending_tasks', type=int, default=2, help="Desired number of unresolved tasks to maintain")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()
 
-    with open(args.subnet_addresses, 'r') as file:
+    with open(args.subnet_addresses, 'r') as file, open(args.wallets_file, 'r') as wallets_file:
         subnet_addresses = json.load(file)
+        wallets = json.load(wallets_file)
 
-    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, desired_pending_tasks=args.desired_pending_tasks, detailed_logs=args.detailed_logs)
+    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, detailed_logs=args.detailed_logs)
