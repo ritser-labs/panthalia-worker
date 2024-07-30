@@ -22,7 +22,7 @@ from tqdm import tqdm
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
-import threading  # Add threading module
+import threading
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):
@@ -523,7 +523,8 @@ async def upload_tensors_and_grads(error_output, grads, layer_idx):
 def embed_task(batch):
     global embedding
 
-    inputs = embedding(batch)
+    with torch.no_grad():
+        inputs = embedding(batch)
     tensors['outputs'] = inputs
 
 def forward_task(layer_idx, inputs):
@@ -550,7 +551,8 @@ def forward_task(layer_idx, inputs):
         transformer_layer.attention.cache_v = torch.zeros(bsz, transformer_layer.attention.cache_v.shape[1], transformer_layer.attention.cache_v.shape[2], transformer_layer.attention.cache_v.shape[3], device=device)
 
     logging.debug(f"Performing forward pass for layer {layer_idx}")
-    outputs = transformer_layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
+    with torch.no_grad():
+        outputs = transformer_layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
     tensors['outputs'] = outputs
     logging.debug(f"Forward pass completed for layer {layer_idx}")
 
@@ -612,7 +614,8 @@ def final_logits_task(inputs, targets, accumulation_steps):
     inputs = inputs.clone().detach().requires_grad_(True)
 
     # Apply RMSNorm to the inputs
-    normalized_inputs = final_logits_norm(inputs)
+    with torch.no_grad():
+        normalized_inputs = final_logits_norm(inputs)
 
     # Pass the normalized inputs through the final logits layer
     logits = final_logits_layer(normalized_inputs)
@@ -635,8 +638,9 @@ def final_logits_task(inputs, targets, accumulation_steps):
         # Clone microbatch_inputs to make them leaf tensors
         microbatch_inputs = microbatch_inputs.clone().detach().requires_grad_(True)
 
-        normalized_inputs = final_logits_norm(microbatch_inputs)
-        logits = final_logits_layer(normalized_inputs)
+        with torch.no_grad():
+            normalized_inputs = final_logits_norm(microbatch_inputs)
+            logits = final_logits_layer(normalized_inputs)
         logits.retain_grad()
 
         # Reshape logits to [batch_size * seq_len, vocab_size]
