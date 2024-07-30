@@ -8,7 +8,7 @@ from common import initialize_distributed_environment
 import os
 
 # Assuming we have the following classes and functions already defined
-from model import VocabParallelEmbedding, TransformerBlock, precompute_freqs_cis
+from model import VocabParallelEmbedding
 from device import device
 
 # Define the model arguments
@@ -39,6 +39,10 @@ initialize_model_parallel(model_parallel_size_=1)
 # Initialize embedding layer
 embedding = VocabParallelEmbedding(args.vocab_size, args.dim).to(device)
 
+
+# Use torch.compile with torchdynamo for optimization
+embedding = torch.compile(embedding)
+
 # Define the forward function for the embedding task
 def embed_task(input_ids):
     with torch.no_grad():
@@ -53,10 +57,11 @@ with profile(
     with_stack=True,
 ) as prof:
     with record_function("embed_task_forward"):
-        outputs = embed_task(input_ids)
+        outputs = torch._dynamo.explain(embedding)(input_ids)
         
     # Synchronize CUDA operations before printing the profiling results
     torch.cuda.synchronize()
 
 # Print the profiling results
 print(prof.key_averages().table(row_limit=10))
+print(outputs)
