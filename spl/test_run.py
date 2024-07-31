@@ -427,53 +427,72 @@ async def main():
         logging.info("Starting worker processes...")
 
         # Start worker.py for each subnet
-        task_order = [
-            'embed',
-            *['forward_layer_{}'.format(i) for i in range(model_args.n_layers)],
-            'final_logits',
-            *['backward_layer_{}'.format(i) for i in reversed(range(model_args.n_layers))],
-            'embed_backward'
-        ]
-        for task_type in task_order:
-            if task_type in subnet_addresses:
-                subnet_address = subnet_addresses[task_type]
-                # Determine base_task_type and layer_idx
-                if 'forward_layer' in task_type:
-                    base_task_type = 'forward'
-                    layer_idx = int(task_type.split('_')[-1])
-                elif 'backward_layer' in task_type:
-                    base_task_type = 'backward'
-                    layer_idx = int(task_type.split('_')[-1])
-                else:
-                    base_task_type = task_type  # Use the full task type as is
-                    layer_idx = None
+        task_combinations = []
 
-                # Select the corresponding wallet for each worker
-                wallet = worker_wallets.pop(0)
+        # Collect task combinations
+        embed_task = None
+        embed_backward_task = None
+        final_logits_task = None
+        forward_backward_tasks = {}
 
-                command = [
-                    'python', 'worker.py',
-                    '--task_type', base_task_type,
-                    '--subnet_address', subnet_address,
-                    '--private_key', wallet['private_key'],
-                    '--rpc_url', args.rpc_url,
-                    '--sot_url', args.sot_url,
-                    '--pool_address', pool_address,
-                    '--group', str(args.group),
-                    '--local_storage_dir', args.local_storage_dir,
-                    '--backend', args.backend,
-                ]
-                if layer_idx is not None:
-                    command.extend(['--layer_idx', str(layer_idx)])
-                log_file_path = os.path.join(LOG_DIR, f'worker_{task_type}.log')
-                log_file = open(log_file_path, 'w')
-                worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
-                processes[f'worker_{task_type}'] = worker_process
-                logging.info(f"Started worker process for task {task_type} with command: {' '.join(command)}")
+        # Iterate only over forward_layer and embed tasks, skip backward tasks
+        for task_type, subnet_address in subnet_addresses.items():
+            if task_type.startswith("forward_layer"):
+                layer_idx = int(task_type.split('_')[-1])
+                forward_backward_tasks[layer_idx] = (subnet_address, subnet_addresses.get(f"backward_layer_{layer_idx}", None))
+            elif task_type == "embed":
+                embed_task = subnet_address
+                embed_backward_task = subnet_addresses.get("embed_backward", None)
+            elif task_type == "final_logits":
+                final_logits_task = subnet_address
+
+        # Combine tasks and avoid double counting
+        if embed_task:
+            task_type = "embed+embed_backward" if embed_backward_task else "embed"
+            task_combinations.append((task_type, None, embed_task, embed_backward_task))
+
+        if final_logits_task:
+            task_combinations.append(("final_logits", None, final_logits_task, None))
+
+        for layer_idx, (forward_address, backward_address) in forward_backward_tasks.items():
+            if forward_address:
+                task_type = "forward" + ("+backward" if backward_address else "")
+                task_combinations.append((task_type, layer_idx, forward_address, backward_address))
+
+        worker_count = len(task_combinations)
+
+        for task_type, layer_idx, address_1, address_2 in task_combinations:
+            worker_wallet = worker_wallets.pop(0)
+            if address_2 is None:
+                worker_wallet = worker_wallets.pop(0)['private_key']
+            else:
+                worker_wallet = worker_wallets.pop(0)['private_key']
+                    + '+' + worker_wallets.pop(0)['private_key']
+            command = [
+                'python', 'worker.py',
+                '--task_types', task_type,
+                '--subnet_addresses', address_1 if address_2 is None else f"{address_1}+{address_2}",
+                '--private_keys', worker_wallet['private_key'],
+                '--rpc_url', args.rpc_url,
+                '--sot_url', args.sot_url,
+                '--pool_address', pool_address,
+                '--groups', str(args.group),
+                '--local_storage_dir', args.local_storage_dir,
+                '--backend', args.backend,
+            ]
+
+            if layer_idx is not None:
+                command.extend(['--layer_idx', str(layer_idx)])
+            worker_name = f'worker_{task_type + "_" + str(layer_idx) if layer_idx is not None else task_type}'
+            log_file_path = os.path.join(LOG_DIR, worker_name.log')
+            log_file = open(log_file_path, 'w')
+            worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
+            processes[worker_name] = worker_process
+            logging.info(f"Started worker process for tasks {task_type} with command: {' '.join(command)}")
 
         try:
             # Wait for all workers to sync
-            if not wait_for_workers_to_sync(len(worker_wallets)):
+            if not wait_for_workers_to_sync(worker_count):
                 logging.error("Error: Not all workers synced within the timeout period.")
                 terminate_processes(processes.values())
                 exit(1)
