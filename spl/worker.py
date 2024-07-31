@@ -346,7 +346,7 @@ async def process_tasks():
         or next_task['version_number'] != task_queue.current_version):
         logging.debug(f"Syncing tensors for version number: {next_task['version_number']}")
         sync_start_time = time.time()
-        await sync_tensors(next_task['version_number'])
+        await sync_tensors(next_task['version_number'], next_task['contract_index'])
         sync_end_time = time.time()
         logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
         task_queue.current_version = next_task['version_number']
@@ -438,7 +438,7 @@ async def process_tasks():
     submit_solution_end_time = time.time()
     logging.debug(f"submit_solution() took {submit_solution_end_time - submit_solution_start_time:.2f} seconds")
 
-    processed_tasks.add(task_id)
+    processed_tasks.add((task_id, contract_index))
 
     logging.info(f"Processed task {task_id} successfully")
 
@@ -460,29 +460,28 @@ async def process_tasks():
 
 async def reclaim_stakes():
     while True:
-        for contract, token_contract in zip(contracts, token_contracts):
-            max_dispute_time = await contract.functions.maxDisputeTime().call()
-            for task_id in list(processed_tasks):
-                task_tuple = await contract.functions.getTask(task_id).call()
-                task = Task(*task_tuple)
-                task_status = task.status
-                time_status_changed = task.timeStatusChanged
-                blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
-                time_elapsed = blockchain_timestamp - time_status_changed
-                
-                if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_time:
-                    try:
-                        receipt = await async_transact_with_contract_function(web3, contract, 'resolveTask', args.private_keys[task_queue.current_contract_index], task_id)
-                        logging.info(f"resolveTask transaction receipt: {receipt}")
-                        processed_tasks.remove(task_id)
-                    except Exception as e:
-                        logging.error(f"Error resolving task {task_id}: {e}")
-                        raise
+        for task_id, contract_index in list(processed_tasks):
+            contract = contracts[contract_index]
+            task_tuple = await contract.functions.getTask(task_id).call()
+            task = Task(*task_tuple)
+            task_status = task.status
+            time_status_changed = task.timeStatusChanged
+            blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
+            time_elapsed = blockchain_timestamp - time_status_changed
+            
+            if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_times[contract_index]:
+                try:
+                    receipt = await async_transact_with_contract_function(web3, contract, 'resolveTask', args.private_keys[task_queue.current_contract_index], task_id)
+                    logging.info(f"resolveTask transaction receipt: {receipt}")
+                    processed_tasks.remove((task_id, contract_index))
+                except Exception as e:
+                    logging.error(f"Error resolving task {task_id}: {e}")
+                    raise
 
         await asyncio.sleep(2)
 
-async def sync_tensors(sync_version_number):
-    relevant_tensors = get_relevant_tensors_for_task(args.task_types[task_queue.current_contract_index])
+async def sync_tensors(sync_version_number, contract_index):
+    relevant_tensors = get_relevant_tensors_for_task(args.task_types[contract_index])
     for tensor_name in relevant_tensors:
         await initialize_tensor(tensor_name, sync_version_number)
 
@@ -837,7 +836,7 @@ async def fetch_task(task_id, contract_index):
     return task_id, task
 
 async def initialize_contracts():
-    global token_addresses, token_contracts, stake_amounts, subnet_ids, pool_contracts
+    global token_addresses, token_contracts, stake_amounts, subnet_ids, pool_contracts, max_dispute_times
 
     # Initialize lists to store details for each contract
     token_addresses = []
@@ -845,6 +844,7 @@ async def initialize_contracts():
     stake_amounts = []
     subnet_ids = []
     pool_contracts = []
+    max_dispute_times = []
 
     # Loop through each contract to set up individual details
     for contract in contracts:
@@ -861,6 +861,9 @@ async def initialize_contracts():
         subnet_ids.append(subnet_id)
 
         pool_contracts.append(pool_contract)  # Assuming the pool_contract remains the same
+
+        max_dispute_time = await contract.functions.maxDisputeTime().call()
+        max_dispute_times.append(max_dispute_time)
 
 async def main():
     logging.info("Starting main process")
