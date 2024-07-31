@@ -30,14 +30,10 @@ BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
 # Configure logging to file and stdout
 os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(level=logging.INFO)
-file_handler = logging.FileHandler(LOG_FILE)
-console_handler = logging.StreamHandler()
+logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
-logging.getLogger().addHandler(file_handler)
-logging.getLogger().addHandler(console_handler)
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(formatter)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -176,8 +172,6 @@ def reset_logs(log_dir):
                 logging.debug(f"Error erasing log file {file_path}: {e}")
 
 def monitor_processes(stdscr, processes, task_counts):
-    # Remove console handler from logging
-    logging.getLogger().removeHandler(console_handler)
     logger = logging.getLogger()
     for handler in logger.handlers:
         if isinstance(handler, logging.StreamHandler):
@@ -269,7 +263,6 @@ def monitor_processes(stdscr, processes, task_counts):
     stdscr.keypad(False)  # Reset keypad mode before exiting
     curses.endwin()
     os._exit(0)  # Force exit the program
-
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
     contracts = {}
