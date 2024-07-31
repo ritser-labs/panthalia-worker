@@ -486,7 +486,7 @@ async def main():
                 '--rpc_url', args.rpc_url,
                 '--sot_url', args.sot_url,
                 '--pool_address', pool_address,
-                '--groups', str(args.group),
+                '--group', str(args.group),
                 '--local_storage_dir', args.local_storage_dir,
                 '--backend', args.backend,
             ]

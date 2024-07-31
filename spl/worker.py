@@ -59,7 +59,7 @@ def parse_args():
     parser.add_argument('--rpc_url', type=str, default='http://localhost:8545', help="URL of the Ethereum RPC node")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--pool_address', type=str, required=True, help="Pool contract address")
-    parser.add_argument('--groups', type=int, required=True, nargs='+', help="Groups for depositing stake")
+    parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
@@ -279,10 +279,10 @@ def resume_gradient_updates():
     gradient_update_paused = False
 
 async def deposit_stake():
-    for private_key, group, subnet_id, stake_amount, token_contract, pool_contract, worker_address in zip(
-        args.private_keys, args.groups, subnet_ids, stake_amounts, token_contracts, pool_contracts, worker_addresses
-    ):
-        await deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, group, worker_address, stake_amount, args.max_stakes)
+    wallets = zip(args.private_keys, subnet_ids, stake_amounts, token_contracts, pool_contracts, worker_addresses)
+    
+    for private_key, subnet_id, stake_amount, token_contract, pool_contract, worker_address in wallets:
+        await deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, args.group, worker_address, stake_amount, args.max_stakes)
 
 def handle_event(task_id, task, time_invoked, contract_index):
     global last_handle_event_timestamp
