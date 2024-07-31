@@ -874,7 +874,10 @@ async def main():
         await approve_token_once(web3, token_contract, private_key, args.pool_address, 2**256 - 1)
 
     logging.info("Starting tensor synchronization...")
-    relevant_tensors = get_relevant_tensors_for_task(args.task_types[0])
+    relevant_tensors = []
+    for task_type in args.task_types:
+        relevant_tensors.extend(get_relevant_tensors_for_task(task_type))
+    relevant_tensors = list(set(relevant_tensors))
     reported = False
 
     # Initialize the last checked task ID and pending tasks
