@@ -462,7 +462,6 @@ async def main():
         worker_count = len(task_combinations)
 
         for task_type, layer_idx, address_1, address_2 in task_combinations:
-            worker_wallet = worker_wallets.pop(0)
             if address_2 is None:
                 worker_wallet = worker_wallets.pop(0)['private_key']
             else:
@@ -471,7 +470,7 @@ async def main():
                 'python', 'worker.py',
                 '--task_types', task_type,
                 '--subnet_addresses', address_1 if address_2 is None else f"{address_1}+{address_2}",
-                '--private_keys', worker_wallet['private_key'],
+                '--private_keys', worker_wallet,
                 '--rpc_url', args.rpc_url,
                 '--sot_url', args.sot_url,
                 '--pool_address', pool_address,
@@ -483,7 +482,7 @@ async def main():
             if layer_idx is not None:
                 command.extend(['--layer_idx', str(layer_idx)])
             worker_name = f'worker_{task_type + "_" + str(layer_idx) if layer_idx is not None else task_type}'
-            log_file_path = os.path.join(LOG_DIR, worker_name.log)
+            log_file_path = os.path.join(LOG_DIR, f"{worker_name}.log")
             log_file = open(log_file_path, 'w')
             worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
             processes[worker_name] = worker_process
