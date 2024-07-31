@@ -294,7 +294,7 @@ def monitor_processes(stdscr, processes, task_counts):
 
 # Function to log memory and VRAM usage
 def log_memory_vram_usage(processes, interval=5):
-    logger = logging.getLogger('memory_logger')
+    logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     
     # Remove any existing handlers to avoid duplicate logs
