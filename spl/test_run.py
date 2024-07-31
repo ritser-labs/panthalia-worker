@@ -185,11 +185,12 @@ def monitor_processes(stdscr, processes, task_counts):
 
     # Initialize colors
     curses.start_color()
-    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
-    curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)  # Cool color for the simulator text
+    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Yellow for forward/embed
+    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # Cyan for backward/embed_backward
+    curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Yellow color for the simulator text
+    curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)    # Cool color for the simulator text
 
-    max_name_length = max(len(name) for name in processes.keys()) + 7  # Increased padding by 3 more characters
+    max_name_length = max(len(name) for name in processes.keys()) + 14  # Increased padding by 3 more characters
     right_col_width = max_name_length + 2  # Additional padding
 
     def draw_screen():
@@ -220,17 +221,34 @@ def monitor_processes(stdscr, processes, task_counts):
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
 
-            # Remove "worker_" prefix for task name matching
-            task_name = name.replace('worker_', '')
-
-            # Only display task count for worker processes
-            if name.startswith('worker_'):
-                task_count = task_counts.get(task_name, (0, 0))
-                logging.debug(f"Displaying task count for {name}: {task_count}")
+            # Determine the task type and display accordingly
+            if name == 'worker_final_logits':
+                task_count = task_counts.get('final_logits', (0, 0))
                 stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count[0]}/{task_count[1]})", color)
+            elif 'worker_forward+backward' in name:
+                layer_idx = name.split('_')[-1]
+                forward_task = f"forward_layer_{layer_idx}"
+                backward_task = f"backward_layer_{layer_idx}"
+
+                forward_count = task_counts.get(forward_task, (0, 0))
+                backward_count = task_counts.get(backward_task, (0, 0))
+
+                stdscr.addstr(i, split_point, f"{indicator} {name} ", color)
+                stdscr.addstr(f"({forward_count[0]}/{forward_count[1]}) ", curses.color_pair(3))
+                stdscr.addstr(f"({backward_count[0]}/{backward_count[1]})", curses.color_pair(4))
+            elif 'worker_embed+embed_backward' in name:
+                embed_task = "embed"
+                embed_backward_task = "embed_backward"
+
+                embed_count = task_counts.get(embed_task, (0, 0))
+                embed_backward_count = task_counts.get(embed_backward_task, (0, 0))
+
+                stdscr.addstr(i, split_point, f"{indicator} {name} ", color)
+                stdscr.addstr(f"({embed_count[0]}/{embed_count[1]}) ", curses.color_pair(3))
+                stdscr.addstr(f"({embed_backward_count[0]}/{embed_backward_count[1]})", curses.color_pair(4))
             else:
                 stdscr.addstr(i, split_point, f"{indicator} {name}", color)
-        
+
         stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
         # Add the "PANTHALIA SIMULATOR V0" text at the bottom of the right column
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
@@ -263,6 +281,7 @@ def monitor_processes(stdscr, processes, task_counts):
     stdscr.keypad(False)  # Reset keypad mode before exiting
     curses.endwin()
     os._exit(0)  # Force exit the program
+
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
     contracts = {}
