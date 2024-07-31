@@ -24,7 +24,7 @@ import functools
 
 app = Flask(__name__)
 sync_status = {}
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
     logging.StreamHandler()
 ])
 
