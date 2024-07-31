@@ -30,14 +30,10 @@ BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
 # Configure logging to file and stdout
 os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(level=logging.INFO)
-file_handler = logging.FileHandler(LOG_FILE)
-console_handler = logging.StreamHandler()
+logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-file_handler.setFormatter(formatter)
-console_handler.setFormatter(formatter)
-logging.getLogger().addHandler(file_handler)
-logging.getLogger().addHandler(console_handler)
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(formatter)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -176,8 +172,6 @@ def reset_logs(log_dir):
                 logging.debug(f"Error erasing log file {file_path}: {e}")
 
 def monitor_processes(stdscr, processes, task_counts):
-    # Remove console handler from logging
-    logging.getLogger().removeHandler(console_handler)
     logger = logging.getLogger()
     for handler in logger.handlers:
         if isinstance(handler, logging.StreamHandler):
@@ -191,11 +185,12 @@ def monitor_processes(stdscr, processes, task_counts):
 
     # Initialize colors
     curses.start_color()
-    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
-    curses.init_pair(3, curses.COLOR_CYAN, curses.COLOR_BLACK)  # Cool color for the simulator text
+    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Yellow for forward/embed
+    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # Cyan for backward/embed_backward
+    curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Yellow color for the simulator text
+    curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)    # Cool color for the simulator text
 
-    max_name_length = max(len(name) for name in processes.keys()) + 7  # Increased padding by 3 more characters
+    max_name_length = max(len(name) for name in processes.keys()) + 14  # Increased padding by 3 more characters
     right_col_width = max_name_length + 2  # Additional padding
 
     def draw_screen():
@@ -219,24 +214,52 @@ def monitor_processes(stdscr, processes, task_counts):
         for y in range(height):
             stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
 
-        # Display processes on the right side
-        for i, (name, process) in enumerate(processes.items()):
+        # Order processes by name
+        # Order processes by name with reversed key arguments
+        ordered_process_names = sorted(processes.keys(), key=lambda name: (
+            name.startswith('worker_final_logits'),
+            name.startswith('worker_forward'),
+            name.startswith('worker_embed'),
+            not name.startswith('worker'),
+            name
+        ))
+
+
+        for i, name in enumerate(ordered_process_names):
+            process = processes[name]
             is_selected = (i == selected_process)
             status = process.poll() is None
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
 
-            # Remove "worker_" prefix for task name matching
-            task_name = name.replace('worker_', '')
-
-            # Only display task count for worker processes
-            if name.startswith('worker_'):
-                task_count = task_counts.get(task_name, (0, 0))
-                logging.debug(f"Displaying task count for {name}: {task_count}")
+            # Determine the task type and display accordingly
+            if name == 'worker_final_logits':
+                task_count = task_counts.get('final_logits', (0, 0))
                 stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count[0]}/{task_count[1]})", color)
+            elif 'worker_forward+backward' in name:
+                layer_idx = name.split('_')[-1]
+                forward_task = f"forward_layer_{layer_idx}"
+                backward_task = f"backward_layer_{layer_idx}"
+
+                forward_count = task_counts.get(forward_task, (0, 0))
+                backward_count = task_counts.get(backward_task, (0, 0))
+
+                stdscr.addstr(i, split_point, f"{indicator} {name} ", color)
+                stdscr.addstr(f"({forward_count[0]}/{forward_count[1]}) ", curses.color_pair(3))
+                stdscr.addstr(f"({backward_count[0]}/{backward_count[1]})", curses.color_pair(4))
+            elif 'worker_embed+embed_backward' in name:
+                embed_task = "embed"
+                embed_backward_task = "embed_backward"
+
+                embed_count = task_counts.get(embed_task, (0, 0))
+                embed_backward_count = task_counts.get(embed_backward_task, (0, 0))
+
+                stdscr.addstr(i, split_point, f"{indicator} {name} ", color)
+                stdscr.addstr(f"({embed_count[0]}/{embed_count[1]}) ", curses.color_pair(3))
+                stdscr.addstr(f"({embed_backward_count[0]}/{embed_backward_count[1]})", curses.color_pair(4))
             else:
                 stdscr.addstr(i, split_point, f"{indicator} {name}", color)
-        
+
         stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
         # Add the "PANTHALIA SIMULATOR V0" text at the bottom of the right column
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
@@ -427,53 +450,70 @@ async def main():
         logging.info("Starting worker processes...")
 
         # Start worker.py for each subnet
-        task_order = [
-            'embed',
-            *['forward_layer_{}'.format(i) for i in range(model_args.n_layers)],
-            'final_logits',
-            *['backward_layer_{}'.format(i) for i in reversed(range(model_args.n_layers))],
-            'embed_backward'
-        ]
-        for task_type in task_order:
-            if task_type in subnet_addresses:
-                subnet_address = subnet_addresses[task_type]
-                # Determine base_task_type and layer_idx
-                if 'forward_layer' in task_type:
-                    base_task_type = 'forward'
-                    layer_idx = int(task_type.split('_')[-1])
-                elif 'backward_layer' in task_type:
-                    base_task_type = 'backward'
-                    layer_idx = int(task_type.split('_')[-1])
-                else:
-                    base_task_type = task_type  # Use the full task type as is
-                    layer_idx = None
+        task_combinations = []
 
-                # Select the corresponding wallet for each worker
-                wallet = worker_wallets.pop(0)
+        # Collect task combinations
+        embed_task = None
+        embed_backward_task = None
+        final_logits_task = None
+        forward_backward_tasks = {}
 
-                command = [
-                    'python', 'worker.py',
-                    '--task_type', base_task_type,
-                    '--subnet_address', subnet_address,
-                    '--private_key', wallet['private_key'],
-                    '--rpc_url', args.rpc_url,
-                    '--sot_url', args.sot_url,
-                    '--pool_address', pool_address,
-                    '--group', str(args.group),
-                    '--local_storage_dir', args.local_storage_dir,
-                    '--backend', args.backend,
-                ]
-                if layer_idx is not None:
-                    command.extend(['--layer_idx', str(layer_idx)])
-                log_file_path = os.path.join(LOG_DIR, f'worker_{task_type}.log')
-                log_file = open(log_file_path, 'w')
-                worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
-                processes[f'worker_{task_type}'] = worker_process
-                logging.info(f"Started worker process for task {task_type} with command: {' '.join(command)}")
+        # Iterate only over forward_layer and embed tasks, skip backward tasks
+        for task_type, subnet_address in subnet_addresses.items():
+            if task_type.startswith("forward_layer"):
+                layer_idx = int(task_type.split('_')[-1])
+                forward_backward_tasks[layer_idx] = (subnet_address, subnet_addresses.get(f"backward_layer_{layer_idx}", None))
+            elif task_type == "embed":
+                embed_task = subnet_address
+                embed_backward_task = subnet_addresses.get("embed_backward", None)
+            elif task_type == "final_logits":
+                final_logits_task = subnet_address
+
+        # Combine tasks and avoid double counting
+        if embed_task:
+            task_type = "embed+embed_backward" if embed_backward_task else "embed"
+            task_combinations.append((task_type, None, embed_task, embed_backward_task))
+
+        if final_logits_task:
+            task_combinations.append(("final_logits", None, final_logits_task, None))
+
+        for layer_idx, (forward_address, backward_address) in forward_backward_tasks.items():
+            if forward_address:
+                task_type = "forward" + ("+backward" if backward_address else "")
+                task_combinations.append((task_type, layer_idx, forward_address, backward_address))
+
+        worker_count = len(task_combinations)
+
+        for task_type, layer_idx, address_1, address_2 in task_combinations:
+            if address_2 is None:
+                worker_wallet = worker_wallets.pop(0)['private_key']
+            else:
+                worker_wallet = worker_wallets.pop(0)['private_key'] + '+' + worker_wallets.pop(0)['private_key']
+            command = [
+                'python', 'worker.py',
+                '--task_types', task_type,
+                '--subnet_addresses', address_1 if address_2 is None else f"{address_1}+{address_2}",
+                '--private_keys', worker_wallet,
+                '--rpc_url', args.rpc_url,
+                '--sot_url', args.sot_url,
+                '--pool_address', pool_address,
+                '--group', str(args.group),
+                '--local_storage_dir', args.local_storage_dir,
+                '--backend', args.backend,
+            ]
+
+            if layer_idx is not None:
+                command.extend(['--layer_idx', str(layer_idx)])
+            worker_name = f'worker_{task_type + "_" + str(layer_idx) if layer_idx is not None else task_type}'
+            log_file_path = os.path.join(LOG_DIR, f"{worker_name}.log")
+            log_file = open(log_file_path, 'w')
+            worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
+            processes[worker_name] = worker_process
+            logging.info(f"Started worker process for tasks {task_type} with command: {' '.join(command)}")
 
         try:
             # Wait for all workers to sync
-            if not wait_for_workers_to_sync(len(worker_wallets)):
+            if not wait_for_workers_to_sync(worker_count):
                 logging.error("Error: Not all workers synced within the timeout period.")
                 terminate_processes(processes.values())
                 exit(1)
