@@ -51,29 +51,11 @@ task_start_times_lock = threading.Lock()  # Lock for task_start_times
 last_handle_event_timestamp = None
 last_handle_event_timestamp_lock = threading.Lock()  # Lock for last_handle_event_timestamp
 
-@dataclass
-class ModelArgs:
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
-    n_kv_heads: Optional[int] = None
-    vocab_size: int = -1
-    multiple_of: int = 256
-    ffn_dim_multiplier: Optional[float] = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 500000
-    max_batch_size: int = 32
-    max_seq_len: int = 2048
-
-args = ModelArgs()
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
-    parser.add_argument('--task_types', type=str, required=True, nargs='+', choices=[
-        'embed', 'forward', 'backward', 'final_logits', 'embed_backward'
-    ], help="Types of tasks to process")
-    parser.add_argument('--subnet_addresses', type=str, required=True, nargs='+', help="Subnet contract addresses")
-    parser.add_argument('--private_keys', type=str, required=True, nargs='+', help="Private keys of the worker's Ethereum accounts")
+    parser.add_argument('--task_types', type=str, required=True, help="Types of tasks to process, separated by '+' if multiple")
+    parser.add_argument('--subnet_addresses', type=str, required=True, help="Subnet contract addresses")
+    parser.add_argument('--private_keys', type=str, required=True, help="Private keys of the worker's Ethereum accounts")
     parser.add_argument('--rpc_url', type=str, default='http://localhost:8545', help="URL of the Ethereum RPC node")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--pool_address', type=str, required=True, help="Pool contract address")
@@ -89,6 +71,16 @@ def parse_args():
     return parser.parse_args()
 
 args = parse_args()
+
+# Split combined task types if any
+task_types = args.task_types.split('+')
+args.task_types = task_types
+
+subnet_addresses = args.subnet_addresses.split('+')
+args.subnet_addresses = subnet_addresses
+
+private_keys = args.private_keys.split('+')
+args.private_keys = private_keys
 
 os.makedirs(args.local_storage_dir, exist_ok=True)
 
