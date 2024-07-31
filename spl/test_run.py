@@ -466,8 +466,7 @@ async def main():
             if address_2 is None:
                 worker_wallet = worker_wallets.pop(0)['private_key']
             else:
-                worker_wallet = worker_wallets.pop(0)['private_key']
-                    + '+' + worker_wallets.pop(0)['private_key']
+                worker_wallet = worker_wallets.pop(0)['private_key'] + '+' + worker_wallets.pop(0)['private_key']
             command = [
                 'python', 'worker.py',
                 '--task_types', task_type,
@@ -484,7 +483,7 @@ async def main():
             if layer_idx is not None:
                 command.extend(['--layer_idx', str(layer_idx)])
             worker_name = f'worker_{task_type + "_" + str(layer_idx) if layer_idx is not None else task_type}'
-            log_file_path = os.path.join(LOG_DIR, worker_name.log')
+            log_file_path = os.path.join(LOG_DIR, worker_name.log)
             log_file = open(log_file_path, 'w')
             worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
             processes[worker_name] = worker_process
