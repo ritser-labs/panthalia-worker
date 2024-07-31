@@ -471,7 +471,7 @@ async def reclaim_stakes():
             
             if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_times[contract_index]:
                 try:
-                    receipt = await async_transact_with_contract_function(web3, contract, 'resolveTask', args.private_keys[task_queue.current_contract_index], task_id)
+                    receipt = await async_transact_with_contract_function(web3, contract, 'resolveTask', args.private_keys[contract_index], task_id)
                     logging.info(f"resolveTask transaction receipt: {receipt}")
                     processed_tasks.remove((task_id, contract_index))
                 except Exception as e:
