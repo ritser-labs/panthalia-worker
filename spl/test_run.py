@@ -15,6 +15,7 @@ import shutil
 import asyncio
 import logging
 import traceback
+import psutil  # For memory and VRAM usage profiling
 
 # Define file paths and other configurations
 LOG_DIR = 'logs'
@@ -28,7 +29,7 @@ ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
-# Configure logging to file and stdout
+# Configure logging to file only, initially including stdout
 os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -185,10 +186,10 @@ def monitor_processes(stdscr, processes, task_counts):
 
     # Initialize colors
     curses.start_color()
-    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Yellow for forward/embed
-    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # Cyan for backward/embed_backward
-    curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Yellow color for the simulator text
-    curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)    # Cool color for the simulator text
+    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Green for active processes
+    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # Red for inactive processes
+    curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK) # Yellow for task counts (active)
+    curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)   # Cyan for task counts (total)
 
     max_name_length = max(len(name) for name in processes.keys()) + 14  # Increased padding by 3 more characters
     right_col_width = max_name_length + 2  # Additional padding
@@ -215,7 +216,6 @@ def monitor_processes(stdscr, processes, task_counts):
             stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
 
         # Order processes by name
-        # Order processes by name with reversed key arguments
         ordered_process_names = sorted(processes.keys(), key=lambda name: (
             name.startswith('worker_final_logits'),
             name.startswith('worker_forward'),
@@ -223,7 +223,6 @@ def monitor_processes(stdscr, processes, task_counts):
             not name.startswith('worker'),
             name
         ))
-
 
         for i, name in enumerate(ordered_process_names):
             process = processes[name]
@@ -292,6 +291,35 @@ def monitor_processes(stdscr, processes, task_counts):
     stdscr.keypad(False)  # Reset keypad mode before exiting
     curses.endwin()
     os._exit(0)  # Force exit the program
+
+# Function to log memory and VRAM usage
+def log_memory_vram_usage(processes, interval=5):
+    logger = logging.getLogger('memory_logger')
+    logger.setLevel(logging.INFO)
+    
+    # Remove any existing handlers to avoid duplicate logs
+    logger.handlers = []
+
+    # Add file handler if not present
+    file_handler = logging.FileHandler(LOG_FILE)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    while True:
+        for name, process in processes.items():
+            try:
+                if process.poll() is None:  # Process is running
+                    p = psutil.Process(process.pid)
+                    memory_info = p.memory_info()
+                    mem_usage = memory_info.rss / (1024 ** 2)  # Convert to MB
+                    # VRAM usage can be logged using appropriate libraries if needed.
+                    # This example logs only the main memory usage.
+                    logger.info(f"{name}: Memory Usage: {mem_usage:.2f} MB")
+            except psutil.NoSuchProcess:
+                logger.warning(f"Process {name} with PID {process.pid} no longer exists.")
+            except Exception as e:
+                logger.error(f"Error logging memory for {name}: {e}")
+        time.sleep(interval)
 
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
@@ -542,6 +570,11 @@ async def main():
             # Start the curses interface in a new thread
             curses_thread = threading.Thread(target=curses.wrapper, args=(monitor_processes, processes, task_counts))
             curses_thread.start()
+
+            # Start the memory and VRAM usage logger in a separate thread
+            mem_logger_thread = threading.Thread(target=log_memory_vram_usage, args=(processes,))
+            mem_logger_thread.daemon = True
+            mem_logger_thread.start()
 
             # Run the task tracking in an asyncio loop
             await track_tasks(web3, subnet_addresses, pool_contract, task_counts)
