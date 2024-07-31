@@ -655,11 +655,6 @@ def upload_tensor():
     tensor_state = torch.load(local_file_path)
     torch.save(tensor_state, os.path.join(temp_dir, filename))  # Use filename directly
 
-    # Update block version_number
-    with block_timestamps_lock:
-        block_timestamps[tensor_name] = update_version_number
-    save_block_timestamps(block_timestamps)
-
     logging.debug(f"Tensor {tensor_name} uploaded and saved with version_number {update_version_number}")
 
     return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'{BASE_URL}/data/state/temp/{filename}'}), 200
