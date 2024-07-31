@@ -865,6 +865,19 @@ async def initialize_contracts():
         max_dispute_time = await contract.functions.maxDisputeTime().call()
         max_dispute_times.append(max_dispute_time)
 
+async def get_all_task_ids(last_checked_task_ids):
+    all_task_ids = []
+    latest_task_ids = []
+    
+    for contract_index, contract in enumerate(contracts):
+        latest_task_id = await contract.functions.numTasks().call() - 1
+        latest_task_ids.append(latest_task_id)
+        
+        for task_id in range(last_checked_task_ids[contract_index] + 1, latest_task_id + 1):
+            all_task_ids.append((task_id, contract_index))
+    
+    return all_task_ids, latest_task_ids
+
 async def main():
     logging.info("Starting main process")
     torch.set_default_device(device)
@@ -898,15 +911,17 @@ async def main():
             last_loop_time = time.time()
             await deposit_stake()
             if not reported:
-                for contract_index, tensor_name in enumerate(relevant_tensors):
+                duplicate_relevant_tensors = []
+                for contract_index, task_type in enumerate(args.task_types):
+                    for tensor_name in get_relevant_tensors_for_task(task_type):
+                        duplicate_relevant_tensors.append((contract_index, tensor_name))
+                for contract_index, tensor_name in duplicate_relevant_tensors:
                     await initialize_tensor(tensor_name)
                     await report_sync_status('synced', contract_index)
                 reported = True
 
-            latest_task_ids = [await contract.functions.numTasks().call() - 1 for contract in contracts]
-
             # Gather all task fetching coroutines
-            all_task_ids = [(task_id, idx) for idx, (last_checked_task_id, latest_task_id) in enumerate(zip(last_checked_task_ids, latest_task_ids)) for task_id in range(last_checked_task_id + 1, latest_task_id + 1)]
+            all_task_ids, latest_task_ids = await get_all_task_ids(last_checked_task_ids)
             all_task_ids.extend([(task_id, contract_index) for task_id, contract_index in pending_tasks])
             fetch_tasks = [fetch_task(task_id, contract_index) for task_id, contract_index in all_task_ids]
             fetched_tasks = await asyncio.gather(*fetch_tasks)
