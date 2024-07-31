@@ -214,8 +214,19 @@ def monitor_processes(stdscr, processes, task_counts):
         for y in range(height):
             stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
 
-        # Display processes on the right side
-        for i, (name, process) in enumerate(processes.items()):
+        # Order processes by name
+        # Order processes by name with reversed key arguments
+        ordered_process_names = sorted(processes.keys(), key=lambda name: (
+            name.startswith('worker_final_logits'),
+            name.startswith('worker_forward'),
+            name.startswith('worker_embed'),
+            not name.startswith('worker'),
+            name
+        ))
+
+
+        for i, name in enumerate(ordered_process_names):
+            process = processes[name]
             is_selected = (i == selected_process)
             status = process.poll() is None
             color = curses.color_pair(1) if status else curses.color_pair(2)
