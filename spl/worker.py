@@ -440,7 +440,7 @@ async def process_tasks():
 
     processed_tasks.add((task_id, contract_index))
 
-    logging.info(f"Processed task {task_id} successfully")
+    logging.info(f"Processed task {task_id} for task type {task_type} successfully")
 
     # Log the time taken to process the task
     with task_start_times_lock:
