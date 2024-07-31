@@ -279,8 +279,10 @@ def resume_gradient_updates():
     gradient_update_paused = False
 
 async def deposit_stake():
-    for private_key, group, subnet_id in zip(args.private_keys, args.groups, range(len(contracts))):
-        await deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, group, worker_addresses[subnet_id], stake_amount, args.max_stakes)
+    for private_key, group, subnet_id, stake_amount, token_contract, pool_contract, worker_address in zip(
+        args.private_keys, args.groups, subnet_ids, stake_amounts, token_contracts, pool_contracts, worker_addresses
+    ):
+        await deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, group, worker_address, stake_amount, args.max_stakes)
 
 def handle_event(task_id, task, time_invoked, contract_index):
     global last_handle_event_timestamp
@@ -457,24 +459,25 @@ async def process_tasks():
         concurrent_tasks_counter -= 1
 
 async def reclaim_stakes():
-    max_dispute_time = await contract.functions.maxDisputeTime().call()
     while True:
-        for task_id in list(processed_tasks):
-            task_tuple = await contract.functions.getTask(task_id).call()
-            task = Task(*task_tuple)
-            task_status = task.status
-            time_status_changed = task.timeStatusChanged
-            blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
-            time_elapsed = blockchain_timestamp - time_status_changed
-            
-            if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_time:
-                try:
-                    receipt = await async_transact_with_contract_function(web3, contract, 'resolveTask', args.private_keys[task_queue.current_contract_index], task_id)
-                    logging.info(f"resolveTask transaction receipt: {receipt}")
-                    processed_tasks.remove(task_id)
-                except Exception as e:
-                    logging.error(f"Error resolving task {task_id}: {e}")
-                    raise
+        for contract, token_contract in zip(contracts, token_contracts):
+            max_dispute_time = await contract.functions.maxDisputeTime().call()
+            for task_id in list(processed_tasks):
+                task_tuple = await contract.functions.getTask(task_id).call()
+                task = Task(*task_tuple)
+                task_status = task.status
+                time_status_changed = task.timeStatusChanged
+                blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
+                time_elapsed = blockchain_timestamp - time_status_changed
+                
+                if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_time:
+                    try:
+                        receipt = await async_transact_with_contract_function(web3, contract, 'resolveTask', args.private_keys[task_queue.current_contract_index], task_id)
+                        logging.info(f"resolveTask transaction receipt: {receipt}")
+                        processed_tasks.remove(task_id)
+                    except Exception as e:
+                        logging.error(f"Error resolving task {task_id}: {e}")
+                        raise
 
         await asyncio.sleep(2)
 
@@ -716,12 +719,12 @@ async def upload_final_logits_results():
         'version_number': version_number
     }
 
-async def report_sync_status(status):
+async def report_sync_status(status, contract_index):
     try:
         if hasattr(args, 'layer_idx') and args.layer_idx is not None:
-            url = f"{args.sync_url}/report_sync?task_type={args.task_types[task_queue.current_contract_index]}&layer_idx={args.layer_idx}&status={status}"
+            url = f"{args.sync_url}/report_sync?task_type={args.task_types[contract_index]}&layer_idx={args.layer_idx}&status={status}"
         else:
-            url = f"{args.sync_url}/report_sync?task_type={args.task_types[task_queue.current_contract_index]}&status={status}"
+            url = f"{args.sync_url}/report_sync?task_type={args.task_types[contract_index]}&status={status}"
         response = requests.get(url)
         if response.status_code == 200:
             logging.info(f"Reported sync status: {status}")
@@ -834,13 +837,30 @@ async def fetch_task(task_id, contract_index):
     return task_id, task
 
 async def initialize_contracts():
-    global token_address, token_contract, stake_amount, subnet_id
-    token_address = await contracts[0].functions.token().call()
-    token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+    global token_addresses, token_contracts, stake_amounts, subnet_ids, pool_contracts
 
-    stake_amount = await contracts[0].functions.solverStakeAmount().call()
+    # Initialize lists to store details for each contract
+    token_addresses = []
+    token_contracts = []
+    stake_amounts = []
+    subnet_ids = []
+    pool_contracts = []
 
-    subnet_id = await contracts[0].functions.subnetId().call()
+    # Loop through each contract to set up individual details
+    for contract in contracts:
+        token_address = await contract.functions.token().call()
+        token_addresses.append(token_address)
+
+        token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+        token_contracts.append(token_contract)
+
+        stake_amount = await contract.functions.solverStakeAmount().call()
+        stake_amounts.append(stake_amount)
+
+        subnet_id = await contract.functions.subnetId().call()
+        subnet_ids.append(subnet_id)
+
+        pool_contracts.append(pool_contract)  # Assuming the pool_contract remains the same
 
 async def main():
     logging.info("Starting main process")
@@ -850,7 +870,7 @@ async def main():
     await initialize_contracts()
 
     # Approve tokens once at the start
-    for private_key in args.private_keys:
+    for private_key, token_contract in zip(args.private_keys, token_contracts):
         await approve_token_once(web3, token_contract, private_key, args.pool_address, 2**256 - 1)
 
     logging.info("Starting tensor synchronization...")
@@ -872,16 +892,16 @@ async def main():
             last_loop_time = time.time()
             await deposit_stake()
             if not reported:
-                for tensor_name in relevant_tensors:
+                for contract_index, tensor_name in enumerate(relevant_tensors):
                     await initialize_tensor(tensor_name)
-                await report_sync_status('synced')
+                    await report_sync_status('synced', contract_index)
                 reported = True
 
             latest_task_ids = [await contract.functions.numTasks().call() - 1 for contract in contracts]
 
             # Gather all task fetching coroutines
             all_task_ids = [(task_id, idx) for idx, (last_checked_task_id, latest_task_id) in enumerate(zip(last_checked_task_ids, latest_task_ids)) for task_id in range(last_checked_task_id + 1, latest_task_id + 1)]
-            all_task_ids.extend([(task_id, task_info['contract_index']) for task_id, task_info in pending_tasks])
+            all_task_ids.extend([(task_id, contract_index) for task_id, contract_index in pending_tasks])
             fetch_tasks = [fetch_task(task_id, contract_index) for task_id, contract_index in all_task_ids]
             fetched_tasks = await asyncio.gather(*fetch_tasks)
 
@@ -894,7 +914,7 @@ async def main():
                 if task.solver == worker_addresses[contract_index] and task.status == TaskStatus.SolverSelected.value:
                     executor.submit(handle_event, task_id, task, time.time(), contract_index)
                 elif task.status < TaskStatus.SolverSelected.value:
-                    pending_tasks.add((task_id, {'contract_index': contract_index}))
+                    pending_tasks.add((task_id, contract_index))  # Use tuple instead of dict
             
             # Update the last checked task ID
             last_checked_task_ids = latest_task_ids
