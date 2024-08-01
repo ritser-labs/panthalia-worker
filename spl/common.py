@@ -1,7 +1,7 @@
 import torch
 import os
 from tokenizer import Tokenizer
-from model import ModelArgs
+from model import ModelArgs, Transformer
 import json
 import logging
 import torch.distributed as dist
@@ -44,6 +44,8 @@ batch_size = 16
 
 BUFFER_SIZE = 1000  # Size of the buffer to shuffle data
 
+ACCUMULATION_STEPS = 1
+
 TENSOR_VERSION_INTERVAL = 30
 
 MAX_SOLVER_SELECTION_DURATION = 300
@@ -51,6 +53,10 @@ MAX_SOLVER_SELECTION_DURATION = 300
 MIN_REMAINING_TIME_SECONDS = 3
 
 SLEEP_TIME = 1
+
+TENSOR_NAME = 'model'
+
+Model = Transformer
 
 # Define Enums
 class TaskStatus(Enum):
@@ -408,7 +414,7 @@ def get_learning_hyperparameters(current_iteration):
         'epsilon': 1e-8,
         'weight_decay': 0.01,
         't': t,  # Add the current iteration as 't'
-        'accumulation_steps': 1  # Set the accumulation steps to 1
+        'accumulation_steps': ACCUMULATION_STEPS
     }
 
 # Global state tracking variable
