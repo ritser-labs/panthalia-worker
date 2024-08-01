@@ -185,37 +185,21 @@ def monitor_processes(stdscr, processes, task_counts):
 
     # Initialize colors
     curses.start_color()
-    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Yellow for forward/embed
-    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)    # Cyan for backward/embed_backward
-    curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Yellow color for the simulator text
-    curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)    # Cool color for the simulator text
+    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
+    curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
+    curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)
 
-    max_name_length = max(len(name) for name in processes.keys()) + 14  # Increased padding by 3 more characters
-    right_col_width = max_name_length + 2  # Additional padding
+    max_name_length = max(len(name) for name in processes.keys()) + 14
+    right_col_width = max_name_length + 2
 
     def draw_screen():
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        split_point = width - right_col_width  # Right column width based on max name length
+        split_point = width - right_col_width
 
-        # Display logs on the left side
-        process_name = list(processes.keys())[selected_process]
-        log_file = os.path.join('logs', f"{process_name}.log")
-        log_lines = []
-
-        if os.path.exists(log_file):
-            with open(log_file, 'r') as f:
-                log_lines.extend(f.readlines())
-
-        for i, line in enumerate(log_lines[-(height - 2):]):  # Leave space for instructions
-            stdscr.addstr(i, 0, line[:split_point - 2])
-
-        # Draw the separator line after all left side content is drawn
-        for y in range(height):
-            stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
 
         # Order processes by name
-        # Order processes by name with reversed key arguments
         ordered_process_names = sorted(processes.keys(), key=lambda name: (
             name.startswith('worker_final_logits'),
             name.startswith('worker_forward'),
@@ -223,7 +207,22 @@ def monitor_processes(stdscr, processes, task_counts):
             not name.startswith('worker'),
             name
         ))
+        
+        # Display logs on the left side
+        process_name = ordered_process_names[selected_process]
+        log_file = os.path.join('logs', f"{process_name}.log")
+        log_lines = []
 
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as f:
+                log_lines.extend(f.readlines())
+
+        for i, line in enumerate(log_lines[-(height - 2):]):
+            stdscr.addstr(i, 0, line[:split_point - 2])
+
+        # Draw the separator line
+        for y in range(height):
+            stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
 
         for i, name in enumerate(ordered_process_names):
             process = processes[name]
@@ -232,7 +231,6 @@ def monitor_processes(stdscr, processes, task_counts):
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
 
-            # Determine the task type and display accordingly
             if name == 'worker_final_logits':
                 task_count = task_counts.get('final_logits', (0, 0))
                 stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count[0]}/{task_count[1]})", color)
@@ -261,7 +259,6 @@ def monitor_processes(stdscr, processes, task_counts):
                 stdscr.addstr(i, split_point, f"{indicator} {name}", color)
 
         stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
-        # Add the "PANTHALIA SIMULATOR V0" text at the bottom of the right column
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
         stdscr.refresh()
 
@@ -281,17 +278,17 @@ def monitor_processes(stdscr, processes, task_counts):
             terminate_processes(list(processes.values()))
             break
 
-        # Handle screen resize with a slight delay to prevent flashing
         if last_resize and time.time() - last_resize > 0.1:
             draw_screen()
             last_resize = None
 
         draw_screen()
-        time.sleep(0.05)  # Frequent updates
+        time.sleep(0.05)
 
-    stdscr.keypad(False)  # Reset keypad mode before exiting
+    stdscr.keypad(False)
     curses.endwin()
     os._exit(0)  # Force exit the program
+
 
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
