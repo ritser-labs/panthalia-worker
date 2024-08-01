@@ -325,6 +325,12 @@ def handle_event(task_id, task, time_invoked, contract_index):
         task_start_times[task_id] = time.time()
     asyncio.run(process_tasks())
 
+def tensor_memory_size(tensor):
+    # Calculate size in bytes and convert to megabytes
+    size_in_bytes = tensor.element_size() * tensor.numel()
+    size_in_mb = size_in_bytes / (1024 * 1024)
+    return size_in_mb
+
 async def process_tasks():
     global task_queue, concurrent_tasks_counter
 
@@ -366,6 +372,7 @@ async def process_tasks():
         batch = download_json(task_params['batch_url'])
         download_end_time = time.time()
         logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
+        logging.info(f"Batch tensor memory size: {tensor_memory_size(batch):.2f} MB")
 
     inputs = None
     if 'inputs_url' in task_params:
@@ -374,6 +381,7 @@ async def process_tasks():
         inputs = download_file(task_params['inputs_url'])
         download_end_time = time.time()
         logging.debug(f"Downloading inputs took {download_end_time - download_start_time:.2f} seconds")
+        logging.info(f"Inputs tensor memory size: {tensor_memory_size(inputs):.2f} MB")
 
     error = None
     if 'error_url' in task_params:
@@ -382,6 +390,7 @@ async def process_tasks():
         error = download_file(task_params['error_url'])
         download_end_time = time.time()
         logging.debug(f"Downloading error took {download_end_time - download_start_time:.2f} seconds")
+        logging.info(f"Error tensor memory size: {tensor_memory_size(error):.2f} MB")
 
     targets = None
     if 'targets_url' in task_params:
@@ -390,6 +399,7 @@ async def process_tasks():
         targets = download_json(task_params['targets_url'])
         download_end_time = time.time()
         logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
+        logging.info(f"Targets tensor memory size: {tensor_memory_size(targets):.2f} MB")
 
     pause_gradient_updates()
 
@@ -403,6 +413,7 @@ async def process_tasks():
         embed_task(batch, accumulation_steps)
         embed_end_time = time.time()
         logging.debug(f"embed_task() took {embed_end_time - embed_start_time:.2f} seconds")
+        logging.info(f"Embed outputs tensor memory size: {tensor_memory_size(tensors['outputs']):.2f} MB")
         result['result_url'] = await upload_tensor(tensors['outputs'], 'embed_outputs')
     elif task_type == 'forward':
         logging.debug(f"Executing forward task for layer {layer_idx}")
@@ -410,6 +421,7 @@ async def process_tasks():
         forward_task(layer_idx, inputs, accumulation_steps)
         forward_end_time = time.time()
         logging.debug(f"forward_task() took {forward_end_time - forward_start_time:.2f} seconds")
+        logging.info(f"Forward outputs tensor memory size: {tensor_memory_size(tensors['outputs']):.2f} MB")
         result['result_url'] = await upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')
     elif task_type == 'backward':
         logging.debug(f"Executing backward task for layer {layer_idx}")
@@ -417,6 +429,8 @@ async def process_tasks():
         backward_task(layer_idx, error, inputs, accumulation_steps)
         backward_end_time = time.time()
         logging.debug(f"backward_task() took {backward_end_time - backward_start_time:.2f} seconds")
+        logging.info(f"Backward error output tensor memory size: {tensor_memory_size(tensors['error_output']):.2f} MB")
+        logging.info(f"Backward updates tensor memory size: {tensor_memory_size(tensors['updates']):.2f} MB")
         result = await upload_tensors_and_grads(tensors['error_output'], tensors['updates'], layer_idx)
     elif task_type == 'final_logits':
         logging.debug("Executing final_logits task")
@@ -424,6 +438,8 @@ async def process_tasks():
         final_logits_task(inputs, targets, accumulation_steps)
         final_logits_end_time = time.time()
         logging.debug(f"final_logits_task() took {final_logits_end_time - final_logits_start_time:.2f} seconds")
+        logging.info(f"Final logits error output tensor memory size: {tensor_memory_size(tensors['error_output']):.2f} MB")
+        logging.info(f"Final logits updates tensor memory size: {tensor_memory_size(tensors['updates']):.2f} MB")
         result = await upload_final_logits_results()
     elif task_type == 'embed_backward':
         logging.debug("Executing embed_backward task")
@@ -431,6 +447,7 @@ async def process_tasks():
         embed_backward_task(error, batch, accumulation_steps)
         embed_backward_end_time = time.time()
         logging.debug(f"embed_backward_task() took {embed_backward_end_time - embed_backward_start_time:.2f} seconds")
+        logging.info(f"Embed backward updates tensor memory size: {tensor_memory_size(tensors['updates']):.2f} MB")
         result = await upload_tensors_and_grads(None, tensors['updates'], -2)
     
     submit_solution_start_time = time.time()
@@ -457,6 +474,7 @@ async def process_tasks():
     with concurrent_tasks_counter_lock:
         # Decrease the counter when a task is completed
         concurrent_tasks_counter -= 1
+
 
 async def reclaim_stakes():
     while True:
