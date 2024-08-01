@@ -395,19 +395,19 @@ async def process_tasks():
 
     layer_idx = args.layer_idx
     result = {}
-    accumulation_steps = task_params.get('accumulation_steps', 1)
+    accumulation_steps = task_params['accumulation_steps']
     
     if task_type == 'embed':
         logging.debug("Executing embed task")
         embed_start_time = time.time()
-        embed_task(batch)
+        embed_task(batch, accumulation_steps)
         embed_end_time = time.time()
         logging.debug(f"embed_task() took {embed_end_time - embed_start_time:.2f} seconds")
         result['result_url'] = await upload_tensor(tensors['outputs'], 'embed_outputs')
     elif task_type == 'forward':
         logging.debug(f"Executing forward task for layer {layer_idx}")
         forward_start_time = time.time()
-        forward_task(layer_idx, inputs)
+        forward_task(layer_idx, inputs, accumulation_steps)
         forward_end_time = time.time()
         logging.debug(f"forward_task() took {forward_end_time - forward_start_time:.2f} seconds")
         result['result_url'] = await upload_tensor(tensors['outputs'], f'layer_{layer_idx}_outputs')
@@ -518,14 +518,24 @@ async def upload_tensors_and_grads(error_output, grads, layer_idx):
 
     return result
 
-def embed_task(batch):
+def embed_task(batch, accumulation_steps):
     global embedding
 
-    with torch.no_grad():
-        inputs = embedding(batch)
-    tensors['outputs'] = inputs
+    microbatch_size = batch.size(0) // accumulation_steps
+    outputs_list = []
+    for i in range(accumulation_steps):
+        microbatch = batch[i * microbatch_size:(i + 1) * microbatch_size].to(device)
+        logging
+        with torch.no_grad():
+            outputs = embedding(microbatch)
+        outputs_list.append(outputs)
 
-def forward_task(layer_idx, inputs):
+    # Concatenate all microbatches to form the final output
+    tensors['outputs'] = torch.cat(outputs_list, dim=0)
+    logging.info(5)
+
+
+def forward_task(layer_idx, inputs, accumulation_steps):
     global freqs_cis, mask, tensors, transformer_layer
 
     logging.debug(f"Entering forward_task for layer {layer_idx} with inputs shape {inputs.shape}")
@@ -540,19 +550,40 @@ def forward_task(layer_idx, inputs):
     # Update mask dimensions based on input sequence length
     mask_slice = mask[:seqlen, :seqlen]
 
-    bsz = inputs.shape[0]
-    if transformer_layer.attention.cache_k is not None and transformer_layer.attention.cache_k.shape[0] != bsz:
-        logging.debug(f"Resizing cache_k for layer {layer_idx}")
-        transformer_layer.attention.cache_k = torch.zeros(bsz, transformer_layer.attention.cache_k.shape[1], transformer_layer.attention.cache_k.shape[2], transformer_layer.attention.cache_k.shape[3], device=device)
-    if transformer_layer.attention.cache_v is not None and transformer_layer.attention.cache_v.shape[0] != bsz:
-        logging.debug(f"Resizing cache_v for layer {layer_idx}")
-        transformer_layer.attention.cache_v = torch.zeros(bsz, transformer_layer.attention.cache_v.shape[1], transformer_layer.attention.cache_v.shape[2], transformer_layer.attention.cache_v.shape[3], device=device)
+    microbatch_size = inputs.size(0) // accumulation_steps
 
-    logging.debug(f"Performing forward pass for layer {layer_idx}")
-    with torch.no_grad():
-        outputs = transformer_layer(inputs.to(device), start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
-    tensors['outputs'] = outputs
+    outputs_list = []
+    for i in range(accumulation_steps):
+        microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size].to(device)
+        
+        bsz = microbatch_inputs.shape[0]
+        if transformer_layer.attention.cache_k is not None and transformer_layer.attention.cache_k.shape[0] != bsz:
+            logging.debug(f"Resizing cache_k for layer {layer_idx}")
+            transformer_layer.attention.cache_k = torch.zeros(
+                bsz,
+                transformer_layer.attention.cache_k.shape[1],
+                transformer_layer.attention.cache_k.shape[2],
+                transformer_layer.attention.cache_k.shape[3],
+                device=device
+            )
+        if transformer_layer.attention.cache_v is not None and transformer_layer.attention.cache_v.shape[0] != bsz:
+            logging.debug(f"Resizing cache_v for layer {layer_idx}")
+            transformer_layer.attention.cache_v = torch.zeros(
+                bsz,
+                transformer_layer.attention.cache_v.shape[1],
+                transformer_layer.attention.cache_v.shape[2],
+                transformer_layer.attention.cache_v.shape[3],
+                device=device
+            )
+
+        with torch.no_grad():
+            outputs = transformer_layer(microbatch_inputs, start_pos, freqs_cis_slice.to(device), mask_slice.to(device))
+        outputs_list.append(outputs)
+
+    # Concatenate all microbatches to form the final output
+    tensors['outputs'] = torch.cat(outputs_list, dim=0)
     logging.debug(f"Forward pass completed for layer {layer_idx}")
+
 
 def backward_task(layer_idx, error, inputs, accumulation_steps):
     global freqs_cis, mask, tensors, transformer_layer

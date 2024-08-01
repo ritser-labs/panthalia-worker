@@ -250,6 +250,7 @@ class Master:
         current_version_number = int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
         
         model_params = await self.get_latest_model_params(current_version_number)
+        learning_params = get_learning_hyperparameters(iteration_number)
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
         # Track the backlog at the embed stage
@@ -261,7 +262,7 @@ class Master:
         logging.info(f"Iteration {iteration_number}: Starting embed forward task")
         self.stage_backlog['embed'] += 1  # Increment backlog count for the embed stage
         try:
-            embed_result = await self.handle_embed_forward(model_params, batch_url, current_version_number, iteration_number)
+            embed_result = await self.handle_embed_forward(learning_params, batch_url, current_version_number, iteration_number)
         finally:
             async with self.condition:
                 self.stage_backlog['embed'] -= 1  # Decrement backlog count
@@ -278,7 +279,7 @@ class Master:
             logging.info(f"Iteration {iteration_number}: Starting forward task for layer {layer_idx}")
             self.stage_backlog['forward'][layer_idx] = self.stage_backlog['forward'].get(layer_idx, 0) + 1
             try:
-                layer_result = await self.handle_layer_forward(layer_idx, layer_inputs_url[-1], model_params, current_version_number, iteration_number)
+                layer_result = await self.handle_layer_forward(layer_idx, layer_inputs_url[-1], learning_params, current_version_number, iteration_number)
             finally:
                 async with self.condition:
                     self.stage_backlog['forward'][layer_idx] -= 1
@@ -293,7 +294,7 @@ class Master:
         logging.info(f"Iteration {iteration_number}: Starting final_logits task")
         self.stage_backlog['final_logits'] += 1
         try:
-            final_logits_result = await self.handle_final_logits(layer_inputs_url[-1], targets_url, current_version_number, iteration_number)
+            final_logits_result = await self.handle_final_logits(learning_params, layer_inputs_url[-1], targets_url, current_version_number, iteration_number)
         finally:
             async with self.condition:
                 self.stage_backlog['final_logits'] -= 1
@@ -314,7 +315,7 @@ class Master:
             logging.info(f"Iteration {iteration_number}: Starting backward task for layer {layer_idx}")
             self.stage_backlog['backward'][layer_idx] = self.stage_backlog['backward'].get(layer_idx, 0) + 1
             try:
-                layer_result = await self.handle_layer_backward(layer_idx, error_url, layer_inputs_url[layer_idx], current_version_number, iteration_number)
+                layer_result = await self.handle_layer_backward(learning_params, layer_idx, error_url, layer_inputs_url[layer_idx], current_version_number, iteration_number)
             finally:
                 async with self.condition:
                     self.stage_backlog['backward'][layer_idx] -= 1
@@ -329,7 +330,7 @@ class Master:
         logging.info(f"Iteration {iteration_number}: Starting embed backward task")
         self.stage_backlog['embed_backward'] += 1
         try:
-            await self.handle_embed_backward(error_url, batch_url, current_version_number, iteration_number)
+            await self.handle_embed_backward(learning_params, error_url, batch_url, current_version_number, iteration_number)
         finally:
             async with self.condition:
                 self.stage_backlog['embed_backward'] -= 1
@@ -394,45 +395,52 @@ class Master:
         }
         return message
 
-    async def handle_embed_forward(self, model_params, batch_url, current_version_number, iteration_number):
-        task_params = {'batch_url': batch_url, 'model_params': model_params, 'version_number': current_version_number}
+    async def handle_embed_forward(self, learning_params, batch_url, current_version_number, iteration_number):
+        task_params = {'batch_url': batch_url, 'accumulation_steps': learning_params['accumulation_steps'], 'version_number': current_version_number}
         task_id = await self.submit_task('embed', task_params, iteration_number)
         result = await self.wait_for_result('embed', task_id, iteration_number)
         result['batch_url'] = batch_url
         return result
 
-    async def handle_layer_forward(self, layer_idx, inputs_url, model_params, current_version_number, iteration_number):
+    async def handle_layer_forward(self, layer_idx, inputs_url, learning_params, current_version_number, iteration_number):
         task_type = f'forward_layer_{layer_idx}'
-        task_params = {'layer_idx': layer_idx, 'inputs_url': inputs_url, 'model_params': model_params, 'version_number': current_version_number}
+        task_params = {'layer_idx': layer_idx, 'inputs_url': inputs_url, 'accumulation_steps': learning_params['accumulation_steps'], 'version_number': current_version_number}
         task_id = await self.submit_task(task_type, task_params, iteration_number)
         result = await self.wait_for_result(task_type, task_id, iteration_number)
         return result
 
-    async def handle_final_logits(self, inputs_url, targets_url, current_version_number, iteration_number):
-        task_params = {'inputs_url': inputs_url, 'targets_url': targets_url, 'version_number': current_version_number}
+    async def handle_final_logits(self, learning_params, inputs_url, targets_url, current_version_number, iteration_number):
+        task_params = {
+            'inputs_url': inputs_url,
+            'targets_url': targets_url,
+            'version_number': current_version_number,
+            'accumulation_steps': learning_params['accumulation_steps']
+        }
         task_id = await self.submit_task('final_logits', task_params, iteration_number)
         result = await self.wait_for_result('final_logits', task_id, iteration_number)
         await self.update_sot_all('final_logits', result, iteration_number=iteration_number)
         return result
 
-    async def handle_layer_backward(self, layer_idx, error_url, inputs_url, current_version_number, iteration_number):
+    async def handle_layer_backward(self, learning_params, layer_idx, error_url, inputs_url, current_version_number, iteration_number):
         task_type = f'backward_layer_{layer_idx}'
         task_params = {
             'layer_idx': layer_idx,
             'error_url': error_url,
             'inputs_url': inputs_url,
-            'version_number': current_version_number
+            'version_number': current_version_number,
+            'accumulation_steps': learning_params['accumulation_steps']
         }
         task_id = await self.submit_task(task_type, task_params, iteration_number)
         result = await self.wait_for_result(task_type, task_id, iteration_number)
         await self.update_sot_all(task_type, result, layer_idx, iteration_number)
         return result
 
-    async def handle_embed_backward(self, error_url, batch_url, current_version_number, iteration_number):
+    async def handle_embed_backward(self, learning_params, error_url, batch_url, current_version_number, iteration_number):
         task_params = {
             'error_url': error_url,
             'batch_url': batch_url,
-            'version_number': current_version_number
+            'version_number': current_version_number,
+            'accumulation_steps': learning_params['accumulation_steps']
         }
         task_id = await self.submit_task('embed_backward', task_params, iteration_number)
         result = await self.wait_for_result('embed_backward', task_id, iteration_number)
@@ -446,8 +454,7 @@ class Master:
                 return result
             await asyncio.sleep(5)
 
-    async def update_sot(self, tensor_name, result):
-        learning_params = get_learning_hyperparameters(self.iteration)
+    async def update_sot(self, learning_params, tensor_name, result):
         params = {
             'result_url': result['grads_url'],
             'tensor_name': tensor_name,
@@ -467,14 +474,14 @@ class Master:
                 else:
                     logging.info(f"Updated SOT for {tensor_name} with result: {result}")
 
-    async def update_sot_all(self, task_type, result, layer_idx=None, iteration_number=None):
+    async def update_sot_all(self, learning_params, task_type, result, layer_idx=None, iteration_number=None):
         if task_type == 'embed_backward':
             tensor_name = 'embed'
         elif task_type == 'final_logits':
             tensor_name = 'final_logits'
         else:
             tensor_name = f'layer_{layer_idx}'
-        await self.update_sot(tensor_name, result)
+        await self.update_sot(learning_params, tensor_name, result)
 
     async def get_batch_and_targets_url(self):
         wallet = self.get_next_wallet()
