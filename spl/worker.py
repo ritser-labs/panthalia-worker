@@ -431,7 +431,7 @@ def model_task(inputs, targets, accumulation_steps):
             logging.debug(f"Batch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
 
 
-            loss.backward()
+            loss.backward(retain_graph=True)
             
             for j, param in enumerate(model.parameters()):
                     grads_accumulated[j] += param.grad
