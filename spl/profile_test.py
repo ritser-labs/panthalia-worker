@@ -8,7 +8,7 @@ from common import initialize_distributed_environment, model_args
 import os
 
 # Assuming we have the following classes and functions already defined
-from model import TransformerBlock, precompute_freqs_cis, RMSNorm
+from model import Transformer, precompute_freqs_cis, RMSNorm
 from device import device
 
 args = model_args
@@ -28,23 +28,15 @@ initialize_model_parallel(model_parallel_size_=1)
 
 # Initialize the TransformerBlock
 layer_idx = 0  # Specify which layer of the Transformer you want to test
-transformer_block = TransformerBlock(layer_idx, args).to(device)
-
-# Precompute frequency sinusoidal embeddings and attention mask
-freqs_cis = precompute_freqs_cis(args.dim // args.n_heads, args.max_seq_len * 2, args.rope_theta).to(device)
-mask = torch.triu(torch.full((seq_len, seq_len), float('-inf')), diagonal=1).to(device)
-
-# Convert input_ids to input embeddings (assuming that input embeddings are already computed)
-# For simplicity, using random embeddings; replace with actual input embeddings
-input_embeddings = torch.randn(batch_size, seq_len, args.dim).to(device)
+transformer = Transformer(model_args).to(device)
 
 # Use torch.compile with torchdynamo for optimization
-transformer_block = torch.compile(transformer_block)
+transformer = torch.compile(transformer)
 
 # Define the forward function for the transformer block task
-def transformer_block_task(inputs, start_pos=0):
+def transformer_task(inputs, start_pos=0):
     with torch.no_grad():
-        outputs = transformer_block(inputs, start_pos, freqs_cis[:seq_len], mask)
+        outputs = transformer(inputs, start_pos=start_pos)
     return outputs
 
 # Profile the transformer block forward pass
@@ -55,7 +47,7 @@ with profile(
     with_stack=True,
 ) as prof:
     with record_function("transformer_block_forward"):
-        outputs = torch._dynamo.explain(transformer_block_task)(input_embeddings)
+        outputs = torch._dynamo.explain(transformer_task)(input_ids)
         
     # Synchronize CUDA operations before printing the profiling results
     torch.cuda.synchronize()
