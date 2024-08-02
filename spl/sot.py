@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 import json
 import logging
@@ -71,6 +72,8 @@ master_public_keys = []
 
 # Dictionary to store used nonces
 used_nonces = {}
+
+num_of_updates_dict = defaultdict(int)
 
 def initialize_distributed_environment_and_globals():
     logging.info("Initializing distributed environment")
@@ -435,8 +438,8 @@ def update_state():
         else:
             raise ValueError(f"Current state file not found for {tensor_name}")
 
-        num_of_updates = block_timestamps.get(f'{tensor_name}_updates_{future_version_number}', 0) + 1
-        block_timestamps[f'{tensor_name}_updates_{future_version_number}'] = num_of_updates
+        num_of_updates = num_of_updates_dict.get(f'{tensor_name}_updates_{future_version_number}', 0) + 1
+        num_of_updates_dict[f'{tensor_name}_updates_{future_version_number}'] = num_of_updates
         averaged_grads = accumulated_grads / num_of_updates
         #future_tensor = accumulated_grads / num_of_updates + current_tensor
         future_tensor, m_update, v_update = apply_adamw(
