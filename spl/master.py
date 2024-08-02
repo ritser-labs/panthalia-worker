@@ -248,9 +248,6 @@ class Master:
         # Update the plot explicitly
         self.update_plot()
 
-        # Adjust the submission rate based on backlog
-        self.adjust_submission_rate()
-
     async def run_main(self):
         logging.info("Starting main process")
         await self.approve_tokens_at_start()
@@ -291,7 +288,7 @@ class Master:
         }
         task_id = await self.submit_task(TENSOR_NAME, task_params, iteration_number)
         result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
-        await self.update_sot_all(TENSOR_NAME, result, iteration_number=iteration_number)
+        await self.update_sot(learning_params, TENSOR_NAME, result)
         return result
 
     async def wait_for_result(self, task_type, task_id, iteration_number):
@@ -321,13 +318,7 @@ class Master:
                 else:
                     logging.info(f"Updated SOT for {tensor_name} with result: {result}")
 
-    async def update_sot_all(self, learning_params, task_type, result, layer_idx=None, iteration_number=None):
-        if task_type == 'embed_backward':
-            tensor_name = 'embed'
-        elif task_type == 'final_logits':
-            tensor_name = 'final_logits'
-        else:
-            tensor_name = f'layer_{layer_idx}'
+    async def update_sot_all(self, tensor_name, learning_params, task_type, result, layer_idx=None, iteration_number=None):
         await self.update_sot(learning_params, tensor_name, result)
 
     async def get_batch_and_targets_url(self):
