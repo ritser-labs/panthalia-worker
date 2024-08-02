@@ -443,7 +443,7 @@ def model_task(inputs, targets, accumulation_steps):
             loss = F.cross_entropy(reshaped_logits, reshaped_targets, ignore_index=tokenizer.pad_id)
             total_loss += loss.item()
 
-            logging.debug(f"Batch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
+            logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
 
             # Backward pass and accumulate gradients
             loss.backward()
@@ -467,10 +467,10 @@ def model_task(inputs, targets, accumulation_steps):
             del output, reshaped_logits, reshaped_targets, loss, microbatch_inputs, microbatch_targets
             torch.cuda.empty_cache()
 
-            logging.debug(f"Batch {i + 1}/{accumulation_steps}: Backward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
+            logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Backward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
 
         except Exception as e:
-            logging.error(f"Error processing batch {i + 1}/{accumulation_steps}: {e}", exc_info=True)
+            logging.error(f"Error processing microbatch {i + 1}/{accumulation_steps}: {e}", exc_info=True)
             raise  # Re-raise the exception after logging
 
     # Normalize accumulated gradients
