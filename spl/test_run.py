@@ -199,7 +199,6 @@ def monitor_processes(stdscr, processes, task_counts):
         height, width = stdscr.getmaxyx()
         split_point = width - right_col_width
 
-
         # Order processes by name
         ordered_process_names = sorted(processes.keys(), key=lambda name: (
             name.startswith('worker_final_logits'),
@@ -208,7 +207,7 @@ def monitor_processes(stdscr, processes, task_counts):
             not name.startswith('worker'),
             name
         ))
-        
+
         # Display logs on the left side
         process_name = ordered_process_names[selected_process]
         log_file = os.path.join('logs', f"{process_name}.log")
@@ -232,32 +231,12 @@ def monitor_processes(stdscr, processes, task_counts):
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
 
-            if name == 'worker_final_logits':
-                task_count = task_counts.get('final_logits', (0, 0))
-                stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count[0]}/{task_count[1]})", color)
-            elif 'worker_forward+backward' in name:
-                layer_idx = name.split('_')[-1]
-                forward_task = f"forward_layer_{layer_idx}"
-                backward_task = f"backward_layer_{layer_idx}"
+            stdscr.addstr(i, split_point, f"{indicator} {name}", color)
 
-                forward_count = task_counts.get(forward_task, (0, 0))
-                backward_count = task_counts.get(backward_task, (0, 0))
-
-                stdscr.addstr(i, split_point, f"{indicator} {name} ", color)
-                stdscr.addstr(f"({forward_count[0]}/{forward_count[1]}) ", curses.color_pair(3))
-                stdscr.addstr(f"({backward_count[0]}/{backward_count[1]})", curses.color_pair(4))
-            elif 'worker_embed+embed_backward' in name:
-                embed_task = "embed"
-                embed_backward_task = "embed_backward"
-
-                embed_count = task_counts.get(embed_task, (0, 0))
-                embed_backward_count = task_counts.get(embed_backward_task, (0, 0))
-
-                stdscr.addstr(i, split_point, f"{indicator} {name} ", color)
-                stdscr.addstr(f"({embed_count[0]}/{embed_count[1]}) ", curses.color_pair(3))
-                stdscr.addstr(f"({embed_backward_count[0]}/{embed_backward_count[1]})", curses.color_pair(4))
-            else:
-                stdscr.addstr(i, split_point, f"{indicator} {name}", color)
+        # Draw task counts at the bottom
+        bottom_start = height - len(task_counts) - 2
+        for i, (task_type, (solver_selected, active)) in enumerate(task_counts.items()):
+            stdscr.addstr(bottom_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
 
         stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))

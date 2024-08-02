@@ -270,86 +270,92 @@ def tensor_memory_size(tensor):
 
 async def process_tasks():
     global task_queue, concurrent_tasks_counter
+    try:
 
-    start_time = time.time()
+        start_time = time.time()
 
-    with concurrent_tasks_counter_lock:
-        # Increase the counter when a new task is started
-        concurrent_tasks_counter += 1
-    logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
+        with concurrent_tasks_counter_lock:
+            # Increase the counter when a new task is started
+            concurrent_tasks_counter += 1
+        logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
 
-    next_task = task_queue.get_next_task()
-    if not next_task:
-        logging.debug("No tasks in the queue to process.")
+        next_task = task_queue.get_next_task()
+        if not next_task:
+            logging.debug("No tasks in the queue to process.")
+            with concurrent_tasks_counter_lock:
+                concurrent_tasks_counter -= 1
+            return
+
+        if (task_queue.current_version is None
+            or next_task['version_number'] != task_queue.current_version):
+            logging.debug(f"Syncing tensors for version number: {next_task['version_number']}")
+            sync_start_time = time.time()
+            await sync_tensors(next_task['version_number'], next_task['contract_index'])
+            sync_end_time = time.time()
+            logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
+            task_queue.current_version = next_task['version_number']
+
+        task_id = next_task['task_id']
+        task_params = next_task['task_params']
+        contract_index = next_task['contract_index']
+        task_type = args.task_types[contract_index]
+        
+        logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
+
+        # Process the task...
+        logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
+        download_start_time = time.time()
+        batch = download_json(task_params['batch_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
+        logging.info(f"Batch tensor memory size: {tensor_memory_size(batch):.2f} MB")
+
+
+        logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
+        download_start_time = time.time()
+        targets = download_json(task_params['targets_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
+        logging.info(f"Targets tensor memory size: {tensor_memory_size(targets):.2f} MB")
+
+        result = {}
+        accumulation_steps = task_params['accumulation_steps']
+        
+        logging.debug("Executing training task")
+        task_start_time = time.time()
+        model_task(batch, targets, accumulation_steps)
+        task_end_time = time.time()
+        logging.debug(f"Task took {task_end_time - task_start_time:.2f} seconds")
+        logging.info(f"Updates tensor memory size: {tensor_memory_size(tensors['updates']):.2f} MB")
+        result = await upload_results()
+        logging.info(f"Uploaded results for task {task_id}")
+
+        submit_solution_start_time = time.time()
+        await submit_solution(task_id, result, contract_index)
+        submit_solution_end_time = time.time()
+        logging.debug(f"submit_solution() took {submit_solution_end_time - submit_solution_start_time:.2f} seconds")
+
+        processed_tasks.add((task_id, contract_index))
+
+        logging.info(f"Processed task {task_id} for task type {task_type} successfully")
+
+        # Log the time taken to process the task
+        with task_start_times_lock:
+            task_start_time = task_start_times.pop(task_id, None)
+        if task_start_time:
+            total_time = time.time() - task_start_time
+            logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
+
+        end_time = time.time()
+        logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
+
+        with concurrent_tasks_counter_lock:
+            # Decrease the counter when a task is completed
+            concurrent_tasks_counter -= 1
+    except Exception as e:
+        logging.error(f"Error processing task: {e}", exc_info=True)
         with concurrent_tasks_counter_lock:
             concurrent_tasks_counter -= 1
-        return
-
-    if (task_queue.current_version is None
-        or next_task['version_number'] != task_queue.current_version):
-        logging.debug(f"Syncing tensors for version number: {next_task['version_number']}")
-        sync_start_time = time.time()
-        await sync_tensors(next_task['version_number'], next_task['contract_index'])
-        sync_end_time = time.time()
-        logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
-        task_queue.current_version = next_task['version_number']
-
-    task_id = next_task['task_id']
-    task_params = next_task['task_params']
-    contract_index = next_task['contract_index']
-    task_type = args.task_types[contract_index]
-    
-    logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
-
-    # Process the task...
-    logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
-    download_start_time = time.time()
-    batch = download_json(task_params['batch_url'])
-    download_end_time = time.time()
-    logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
-    logging.info(f"Batch tensor memory size: {tensor_memory_size(batch):.2f} MB")
-
-
-    logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
-    download_start_time = time.time()
-    targets = download_json(task_params['targets_url'])
-    download_end_time = time.time()
-    logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
-    logging.info(f"Targets tensor memory size: {tensor_memory_size(targets):.2f} MB")
-
-    result = {}
-    accumulation_steps = task_params['accumulation_steps']
-    
-    logging.debug("Executing training task")
-    task_start_time = time.time()
-    model_task(batch, targets, accumulation_steps)
-    task_end_time = time.time()
-    logging.debug(f"Task took {task_end_time - task_start_time:.2f} seconds")
-    logging.info(f"Updates tensor memory size: {tensor_memory_size(tensors['updates']):.2f} MB")
-    result = await upload_results()
-
-    submit_solution_start_time = time.time()
-    await submit_solution(task_id, result, contract_index)
-    submit_solution_end_time = time.time()
-    logging.debug(f"submit_solution() took {submit_solution_end_time - submit_solution_start_time:.2f} seconds")
-
-    processed_tasks.add((task_id, contract_index))
-
-    logging.info(f"Processed task {task_id} for task type {task_type} successfully")
-
-    # Log the time taken to process the task
-    with task_start_times_lock:
-        task_start_time = task_start_times.pop(task_id, None)
-    if task_start_time:
-        total_time = time.time() - task_start_time
-        logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
-
-    end_time = time.time()
-    logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
-
-    with concurrent_tasks_counter_lock:
-        # Decrease the counter when a task is completed
-        concurrent_tasks_counter -= 1
 
 
 async def reclaim_stakes():
@@ -389,61 +395,64 @@ async def submit_solution(task_id, result, contract_index):
 
 def model_task(inputs, targets, accumulation_steps):
     global model, tensors
+    logging.info("Starting model_task")
 
-    # Ensure the inputs and targets tensors are on the correct device
+    start_time = time.time()
     inputs = inputs.to(device)
     targets = targets.to(device)
 
-    # Clone inputs to make them leaf tensors
-    inputs = inputs.clone().detach().requires_grad_(True)
+    logging.debug(f"Moved inputs and targets to device. Time taken: {time.time() - start_time:.2f} seconds")
+
     microbatch_size = inputs.shape[0] // accumulation_steps
-
+    
     grads_accumulated = [torch.zeros_like(param, device=device) for param in model.parameters()]
-
-    # List to store gradients for each microbatch
-    error_output_list = []
 
     total_loss = 0.0
 
+    logging.info(f"Accumulation steps: {accumulation_steps}, Microbatch size: {microbatch_size}")
+
     for i in range(accumulation_steps):
-        microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size]
-        microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size]
+        batch_start_time = time.time()
+        try:
+            microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size]
+            microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size]
 
-        # Clone microbatch_inputs to make them leaf tensors
-        microbatch_inputs = microbatch_inputs.clone().detach().requires_grad_(True)
+            start_pos = 0
 
-        logits = model(inputs)
-        logits.retain_grad()
+            logits = model(microbatch_inputs, start_pos=start_pos)
+            reshaped_logits = logits.view(-1, model_args.vocab_size)
 
-        # Reshape logits to [batch_size * seq_len, vocab_size]
-        reshaped_logits = logits.view(-1, model_args.vocab_size)
-        # Reshape targets to [batch_size * seq_len]
-        reshaped_targets = microbatch_targets.view(-1)
+            reshaped_targets = microbatch_targets.view(-1)
 
-        # Calculate the cross-entropy loss
-        loss = F.cross_entropy(reshaped_logits.to(device), reshaped_targets.to(device), ignore_index=tokenizer.pad_id)
+            loss = F.cross_entropy(reshaped_logits, reshaped_targets, ignore_index=tokenizer.pad_id)
 
-        total_loss += loss.item()
+            total_loss += loss.item()
 
-        loss.backward(retain_graph=True)
+            logging.debug(f"Batch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
 
-        for j, param in enumerate(model.parameters()):
-            grads_accumulated[j] += param.grad
 
-        # Store the input gradients for this microbatch
-        error_output_list.append(microbatch_inputs.grad.clone())
+            loss.backward()
+            
+            for j, param in enumerate(model.parameters()):
+                    grads_accumulated[j] += param.grad
 
-        model.zero_grad()
+            model.zero_grad
+            logging.debug(f"Batch {i + 1}/{accumulation_steps}: Backward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
+            
+        except Exception as e:
+            logging.error(f"Error processing batch {i + 1}/{accumulation_steps}: {e}", exc_info=True)
+            raise  # Re-raise the exception after logging
 
     accumulated_grads = [grad / accumulation_steps for grad in grads_accumulated]
 
-    # Concatenate the gradients for all microbatches
-    tensors['error_output'] = torch.cat(error_output_list, dim=0)
-    tensors['updates'] = accumulated_grads
+    tensors['updates'] = torch.cat([grad.view(-1) for grad in accumulated_grads])
     tensors['loss'] = total_loss / accumulation_steps
 
+    logging.info(f"Model task completed. Total loss: {tensors['loss']:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
+
+
 async def upload_results():
-    grads_url = await upload_tensor(torch.cat([grad.view(-1).to(device) for grad in tensors['updates']]), 'grads')
+    grads_url = await upload_tensor(tensors['updates'], 'grads')
     loss = tensors['loss']
 
     block_timestamp = (await web3.eth.get_block('latest'))['timestamp']
@@ -470,7 +479,7 @@ async def report_sync_status(status, contract_index):
         logging.error(f"Exception while reporting sync status: {e}")
 
 async def initialize_tensor(tensor_name, sync_version_number=None):
-    global embedding, final_logits_layer, final_logits_norm, model_layer
+    global model
 
     try:
         url = f"{args.sot_url}/latest_state"
@@ -487,6 +496,7 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
         logging.info(f"Successfully initialized tensor: {tensor_name}")
 
         model = tensor_to_model(tensor)
+        model.train()
         if args.torch_compile:
             # Compile the model after loading state_dict
             model = torch.compile(model)
