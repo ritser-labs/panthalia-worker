@@ -393,18 +393,23 @@ async def submit_solution(task_id, result, contract_index):
         logging.error(f"Error submitting solution for task {task_id}: {e}")
         raise
 
+import torch
+import torch.nn.functional as F
+import logging
+
 def model_task(inputs, targets, accumulation_steps):
     global model, tensors
     logging.info("Starting model_task")
 
     start_time = time.time()
-    inputs = inputs.to(device)
-    targets = targets.to(device)
+    inputs = inputs.to(device, non_blocking=True)
+    targets = targets.to(device, non_blocking=True)
 
     logging.debug(f"Moved inputs and targets to device. Time taken: {time.time() - start_time:.2f} seconds")
 
     microbatch_size = inputs.shape[0] // accumulation_steps
-    
+
+    # Preallocate gradient accumulation tensors and zero them
     grads_accumulated = [torch.zeros_like(param, device=device) for param in model.parameters()]
 
     total_loss = 0.0
@@ -414,38 +419,56 @@ def model_task(inputs, targets, accumulation_steps):
     for i in range(accumulation_steps):
         batch_start_time = time.time()
         try:
-            microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size]
-            microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size]
+            microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size].detach()
+            microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size].detach()
 
             start_pos = 0
+            # Forward pass
+            output = model(microbatch_inputs, start_pos=start_pos)
 
-            logits = model(microbatch_inputs, start_pos=start_pos)
-            reshaped_logits = logits.view(-1, model_args.vocab_size)
-
+            reshaped_logits = output.view(-1, model_args.vocab_size)
             reshaped_targets = microbatch_targets.view(-1)
 
+            # Compute loss
             loss = F.cross_entropy(reshaped_logits, reshaped_targets, ignore_index=tokenizer.pad_id)
-
             total_loss += loss.item()
 
             logging.debug(f"Batch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
 
+            # Backward pass and accumulate gradients
+            loss.backward()
 
-            loss.backward(retain_graph=True)
-            
-            for j, param in enumerate(model.parameters()):
-                    grads_accumulated[j] += param.grad
+            with torch.no_grad():
+                for j, param in enumerate(model.parameters()):
+                    if param.grad is not None:
+                        grads_accumulated[j] += param.grad
 
-            model.zero_grad
+            # Clear gradients for next accumulation step
+            model.zero_grad()
+
+            # Detach cache tensors
+            if hasattr(model, 'layers'):
+                for layer in model.layers:
+                    if hasattr(layer, 'attention'):
+                        layer.attention.cache_k = layer.attention.cache_k.detach()
+                        layer.attention.cache_v = layer.attention.cache_v.detach()
+
+            # Delete intermediate variables
+            del output, reshaped_logits, reshaped_targets, loss, microbatch_inputs, microbatch_targets
+            torch.cuda.empty_cache()
+
             logging.debug(f"Batch {i + 1}/{accumulation_steps}: Backward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
-            
+
         except Exception as e:
             logging.error(f"Error processing batch {i + 1}/{accumulation_steps}: {e}", exc_info=True)
             raise  # Re-raise the exception after logging
 
-    accumulated_grads = [grad / accumulation_steps for grad in grads_accumulated]
+    # Normalize accumulated gradients
+    with torch.no_grad():
+        for grad in grads_accumulated:
+            grad.div_(accumulation_steps)
 
-    tensors['updates'] = torch.cat([grad.view(-1) for grad in accumulated_grads])
+    tensors['updates'] = torch.cat([grad.view(-1) for grad in grads_accumulated])
     tensors['loss'] = total_loss / accumulation_steps
 
     logging.info(f"Model task completed. Total loss: {tensors['loss']:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
@@ -495,7 +518,7 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
         latest_block_timestamps[tensor_name] = sync_version_number
         logging.info(f"Successfully initialized tensor: {tensor_name}")
 
-        model = tensor_to_model(tensor)
+        model = tensor_to_model(tensor.detach())
         model.train()
         if args.torch_compile:
             # Compile the model after loading state_dict
