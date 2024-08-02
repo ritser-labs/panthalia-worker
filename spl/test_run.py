@@ -53,24 +53,16 @@ def parse_args():
 
 args = parse_args()
 
+synced_workers = 0
 sync_status = {}
 app = Flask(__name__)
 
-@app.route('/report_sync', methods=['GET'])
+
+@app.route('/report_sync', methods=['POST'])
 def report_sync():
-    task_type = request.args.get('task_type')
-    status = request.args.get('status')
-    layer_idx = request.args.get('layer_idx')
-    key = f"{task_type}_{layer_idx}" if layer_idx else task_type
-    logging.debug(f"Received sync report for task_type={task_type}, layer_idx={layer_idx}, status={status}")
-    if task_type and status:
-        sync_status[key] = status
-        synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
-        total_workers = len(sync_status)
-        logging.debug(f"Synced {synced_workers}/{total_workers} workers.")
-        return jsonify({'status': 'success'})
-    else:
-        return jsonify({'status': 'error', 'message': 'Missing argument'}), 400
+    global synced_workers
+    synced_workers += 1
+    return jsonify({'status': 'ok'})
 
 def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
     """Wait for the SOT service to be available."""
@@ -87,10 +79,10 @@ def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
     return False
 
 def wait_for_workers_to_sync(worker_count, timeout=600):
+    global synced_workers
     """Wait for all workers to sync their deposit stake."""
     start_time = time.time()
     while time.time() - start_time < timeout:
-        synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
         logging.debug(f"Synced {synced_workers}/{worker_count} workers.")
         if synced_workers >= worker_count:
             logging.debug("All workers have synced.")
@@ -401,7 +393,7 @@ async def main():
             json.dump(master_public_keys, f)
 
         # Generate wallets for workers and fund them
-        worker_wallets = generate_wallets(args.worker_count)
+        worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
         await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
         await set_interval_mining(web3, 1)
 
@@ -428,11 +420,12 @@ async def main():
 
 
         for worker_idx in range(args.worker_count):
+            this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
             command = [
                 'python', 'worker.py',
                 '--task_types', '+'.join(list(subnet_addresses.keys())),
                 '--subnet_addresses', '+'.join(list(subnet_addresses.values())),
-                '--private_keys', '+'.join([x['private_key'] for x in worker_wallets]),
+                '--private_keys', '+'.join([x['private_key'] for x in this_worker_wallets]),
                 '--rpc_url', args.rpc_url,
                 '--sot_url', args.sot_url,
                 '--pool_address', pool_address,

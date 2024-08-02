@@ -21,18 +21,13 @@ import uuid
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-BACKLOG_THRESHOLD = 2
-INITIAL_SUBMISSION_INTERVAL = 45  # Initial submission interval in seconds (assuming the slowest stage processes a task every 30 seconds)
-MIN_SUBMISSION_INTERVAL = 5  # Minimum submission interval in seconds
-MAX_SUBMISSION_INTERVAL = 90  # Maximum submission interval in seconds
-
-
 class Master:
-    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, detailed_logs=False):
+    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, max_concurrent_iterations=2, detailed_logs=False):
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
+        self.max_concurrent_iterations = max_concurrent_iterations
         self.iteration = 1  # Track the number of iterations
         self.perplexities = []  # Initialize perplexity list
         self.perplexity_queue = queue.Queue()
@@ -53,12 +48,7 @@ class Master:
         self.ax.legend()
         self.ax.grid(True)
 
-        # Initialize submission interval
-        self.submission_interval = INITIAL_SUBMISSION_INTERVAL
-        self.last_submission_time = time.time()
-        self.submitted_first = False
-
-        # Run the main iterations in separate threads
+        # Run the main process
         asyncio.run(self.run_main())
 
     def load_wallets(self, wallets_file):
@@ -131,9 +121,6 @@ class Master:
                     selection_id = await self.submit_selection_req()
                     logging.info(f"Selection ID: {selection_id}")
 
-                    await self.select_solver(task_type, task_id, iteration_number)
-                    await self.remove_solver_stake(task_type, task_id, iteration_number)
-
                     return task_id
                 except Exception as e:
                     logging.error(f"Error submitting task: {e}. Retrying...")
@@ -200,7 +187,7 @@ class Master:
                 logging.info(f"Transaction duration: {end_transact_time - start_transact_time} seconds")
                 
                 logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
-                return
+                return True
             except Exception as e:
                 logging.error(f"Error selecting solver on attempt {attempt}: {e}")
                 logging.info(f"Retrying in {retry_delay} seconds...")
@@ -239,11 +226,30 @@ class Master:
         learning_params = get_learning_hyperparameters(iteration_number)
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
-
         logging.info(f"Iteration {iteration_number}: Starting training task")
-        training_result = await self.handle_training(learning_params, batch_url, targets_url, current_version_number, iteration_number)
-        
-        logging.info(f"Iteration {iteration_number} done, loss: {training_result['loss']}")
+        task_params = {
+            'batch_url': batch_url,
+            'targets_url': targets_url,
+            'version_number': current_version_number,
+            'accumulation_steps': learning_params['accumulation_steps']
+        }
+        task_id = await self.submit_task(TENSOR_NAME, task_params, iteration_number)
+
+        # Wait until the solver selection is successful before launching a new iteration
+        start_time = time.time()
+        while time.time() - start_time < MAX_SOLVER_SELECTION_DURATION:
+            try:
+                await self.select_solver(TENSOR_NAME, task_id, iteration_number)
+                await self.remove_solver_stake(TENSOR_NAME, task_id, iteration_number)
+                result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
+                await self.update_sot_all(TENSOR_NAME, learning_params, TENSOR_NAME, result, iteration_number=iteration_number)
+                # Start the next iteration as soon as the solver is selected
+                self.iteration += 1
+                asyncio.create_task(self.main_iteration(self.iteration))
+                break
+            except Exception as e:
+                logging.error("Solver selection failed for this iteration. Continuing to the next iteration.")
+            await asyncio.sleep(1)
 
         # Update the plot explicitly
         self.update_plot()
@@ -252,16 +258,12 @@ class Master:
         logging.info("Starting main process")
         await self.approve_tokens_at_start()
 
-        while True:
-            await self.check_and_submit_tasks()
-            await asyncio.sleep(1)
-
-    async def check_and_submit_tasks(self):
-        if time.time() - self.last_submission_time >= self.submission_interval or not self.submitted_first:
-            asyncio.create_task(self.main_iteration(self.iteration))
+        # Start the initial set of iterations
+        tasks = []
+        for _ in range(1, self.max_concurrent_iterations + 1):
+            tasks.append(self.main_iteration(self.iteration))
             self.iteration += 1
-            self.last_submission_time = time.time()
-            self.submitted_first = True
+        await asyncio.gather(*tasks)
 
     def sign_message(self, message, wallet):
         message = encode_defunct(text=message)
@@ -278,25 +280,13 @@ class Master:
             'timestamp': timestamp
         }
         return message
-
-    async def handle_training(self, learning_params, batch_url, targets_url, current_version_number, iteration_number):
-        task_params = {
-            'batch_url': batch_url,
-            'targets_url': targets_url,
-            'version_number': current_version_number,
-            'accumulation_steps': learning_params['accumulation_steps']
-        }
-        task_id = await self.submit_task(TENSOR_NAME, task_params, iteration_number)
-        result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
-        await self.update_sot(learning_params, TENSOR_NAME, result)
-        return result
-
+    
     async def wait_for_result(self, task_type, task_id, iteration_number):
         while True:
             result = await self.get_task_result(task_type, task_id, iteration_number)
             if result is not None:
                 return result
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.5)
 
     async def update_sot(self, learning_params, tensor_name, result):
         params = {
@@ -313,7 +303,7 @@ class Master:
 
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{self.sot_url}/update_state", json=params, headers=headers) as response:
-                if response.status != 200:  # Use 'status' instead of 'status_code'
+                if response.status != 200:
                     logging.error(f"Failed to update SOT for {tensor_name}: {await response.text()}")
                 else:
                     logging.info(f"Updated SOT for {tensor_name} with result: {result}")
@@ -341,6 +331,7 @@ if __name__ == "__main__":
     parser.add_argument('--wallets_file', type=str, required=True, help="Path to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
+    parser.add_argument('--max_concurrent_iterations', type=int, default=2, help="Maximum number of concurrent iterations")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()
@@ -349,4 +340,4 @@ if __name__ == "__main__":
         subnet_addresses = json.load(file)
         wallets = json.load(wallets_file)
 
-    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, detailed_logs=args.detailed_logs)
+    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, max_concurrent_iterations=args.max_concurrent_iterations, detailed_logs=args.detailed_logs)

@@ -497,17 +497,11 @@ async def upload_results():
         'version_number': version_number
     }
 
-async def report_sync_status(status, contract_index):
+async def report_sync_status():
+    
     try:
-        if hasattr(args, 'layer_idx') and args.layer_idx is not None:
-            url = f"{args.sync_url}/report_sync?task_type={args.task_types[contract_index]}&layer_idx={args.layer_idx}&status={status}"
-        else:
-            url = f"{args.sync_url}/report_sync?task_type={args.task_types[contract_index]}&status={status}"
-        response = requests.get(url)
-        if response.status_code == 200:
-            logging.info(f"Reported sync status: {status}")
-        else:
-            logging.error(f"Failed to report sync status: {response.status_code}")
+        url = f"{args.sync_url}/report_sync"
+        response = requests.post(url)
     except requests.RequestException as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
@@ -627,6 +621,7 @@ async def main():
             logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
             last_loop_time = time.time()
             await deposit_stake()
+            
             if not reported:
                 duplicate_relevant_tensors = []
                 for contract_index, task_type in enumerate(args.task_types):
@@ -634,7 +629,7 @@ async def main():
                         duplicate_relevant_tensors.append((contract_index, tensor_name))
                 for contract_index, tensor_name in duplicate_relevant_tensors:
                     await initialize_tensor(tensor_name)
-                    await report_sync_status('synced', contract_index)
+                await report_sync_status()
                 reported = True
 
             # Gather all task fetching coroutines
