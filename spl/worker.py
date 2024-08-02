@@ -50,6 +50,9 @@ task_start_times_lock = threading.Lock()  # Lock for task_start_times
 last_handle_event_timestamp = None
 last_handle_event_timestamp_lock = threading.Lock()  # Lock for last_handle_event_timestamp
 
+# Lock to ensure only one task is processed at a time
+task_processing_lock = threading.Lock()
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
     parser.add_argument('--task_types', type=str, required=True, help="Types of tasks to process, separated by '+' if multiple")
@@ -67,6 +70,7 @@ def parse_args():
     parser.add_argument('--max_stakes', type=int, default=1, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
+    parser.add_argument('--max_queued_tasks', type=int, default=0, help="Maximum number of tasks allowed in the queue awaiting processing")
     return parser.parse_args()
 
 args = parse_args()
@@ -126,6 +130,10 @@ class TaskQueue:
                 return task
             logging.debug("No tasks in the queue.")
             return None
+
+    def queue_length(self):
+        with self.lock:
+            return len(self.queue)
 
 task_queue = TaskQueue()
 
@@ -216,6 +224,11 @@ async def upload_tensor(tensor, tensor_name):
         raise RuntimeError(f"Failed to upload tensor: {response.text}")
 
 async def deposit_stake():
+    # Do not deposit stakes if queued tasks exceed the limit
+    if task_queue.queue_length() > args.max_queued_tasks:
+        logging.debug("Too many tasks in the queue. Not depositing any more stakes.")
+        return
+
     wallets = zip(args.private_keys, subnet_ids, stake_amounts, token_contracts, pool_contracts, worker_addresses)
     
     for private_key, subnet_id, stake_amount, token_contract, pool_contract, worker_address in wallets:
@@ -271,87 +284,88 @@ def tensor_memory_size(tensor):
 async def process_tasks():
     global task_queue, concurrent_tasks_counter
     try:
+        # Ensure only one task is processed at a time
+        with task_processing_lock:
+            start_time = time.time()
 
-        start_time = time.time()
-
-        with concurrent_tasks_counter_lock:
-            # Increase the counter when a new task is started
-            concurrent_tasks_counter += 1
-        logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
-
-        next_task = task_queue.get_next_task()
-        if not next_task:
-            logging.debug("No tasks in the queue to process.")
             with concurrent_tasks_counter_lock:
+                # Increase the counter when a new task is started
+                concurrent_tasks_counter += 1
+            logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
+
+            next_task = task_queue.get_next_task()
+            if not next_task:
+                logging.debug("No tasks in the queue to process.")
+                with concurrent_tasks_counter_lock:
+                    concurrent_tasks_counter -= 1
+                return
+
+            if (task_queue.current_version is None
+                or next_task['version_number'] != task_queue.current_version):
+                logging.debug(f"Syncing tensors for version number: {next_task['version_number']}")
+                sync_start_time = time.time()
+                await sync_tensors(next_task['version_number'], next_task['contract_index'])
+                sync_end_time = time.time()
+                logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
+                task_queue.current_version = next_task['version_number']
+
+            task_id = next_task['task_id']
+            task_params = next_task['task_params']
+            contract_index = next_task['contract_index']
+            task_type = args.task_types[contract_index]
+            
+            logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
+
+            # Process the task...
+            logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
+            download_start_time = time.time()
+            batch = download_json(task_params['batch_url'])
+            download_end_time = time.time()
+            logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
+            logging.info(f"Batch tensor memory size: {tensor_memory_size(batch):.2f} MB")
+
+
+            logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
+            download_start_time = time.time()
+            targets = download_json(task_params['targets_url'])
+            download_end_time = time.time()
+            logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
+            logging.info(f"Targets tensor memory size: {tensor_memory_size(targets):.2f} MB")
+
+            result = {}
+            accumulation_steps = task_params['accumulation_steps']
+            
+            logging.debug("Executing training task")
+            task_start_time = time.time()
+            model_task(batch, targets, accumulation_steps)
+            task_end_time = time.time()
+            logging.debug(f"Task took {task_end_time - task_start_time:.2f} seconds")
+            logging.info(f"Updates tensor memory size: {tensor_memory_size(tensors['updates']):.2f} MB")
+            result = await upload_results()
+            logging.info(f"Uploaded results for task {task_id}")
+
+            submit_solution_start_time = time.time()
+            await submit_solution(task_id, result, contract_index)
+            submit_solution_end_time = time.time()
+            logging.debug(f"submit_solution() took {submit_solution_end_time - submit_solution_start_time:.2f} seconds")
+
+            processed_tasks.add((task_id, contract_index))
+
+            logging.info(f"Processed task {task_id} for task type {task_type} successfully")
+
+            # Log the time taken to process the task
+            with task_start_times_lock:
+                task_start_time = task_start_times.pop(task_id, None)
+            if task_start_time:
+                total_time = time.time() - task_start_time
+                logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
+
+            end_time = time.time()
+            logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
+
+            with concurrent_tasks_counter_lock:
+                # Decrease the counter when a task is completed
                 concurrent_tasks_counter -= 1
-            return
-
-        if (task_queue.current_version is None
-            or next_task['version_number'] != task_queue.current_version):
-            logging.debug(f"Syncing tensors for version number: {next_task['version_number']}")
-            sync_start_time = time.time()
-            await sync_tensors(next_task['version_number'], next_task['contract_index'])
-            sync_end_time = time.time()
-            logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
-            task_queue.current_version = next_task['version_number']
-
-        task_id = next_task['task_id']
-        task_params = next_task['task_params']
-        contract_index = next_task['contract_index']
-        task_type = args.task_types[contract_index]
-        
-        logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
-
-        # Process the task...
-        logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
-        download_start_time = time.time()
-        batch = download_json(task_params['batch_url'])
-        download_end_time = time.time()
-        logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
-        logging.info(f"Batch tensor memory size: {tensor_memory_size(batch):.2f} MB")
-
-
-        logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
-        download_start_time = time.time()
-        targets = download_json(task_params['targets_url'])
-        download_end_time = time.time()
-        logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
-        logging.info(f"Targets tensor memory size: {tensor_memory_size(targets):.2f} MB")
-
-        result = {}
-        accumulation_steps = task_params['accumulation_steps']
-        
-        logging.debug("Executing training task")
-        task_start_time = time.time()
-        model_task(batch, targets, accumulation_steps)
-        task_end_time = time.time()
-        logging.debug(f"Task took {task_end_time - task_start_time:.2f} seconds")
-        logging.info(f"Updates tensor memory size: {tensor_memory_size(tensors['updates']):.2f} MB")
-        result = await upload_results()
-        logging.info(f"Uploaded results for task {task_id}")
-
-        submit_solution_start_time = time.time()
-        await submit_solution(task_id, result, contract_index)
-        submit_solution_end_time = time.time()
-        logging.debug(f"submit_solution() took {submit_solution_end_time - submit_solution_start_time:.2f} seconds")
-
-        processed_tasks.add((task_id, contract_index))
-
-        logging.info(f"Processed task {task_id} for task type {task_type} successfully")
-
-        # Log the time taken to process the task
-        with task_start_times_lock:
-            task_start_time = task_start_times.pop(task_id, None)
-        if task_start_time:
-            total_time = time.time() - task_start_time
-            logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
-
-        end_time = time.time()
-        logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
-
-        with concurrent_tasks_counter_lock:
-            # Decrease the counter when a task is completed
-            concurrent_tasks_counter -= 1
     except Exception as e:
         logging.error(f"Error processing task: {e}", exc_info=True)
         with concurrent_tasks_counter_lock:
