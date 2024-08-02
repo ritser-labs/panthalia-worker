@@ -173,6 +173,7 @@ def monitor_processes(stdscr, processes, task_counts):
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
+    curses.noecho()
     selected_process = 0
     last_resize = None
 
