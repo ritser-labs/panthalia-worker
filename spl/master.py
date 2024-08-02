@@ -236,10 +236,10 @@ class Master:
         task_id = await self.submit_task(TENSOR_NAME, task_params, iteration_number)
 
         # Wait until the solver selection is successful before launching a new iteration
+        await self.select_solver(TENSOR_NAME, task_id, iteration_number)
         start_time = time.time()
         while time.time() - start_time < MAX_SOLVER_SELECTION_DURATION:
             try:
-                await self.select_solver(TENSOR_NAME, task_id, iteration_number)
                 await self.remove_solver_stake(TENSOR_NAME, task_id, iteration_number)
                 result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
                 await self.update_sot_all(TENSOR_NAME, learning_params, TENSOR_NAME, result, iteration_number=iteration_number)
@@ -331,7 +331,7 @@ if __name__ == "__main__":
     parser.add_argument('--wallets_file', type=str, required=True, help="Path to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--max_concurrent_iterations', type=int, default=2, help="Maximum number of concurrent iterations")
+    parser.add_argument('--max_concurrent_iterations', type=int, default=4, help="Maximum number of concurrent iterations")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()
