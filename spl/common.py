@@ -40,11 +40,11 @@ model_args = ModelArgs(
     max_seq_len=256
 )
 
-batch_size = 16
+batch_size = 512
 
-BUFFER_SIZE = 1000  # Size of the buffer to shuffle data
+BUFFER_SIZE = 32768  # Size of the buffer to shuffle data
 
-ACCUMULATION_STEPS = 1
+ACCUMULATION_STEPS = 32
 
 TENSOR_VERSION_INTERVAL = 30
 
@@ -57,6 +57,9 @@ SLEEP_TIME = 1
 TENSOR_NAME = 'model'
 
 Model = Transformer
+
+def get_dummy_input():
+    return torch.randint(0, model_args.vocab_size, (1, model_args.max_seq_len)).to(device)
 
 # Define Enums
 class TaskStatus(Enum):

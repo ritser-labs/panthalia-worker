@@ -11,7 +11,7 @@ from web3.exceptions import ContractCustomError
 from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from device import device
-from common import Model, Task, TaskStatus, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
+from common import get_dummy_input, Model, Task, TaskStatus, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
 from typing import Optional, Tuple
 from io import BytesIO
@@ -64,7 +64,7 @@ def parse_args():
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
     parser.add_argument('--sync_url', type=str, required=False, help="URL for reporting sync status", default='http://localhost:5002')
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
-    parser.add_argument('--max_stakes', type=int, default=8, help="Maximum number of stakes to maintain")
+    parser.add_argument('--max_stakes', type=int, default=1, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
     return parser.parse_args()
@@ -393,10 +393,6 @@ async def submit_solution(task_id, result, contract_index):
         logging.error(f"Error submitting solution for task {task_id}: {e}")
         raise
 
-import torch
-import torch.nn.functional as F
-import logging
-
 def model_task(inputs, targets, accumulation_steps):
     global model, tensors
     logging.info("Starting model_task")
@@ -524,8 +520,7 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
             # Compile the model after loading state_dict
             model = torch.compile(model)
             # Warmup
-            dummy_input = torch.randint(0, model_args.vocab_size, (1, model_args.max_seq_len)).to(device)
-            _ = model(dummy_input)
+            _ = model(get_dummy_input())
             logging.info("Model model compiled and warmed up")
 
     except requests.exceptions.RequestException as e:
