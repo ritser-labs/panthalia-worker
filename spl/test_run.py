@@ -57,6 +57,14 @@ args = parse_args()
 
 synced_workers = 0
 sync_status = {}
+# Define a global cache for the latest loss and last fetch time
+latest_loss_cache = {
+    'value': None,
+    'last_fetched': 0
+}
+
+# Define the interval (in seconds) to refresh the latest loss value
+LOSS_REFRESH_INTERVAL = 60  # For example, update every 60 seconds
 app = Flask(__name__)
 
 
@@ -166,7 +174,29 @@ def reset_logs(log_dir):
             except Exception as e:
                 logging.debug(f"Error erasing log file {file_path}: {e}")
 
+def fetch_latest_loss(sot_url):
+    global latest_loss_cache
+    current_time = time.time()
+
+    # Check if the cache is expired
+    if current_time - latest_loss_cache['last_fetched'] > LOSS_REFRESH_INTERVAL:
+        try:
+            response = requests.get(f"{sot_url}/get_loss")
+            if response.status_code == 200:
+                data = response.json()
+                latest_loss_cache['value'] = data.get('loss', None)
+                latest_loss_cache['last_fetched'] = current_time
+            else:
+                logging.error(f"Error fetching latest loss: {response.status_code} - {response.text}")
+        except requests.RequestException as e:
+            logging.error(f"Error fetching latest loss: {e}")
+            # In case of an error, do not update the last fetched time to retry on next fetch
+
+    return latest_loss_cache['value']
+
+
 def monitor_processes(stdscr, processes, task_counts):
+    global args
     logger = logging.getLogger()
     logger.removeHandler(stream_handler)
     curses.curs_set(0)
@@ -225,10 +255,16 @@ def monitor_processes(stdscr, processes, task_counts):
 
             stdscr.addstr(i, split_point, f"{indicator} {name}", color)
 
-        # Draw task counts at the bottom
-        bottom_start = height - len(task_counts) - 2
+        # Fetch and display the latest loss
+        latest_loss = fetch_latest_loss(args.sot_url)
+        loss_display = f"Latest Loss: {latest_loss}" if latest_loss is not None else "Latest Loss: N/A"
+        loss_y = height - len(task_counts) - 5
+        stdscr.addstr(loss_y, split_point, loss_display, curses.color_pair(4))
+
+        # Draw task counts below the latest loss
+        task_start = height - 3 - len(task_counts)
         for i, (task_type, (solver_selected, active)) in enumerate(task_counts.items()):
-            stdscr.addstr(bottom_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
+            stdscr.addstr(task_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
 
         stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
@@ -260,7 +296,6 @@ def monitor_processes(stdscr, processes, task_counts):
     stdscr.keypad(False)
     curses.endwin()
     os._exit(0)  # Force exit the program
-
 
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):

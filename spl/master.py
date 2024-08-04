@@ -190,6 +190,9 @@ class Master:
         # Wait until the solver selection is successful before launching a new iteration
         await self.select_solver(TENSOR_NAME, task_id, iteration_number)
         result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
+        loss_value = result['loss']
+        self.perplexity_queue.put(loss_value)
+        await self.update_latest_loss(loss_value)
         await self.update_sot_all(TENSOR_NAME, learning_params, TENSOR_NAME, result, iteration_number=iteration_number)
         
 
@@ -253,6 +256,18 @@ class Master:
                     logging.error(f"Failed to update SOT for {tensor_name}: {await response.text()}")
                 else:
                     logging.info(f"Updated SOT for {tensor_name} with result: {result}")
+    
+    async def update_latest_loss(self, loss_value):
+        """Send the latest loss value to the SOT server."""
+        payload = {'loss': loss_value}
+
+        url = os.path.join(self.sot_url, 'update_loss')
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status != 200:
+                    logging.error(f"Failed to update loss value: {await response.text()}")
+                else:
+                    logging.info(f"Updated latest loss value to {loss_value}")
 
     async def update_sot_all(self, tensor_name, learning_params, task_type, result, layer_idx=None, iteration_number=None):
         await self.update_sot(learning_params, tensor_name, result)

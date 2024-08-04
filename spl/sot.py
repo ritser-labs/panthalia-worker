@@ -75,6 +75,9 @@ used_nonces = {}
 
 num_of_updates_dict = defaultdict(int)
 
+latest_loss = {'value': None}
+latest_loss_lock = threading.Lock()
+
 def initialize_distributed_environment_and_globals():
     logging.info("Initializing distributed environment")
     initialize_distributed_environment('gloo')
@@ -595,6 +598,32 @@ def upload_tensor():
 
     return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'{BASE_URL}/data/state/temp/{filename}'}), 200
 
+@app.route('/update_loss', methods=['POST'])
+def update_loss():
+    global latest_loss
+
+    # Get the loss value from the request data
+    data = request.get_json()
+    if not data or 'loss' not in data:
+        return jsonify({'error': 'Missing loss value'}), 400
+
+    loss = data['loss']
+    
+    # Update the loss value with thread-safety
+    with latest_loss_lock:
+        latest_loss['value'] = loss
+
+    logging.info(f"Updated latest loss: {loss}")
+    return jsonify({'status': 'success'}), 200
+
+@app.route('/get_loss', methods=['GET'])
+def get_loss():
+    global latest_loss
+    with latest_loss_lock:
+        loss = latest_loss['value']
+    if loss is None:
+        return jsonify({'error': 'Loss value not set'}), 404
+    return jsonify({'loss': loss}), 200
 
 if __name__ == "__main__":
     import argparse
