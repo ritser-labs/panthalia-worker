@@ -30,7 +30,9 @@ BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
 # Configure logging to file and stdout
 os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
+file_handler = logging.FileHandler(LOG_FILE)
+stream_handler = logging.StreamHandler()
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 for handler in logging.getLogger().handlers:
     handler.setFormatter(formatter)
@@ -166,10 +168,7 @@ def reset_logs(log_dir):
 
 def monitor_processes(stdscr, processes, task_counts):
     logger = logging.getLogger()
-    for handler in logger.handlers:
-        if isinstance(handler, logging.StreamHandler):
-            logger.removeHandler(handler)
-
+    logger.removeHandler(stream_handler)
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
