@@ -40,15 +40,15 @@ model_args = ModelArgs(
     max_seq_len=256
 )
 
-batch_size = 512
+batch_size = 32768
 
 BUFFER_SIZE = 32768  # Size of the buffer to shuffle data
 
-ACCUMULATION_STEPS = 32
+ACCUMULATION_STEPS = 1024
 
 TENSOR_VERSION_INTERVAL = 30
 
-MAX_SOLVER_SELECTION_DURATION = 300
+MAX_SUBMIT_TASK_RETRY_DURATION = 300
 
 MIN_REMAINING_TIME_SECONDS = 3
 
@@ -64,14 +64,13 @@ def get_dummy_input():
 # Define Enums
 class TaskStatus(Enum):
     SelectingSolver = 0
-    SolverSelectedStakeNotRemoved = 1
-    SolverSelected = 2
-    SolutionSubmitted = 3
-    Disputed = 4
-    VerifiersSelected = 5
-    Verified = 6
-    ResolvedCorrect = 7
-    ResolvedIncorrect = 8
+    SolverSelected = 1
+    SolutionSubmitted = 2
+    Disputed = 3
+    VerifiersSelected = 4
+    Verified = 5
+    ResolvedCorrect = 6
+    ResolvedIncorrect = 7
 
 class Vote(Enum):
     NoVote = 0
@@ -85,8 +84,8 @@ class PoolState(Enum):
 
 # Define Task named tuple
 Task = namedtuple('Task', [
-    'status', 'submitter', 'solver', 'timeStatusChanged', 'selectionId', 'numVerifiers', 
-    'selectedStakeId', 'params', 'postedSolution', 'verificationRounds', 'verifierStake', 
+    'status', 'submitter', 'solver', 'timeStatusChanged', 'subSelectionId', 'numVerifiers', 
+    'params', 'postedSolution', 'verificationRounds', 'verifierStake', 
     'disputerStake'
 ])
 
@@ -450,18 +449,21 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
             # Check if there are at least MIN_REMAINING_TIME_SECONDS remaining in the target state
             latest_block = await web3.eth.get_block('latest')
             current_time = latest_block['timestamp']
-            remaining_time = (await pool.functions.lastStateChangeTime().call() + 
-                              (await pool.functions.UNLOCKED_MIN_PERIOD().call() 
-                              if current_global_state == PoolState.Unlocked else 
-                              await pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call())) - current_time
-
-            if remaining_time >= MIN_REMAINING_TIME_SECONDS:
-                logging.info(f'Pool state is now {PoolState(target_state).name} with {remaining_time} seconds remaining')
-                return
+            if target_state == PoolState.Unlocked.value:
+                remaining_time = (await pool.functions.lastStateChangeTime().call() + 
+                                  (await pool.functions.UNLOCKED_MIN_PERIOD().call())) - current_time
+                if remaining_time >= MIN_REMAINING_TIME_SECONDS:
+                    logging.info(f'Pool state is now {PoolState(target_state).name} with {remaining_time} seconds remaining')
+                    return
+                else:
+                    logging.info(f'Not enough remaining time {remaining_time} seconds in {PoolState(target_state).name}, sleeping and rechecking state')
+                    await asyncio.sleep(max(remaining_time, SLEEP_TIME))
+                    await update_current_global_state(pool)
             else:
-                logging.info(f'Not enough remaining time {remaining_time} seconds in {PoolState(target_state).name}, sleeping and rechecking state')
-                await asyncio.sleep(max(remaining_time, SLEEP_TIME))
-                await update_current_global_state(pool)
+                logging.info(f'Pool state is now {PoolState(target_state).name}')
+                return
+
+           
 
         # Try to perform the state transition if needed
         if not state_changing:
@@ -475,8 +477,8 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
                     logging.info("Triggering finalizeSelections to change state to SelectionsFinalizing")
                     await finalize_selections(web3, pool, private_key)
                 elif current_global_state == PoolState.SelectionsFinalizing:
-                    logging.info("Triggering removeGlobalLock to change state to Unlocked")
-                    await trigger_remove_global_lock(web3, pool, private_key)
+                    logging.info("Triggering selectStakes to change state to Unlocked")
+                    await select_stakes(web3, pool, private_key)
 
                 # Update the global state after the transaction
                 await update_current_global_state(pool)
@@ -510,7 +512,7 @@ async def trigger_lock_global_state(web3, pool, private_key):
 
     if remaining_time > 0:
         logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
-        await asyncio.sleep(remaining_time)
+        await asyncio.sleep(remaining_time + 1)
     else:
         logging.info("UNLOCKED_MIN_PERIOD is already over, proceeding with lockGlobalState")
 
@@ -521,22 +523,10 @@ async def trigger_lock_global_state(web3, pool, private_key):
         logging.error(f"Error triggering lock global state: {e}")
         raise
 
-async def trigger_remove_global_lock(web3, pool, private_key):
-    selections_finalizing_min_period = await pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
-    last_state_change_time = await pool.functions.lastStateChangeTime().call()
-    latest_block = await web3.eth.get_block('latest')
-    current_time = latest_block['timestamp']
-    remaining_time = (last_state_change_time + selections_finalizing_min_period) - current_time
-
-    if remaining_time > 0:
-        logging.info(f"Waiting for {remaining_time} seconds until SELECTIONS_FINALIZING_MIN_PERIOD is over")
-        await asyncio.sleep(remaining_time)
-    else:
-        logging.info("SELECTIONS_FINALIZING_MIN_PERIOD is already over, proceeding with removeGlobalLock")
-
+async def select_stakes(web3, pool, private_key):
     try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', private_key, attempts=1)
-        logging.info(f"removeGlobalLock transaction receipt: {receipt}")
+        receipt = await async_transact_with_contract_function(web3, pool, 'selectStakes', private_key, attempts=1)
+        logging.info(f"selectStakes transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error triggering remove global lock: {e}")
         raise

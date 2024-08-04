@@ -12,7 +12,7 @@ import queue
 from web3 import AsyncWeb3
 from web3.middleware import async_geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SOLVER_SELECTION_DURATION, TENSOR_NAME
+from common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SUBMIT_TASK_RETRY_DURATION, TENSOR_NAME
 from io import BytesIO
 import os
 from eth_account.messages import encode_defunct
@@ -97,72 +97,11 @@ class Master:
         self.fig.savefig('perplexity_plot.png')  # Save the figure after each update
 
     async def submit_task(self, task_type, params, iteration_number):
-        try:
-            if task_type not in self.contracts:
-                raise ValueError(f"No contract loaded for task type {task_type}")
-
-            logging.info(f"Submitting task of type {task_type} with params: {params}")
-            encoded_params = json.dumps(params).encode('utf-8')
-
-            for _ in range(5):  # Retry up to 5 times
-                try:
-                    await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
-                    receipt = await async_transact_with_contract_function(
-                        self.web3, self.contracts[task_type], 'submitTaskRequest', self.get_next_wallet()['private_key'], encoded_params, attempts=1)
-                    logging.info(f"submitTaskRequest transaction receipt: {receipt}")
-
-                    logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
-                    if not logs:
-                        raise ValueError("No TaskRequestSubmitted event found in the receipt")
-
-                    task_id = logs[0]['args']['taskId']
-                    logging.info(f"Iteration {iteration_number} - Task submitted successfully. Task ID: {task_id}")
-
-                    selection_id = await self.submit_selection_req()
-                    logging.info(f"Selection ID: {selection_id}")
-
-                    return task_id
-                except Exception as e:
-                    logging.error(f"Error submitting task: {e}. Retrying...")
-                    await asyncio.sleep(1)  # Wait for a while before retrying
-
-            raise RuntimeError("Failed to submit task after multiple attempts")
-        except Exception as e:
-            logging.error(f"Error submitting task: {e}")
-            raise
-
-    async def submit_selection_req(self):
-        try:
-            if await self.pool.functions.state().call() != PoolState.Unlocked.value:
-                return await self.pool.functions.currentSelectionId().call()
-
-            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
-            logging.info("Submitting selection request")
-
-            receipt = await async_transact_with_contract_function(
-                self.web3, self.pool, 'submitSelectionReq', self.get_next_wallet()['private_key'], attempts=1)
-            logging.info(f"submitSelectionReq transaction receipt: {receipt}")
-
-            unlocked_min_period = await self.pool.functions.UNLOCKED_MIN_PERIOD().call()
-            last_state_change_time = await self.pool.functions.lastStateChangeTime().call()
-            latest_block = await self.web3.eth.get_block('latest')
-            current_time = latest_block['timestamp']
-            remaining_time = (last_state_change_time + unlocked_min_period) - current_time
-
-            logs = self.pool.events.SelectionRequested().process_receipt(receipt)
-            if not logs:
-                raise ValueError("No SelectionRequested event found in the receipt")
-
-            return logs[0]['args']['selectionId']
-        except Exception as e:
-            logging.error(f"Error submitting selection request: {e}")
-            raise
-
-    async def select_solver(self, task_type, task_id, iteration_number, retry_delay=1):
-        max_duration = datetime.timedelta(seconds=MAX_SOLVER_SELECTION_DURATION)
+        max_duration = datetime.timedelta(seconds=MAX_SUBMIT_TASK_RETRY_DURATION)
         start_time = datetime.datetime.now()
 
         attempt = 0
+        retry_delay = 1
         while True:
             attempt += 1
             current_time = datetime.datetime.now()
@@ -173,38 +112,47 @@ class Master:
                 raise RuntimeError(f"Failed to select solver within {max_duration}")
 
             try:
-                logging.info(f"Selecting solver for task ID: {task_id}, attempt {attempt}")
-                
-                start_wait_time = time.time()
-                await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.get_next_wallet()['private_key'])
-                end_wait_time = time.time()
-                logging.info(f"wait_for_state_change duration: {end_wait_time - start_wait_time} seconds")
-                
-                start_transact_time = time.time()
+                if task_type not in self.contracts:
+                    raise ValueError(f"No contract loaded for task type {task_type}")
+
+                logging.info(f"Submitting task of type {task_type} with params: {params}")
+                encoded_params = json.dumps(params).encode('utf-8')
+
+                await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
                 receipt = await async_transact_with_contract_function(
-                    self.web3, self.contracts[task_type], 'selectSolver', self.get_next_wallet()['private_key'], task_id, attempts=1)
-                end_transact_time = time.time()
-                logging.info(f"Transaction duration: {end_transact_time - start_transact_time} seconds")
-                
-                logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
-                return True
+                    self.web3, self.contracts[task_type], 'submitTaskRequest', self.get_next_wallet()['private_key'], encoded_params, attempts=1)
+                logging.info(f"submitTaskRequest transaction receipt: {receipt}")
+
+                logs = self.contracts[task_type].events.TaskRequestSubmitted().process_receipt(receipt)
+                if not logs:
+                    raise ValueError("No TaskRequestSubmitted event found in the receipt")
+
+                task_id = logs[0]['args']['taskId']
+                logging.info(f"Iteration {iteration_number} - Task submitted successfully. Task ID: {task_id}")
+
+                return task_id
             except Exception as e:
-                logging.error(f"Error selecting solver on attempt {attempt}: {e}")
-                logging.info(f"Retrying in {retry_delay} seconds...")
+                logging.error(f"Error submitting task on attempt {attempt}: {e}")
+                logging.error(f'Retrying in {retry_delay} seconds...')
+                retry_delay = min(2 * retry_delay, 60)
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)  # Exponential backoff
 
-    async def remove_solver_stake(self, task_type, task_id, iteration_number):
+
+
+    async def select_solver(self, task_type, task_id, iteration_number, retry_delay=1):
         try:
-            logging.info(f"Removing solver stake for task ID: {task_id}")
+            logging.info(f"Selecting solver for task ID: {task_id}")
 
-            await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
+            start_transact_time = time.time()
             receipt = await async_transact_with_contract_function(
-                self.web3, self.contracts[task_type], 'removeSolverStake', self.get_next_wallet()['private_key'], task_id, attempts=1)
-            logging.info(f"Iteration {iteration_number} - removeSolverStake transaction receipt: {receipt}")
+                self.web3, self.contracts[task_type], 'selectSolver', self.get_next_wallet()['private_key'], task_id, attempts=1)
+            end_transact_time = time.time()
+            logging.info(f"Transaction duration: {end_transact_time - start_transact_time} seconds")
+
+            logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
+            return True
         except Exception as e:
-            logging.error(f"Error removing solver stake: {e}")
-            raise
+            logging.error(f"Error selecting solver: {e}")
 
     async def get_task_result(self, task_type, task_id, iteration_number):
         try:
@@ -220,6 +168,7 @@ class Master:
             return None
 
     async def main_iteration(self, iteration_number):
+
         logging.info(f"Starting iteration {iteration_number}")
         current_version_number = int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
@@ -234,23 +183,20 @@ class Master:
             'accumulation_steps': learning_params['accumulation_steps']
         }
         task_id = await self.submit_task(TENSOR_NAME, task_params, iteration_number)
+        
+        await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.get_next_wallet()['private_key'])
+        await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
 
         # Wait until the solver selection is successful before launching a new iteration
         await self.select_solver(TENSOR_NAME, task_id, iteration_number)
-        start_time = time.time()
-        while time.time() - start_time < MAX_SOLVER_SELECTION_DURATION:
-            try:
-                await self.remove_solver_stake(TENSOR_NAME, task_id, iteration_number)
-                result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
-                await self.update_sot_all(TENSOR_NAME, learning_params, TENSOR_NAME, result, iteration_number=iteration_number)
-                # Start the next iteration as soon as the solver is selected
-                self.iteration += 1
-                asyncio.create_task(self.main_iteration(self.iteration))
-                break
-            except Exception as e:
-                logging.error("Solver selection failed for this iteration. Continuing to the next iteration.")
-            await asyncio.sleep(1)
+        result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
+        await self.update_sot_all(TENSOR_NAME, learning_params, TENSOR_NAME, result, iteration_number=iteration_number)
+        
 
+        # Start the next iteration as soon as the solver is selected
+        self.iteration += 1
+        asyncio.create_task(self.main_iteration(self.iteration))
+        
         # Update the plot explicitly
         self.update_plot()
 
@@ -331,7 +277,7 @@ if __name__ == "__main__":
     parser.add_argument('--wallets_file', type=str, required=True, help="Path to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--max_concurrent_iterations', type=int, default=4, help="Maximum number of concurrent iterations")
+    parser.add_argument('--max_concurrent_iterations', type=int, default=2, help="Maximum number of concurrent iterations")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()
