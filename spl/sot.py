@@ -347,6 +347,9 @@ def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0
 
 def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
     tensor_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
+    if not os.path.exists(tensor_path):
+        raise FileNotFoundError(f"Tensor file for {tensor_name} not found at {tensor_path}")
+    
     tensor = torch.load(tensor_path, map_location=device)
 
     if tensor is None:
@@ -366,12 +369,15 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
         logging.error(f"NaNs or Infs detected in gradients before AdamW update for {tensor_name}")
         raise ValueError(f"NaNs or Infs detected in gradients for {tensor_name}")
 
-
     tensor_adam_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
     tensor_adam_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{version_number}.pt')
 
-    adam_m = torch.load(tensor_adam_m_path, map_location=device)
-    adam_v = torch.load(tensor_adam_v_path, map_location=device)
+    adam_m, adam_v = None, None
+
+    if os.path.exists(tensor_adam_m_path):
+        adam_m = torch.load(tensor_adam_m_path, map_location=device)
+    if os.path.exists(tensor_adam_v_path):
+        adam_v = torch.load(tensor_adam_v_path, map_location=device)
 
     if adam_m is None or adam_v is None:
         adam_m = torch.zeros_like(tensor, device=device)
@@ -414,18 +420,15 @@ def update_state():
 
     future_version_number = (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
 
-    with last_future_version_lock:
-        if last_future_version_number.get(tensor_name, 0) < future_version_number:
-            if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
-                with block_timestamps_lock:
-                    block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
-                save_json(block_timestamps_file, block_timestamps)
-            last_future_version_number[tensor_name] = future_version_number
-            save_json(last_future_version_file, last_future_version_number)
-        with num_updates_lock:
-            num_updates[tensor_name] = 0
-            save_json(num_updates_file, num_updates)
-        logging.info(f"Future version number for {tensor_name}: {future_version_number}")
+    if last_future_version_number.get(tensor_name, 0) < future_version_number:
+        if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
+            with block_timestamps_lock:
+                block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
+            save_json(block_timestamps_file, block_timestamps)
+    with num_updates_lock:
+        num_updates[tensor_name] = 0
+        save_json(num_updates_file, num_updates)
+    logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
     try:
         with requests.Session() as session:
@@ -451,6 +454,7 @@ def update_state():
 
         # Calculate the future tensor
         current_version_number = block_timestamps.get(tensor_name, 0)
+        logging.info(f'Updating state for {tensor_name}, future version number: {future_version_number}, current version number: {current_version_number}')
 
         with num_updates_lock:
             num_of_updates = num_updates[tensor_name] + 1
@@ -473,6 +477,11 @@ def update_state():
         torch.save(future_tensor, future_tensor_path)
         torch.save(m_update, future_tensor_adam_m_path)
         torch.save(v_update, future_tensor_adam_v_path)
+        
+        if last_future_version_number.get(tensor_name, 0) < future_version_number:
+            with last_future_version_lock:
+                last_future_version_number[tensor_name] = future_version_number
+                save_json(last_future_version_file, last_future_version_number)
 
         # Cleanup old accumulated grads tensors
         for filename in os.listdir(state_dir):

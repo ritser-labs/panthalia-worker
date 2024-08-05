@@ -41,13 +41,13 @@ model_args = ModelArgs(
     max_seq_len=256
 )
 
-batch_size = 2048
+batch_size = 1024
 
 BUFFER_SIZE = 32768  # Size of the buffer to shuffle data
 
-ACCUMULATION_STEPS = 64
+ACCUMULATION_STEPS = 32
 
-TENSOR_VERSION_INTERVAL = 30
+TENSOR_VERSION_INTERVAL = 15
 
 MAX_SUBMIT_TASK_RETRY_DURATION = 300
 

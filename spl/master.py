@@ -291,7 +291,7 @@ if __name__ == "__main__":
     parser.add_argument('--wallets_file', type=str, required=True, help="Path to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--max_concurrent_iterations', type=int, default=2, help="Maximum number of concurrent iterations")
+    parser.add_argument('--max_concurrent_iterations', type=int, default=4, help="Maximum number of concurrent iterations")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()
