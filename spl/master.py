@@ -49,6 +49,7 @@ class Master:
         self.ax.grid(True)
 
         # Run the main process
+        self.tasks = []  # Track running tasks
         asyncio.run(self.run_main())
 
     def load_wallets(self, wallets_file):
@@ -137,8 +138,6 @@ class Master:
                 retry_delay = min(2 * retry_delay, 60)
                 await asyncio.sleep(retry_delay)
 
-
-
     async def select_solver(self, task_type, task_id, iteration_number, retry_delay=1):
         try:
             logging.info(f"Selecting solver for task ID: {task_id}")
@@ -168,7 +167,6 @@ class Master:
             return None
 
     async def main_iteration(self, iteration_number):
-
         logging.info(f"Starting iteration {iteration_number}")
         current_version_number = int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
@@ -187,20 +185,18 @@ class Master:
         await wait_for_state_change(self.web3, self.pool, PoolState.SelectionsFinalizing.value, self.get_next_wallet()['private_key'])
         await wait_for_state_change(self.web3, self.pool, PoolState.Unlocked.value, self.get_next_wallet()['private_key'])
 
-        # Wait until the solver selection is successful before launching a new iteration
         await self.select_solver(TENSOR_NAME, task_id, iteration_number)
         result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
         loss_value = result['loss']
         self.perplexity_queue.put(loss_value)
         await self.update_latest_loss(loss_value)
         await self.update_sot_all(TENSOR_NAME, learning_params, TENSOR_NAME, result, iteration_number=iteration_number)
-        
 
-        # Start the next iteration as soon as the solver is selected
+
+        task = asyncio.create_task(self.main_iteration(self.iteration))
+        self.tasks.append(task)
         self.iteration += 1
-        asyncio.create_task(self.main_iteration(self.iteration))
-        
-        # Update the plot explicitly
+
         self.update_plot()
 
     async def run_main(self):
@@ -208,11 +204,16 @@ class Master:
         await self.approve_tokens_at_start()
 
         # Start the initial set of iterations
-        tasks = []
-        for _ in range(1, self.max_concurrent_iterations + 1):
-            tasks.append(self.main_iteration(self.iteration))
+        for _ in range(self.max_concurrent_iterations):
+            task = asyncio.create_task(self.main_iteration(self.iteration))
+            self.tasks.append(task)
             self.iteration += 1
-        await asyncio.gather(*tasks)
+        
+        # Dynamically await new tasks as they are added
+        while True:
+            if self.tasks:
+                await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
+                self.tasks = [task for task in self.tasks if not task.done()]
 
     def sign_message(self, message, wallet):
         message = encode_defunct(text=message)
