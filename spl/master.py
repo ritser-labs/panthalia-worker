@@ -168,7 +168,6 @@ class Master:
 
     async def main_iteration(self, iteration_number):
         logging.info(f"Starting iteration {iteration_number}")
-        current_version_number = int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
 
         learning_params = get_learning_hyperparameters(iteration_number)
         batch_url, targets_url = await self.get_batch_and_targets_url()
@@ -177,7 +176,6 @@ class Master:
         task_params = {
             'batch_url': batch_url,
             'targets_url': targets_url,
-            'version_number': current_version_number,
             'accumulation_steps': learning_params['accumulation_steps']
         }
         task_id = await self.submit_task(TENSOR_NAME, task_params, iteration_number)

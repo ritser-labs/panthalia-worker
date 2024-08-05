@@ -70,7 +70,7 @@ def parse_args():
     parser.add_argument('--max_stakes', type=int, default=1, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
-    parser.add_argument('--max_queued_tasks', type=int, default=0, help="Maximum number of tasks allowed in the queue awaiting processing")
+    parser.add_argument('--max_queued_tasks', type=int, default=1, help="Maximum number of tasks allowed in the queue awaiting processing")
     return parser.parse_args()
 
 args = parse_args()
@@ -147,6 +147,15 @@ def download_json(url):
         response.raise_for_status()  # Raise an error for bad status codes
         data = response.json()  # Parse and return the JSON content
         return torch.tensor(data, dtype=torch.long).to(device)  # Convert to tensor
+    except requests.RequestException as e:
+        logging.error(f"Failed to download JSON from {url}: {e}")
+        raise
+
+def get_json(url, params=None):
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()  # Raise an error for bad status codes
+        return response.json()  # Parse and return the JSON content
     except requests.RequestException as e:
         logging.error(f"Failed to download JSON from {url}: {e}")
         raise
@@ -228,7 +237,6 @@ def handle_event(task_id, task, time_invoked, contract_index):
     task_queue.add_task({
         'task_id': task_id,
         'task_params': task_params,
-        'version_number': task_params.get('version_number'),
         'time_status_changed': task.timeStatusChanged,
         'contract_index': contract_index
     })
@@ -266,21 +274,25 @@ async def process_tasks():
                 with concurrent_tasks_counter_lock:
                     concurrent_tasks_counter -= 1
                 return
-
-            if (task_queue.current_version is None
-                or next_task['version_number'] != task_queue.current_version):
-                logging.debug(f"Syncing tensors for version number: {next_task['version_number']}")
-                sync_start_time = time.time()
-                await sync_tensors(next_task['version_number'], next_task['contract_index'])
-                sync_end_time = time.time()
-                logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
-                task_queue.current_version = next_task['version_number']
-
             task_id = next_task['task_id']
             task_params = next_task['task_params']
             contract_index = next_task['contract_index']
             task_type = args.task_types[contract_index]
-            
+            tensor_name = get_relevant_tensor_for_task(task_type)
+            version_num_url = f'{args.sot_url}/tensor_block_timestamp'
+            version_number = get_json(
+                version_num_url,
+                params={'tensor_name': tensor_name}
+            )['version_number']
+            if (task_queue.current_version is None
+                or version_number != task_queue.current_version):
+                logging.debug(f"Syncing tensors for version number: {version_number}")
+                sync_start_time = time.time()
+                await sync_tensors(version_number, next_task['contract_index'])
+                sync_end_time = time.time()
+                logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
+                task_queue.current_version = version_number
+
             logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
 
             # Process the task...
@@ -304,11 +316,11 @@ async def process_tasks():
             
             logging.debug("Executing training task")
             task_start_time = time.time()
-            model_task(batch, targets, accumulation_steps)
+            updates, loss = model_task(batch, targets, accumulation_steps)
             task_end_time = time.time()
             logging.debug(f"Task took {task_end_time - task_start_time:.2f} seconds")
-            logging.info(f"Updates tensor memory size: {tensor_memory_size(tensors['updates']):.2f} MB")
-            result = await upload_results()
+            logging.info(f"Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
+            result = await upload_results(version_number, updates, loss)
             logging.info(f"Uploaded results for task {task_id}")
 
             submit_solution_start_time = time.time()
@@ -362,9 +374,8 @@ async def reclaim_stakes():
         await asyncio.sleep(2)
 
 async def sync_tensors(sync_version_number, contract_index):
-    relevant_tensors = get_relevant_tensors_for_task(args.task_types[contract_index])
-    for tensor_name in relevant_tensors:
-        await initialize_tensor(tensor_name, sync_version_number)
+    relevant_tensor = get_relevant_tensor_for_task(args.task_types[contract_index])
+    await initialize_tensor(relevant_tensor, sync_version_number)
 
 async def submit_solution(task_id, result, contract_index):
     try:
@@ -445,24 +456,24 @@ def model_task(inputs, targets, accumulation_steps):
         for grad in grads_accumulated:
             grad.div_(accumulation_steps)
 
-    tensors['updates'] = torch.cat([grad.view(-1) for grad in grads_accumulated])
-    tensors['loss'] = total_loss / accumulation_steps
+    updates = torch.cat([grad.view(-1) for grad in grads_accumulated])
+    loss = total_loss / accumulation_steps
 
-    logging.info(f"Model task completed. Total loss: {tensors['loss']:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
+    logging.info(f"Model task completed. Total loss: {loss:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
 
+    return updates, loss
 
-async def upload_results():
-    grads_url = await upload_tensor(tensors['updates'], 'grads')
-    loss = tensors['loss']
+async def upload_results(version_number, updates, loss):
+    grads_url = await upload_tensor(updates, 'grads')
 
-    block_timestamp = (await web3.eth.get_block('latest'))['timestamp']
-    version_number = block_timestamp // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL
-
-    return {
+    result = {
         'grads_url': grads_url,
         'loss': loss,
         'version_number': version_number
     }
+    
+    del updates
+    return result
 
 async def report_sync_status():
     
@@ -505,8 +516,8 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
         logging.error(f"Failed to initialize tensor {tensor_name} due to error: {e}")
         raise
 
-def get_relevant_tensors_for_task(task_type):
-    return [TENSOR_NAME]
+def get_relevant_tensor_for_task(task_type):
+    return TENSOR_NAME
 
 async def fetch_task(task_id, contract_index):
     task_tuple = await contracts[contract_index].functions.getTask(task_id).call()
@@ -570,7 +581,7 @@ async def main():
     logging.info("Starting tensor synchronization...")
     relevant_tensors = []
     for task_type in args.task_types:
-        relevant_tensors.extend(get_relevant_tensors_for_task(task_type))
+        relevant_tensors.append(get_relevant_tensor_for_task(task_type))
     relevant_tensors = list(set(relevant_tensors))
     reported = False
 
@@ -592,8 +603,8 @@ async def main():
             if not reported:
                 duplicate_relevant_tensors = []
                 for contract_index, task_type in enumerate(args.task_types):
-                    for tensor_name in get_relevant_tensors_for_task(task_type):
-                        duplicate_relevant_tensors.append((contract_index, tensor_name))
+                    relevant_tensor = get_relevant_tensor_for_task(task_type)
+                    duplicate_relevant_tensors.append((contract_index, relevant_tensor))
                 for contract_index, tensor_name in duplicate_relevant_tensors:
                     await initialize_tensor(tensor_name)
                 await report_sync_status()
