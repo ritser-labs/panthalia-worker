@@ -11,8 +11,8 @@ from web3.exceptions import ContractCustomError
 from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from device import device
-from common import get_dummy_input, Model, Task, TaskStatus, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, download_file, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
-from fairscale.nn.model_parallel.initialize import initialize_model_parallel, model_parallel_is_initialized
+from common import get_dummy_input, Model, Task, TaskStatus, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, tensor_to_model, initialize_distributed_environment_and_globals, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
+from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Optional, Tuple
 from io import BytesIO
 import time
@@ -136,39 +136,6 @@ class TaskQueue:
             return len(self.queue)
 
 task_queue = TaskQueue()
-
-def model_to_tensor(model: Model) -> torch.Tensor:
-    params = list(model.parameters())
-    return torch.cat([p.view(-1) for p in params])
-
-def tensor_to_model(tensor: torch.Tensor) -> Model:
-    model = Model(model_args).to(device)
-    pointer = 0
-    total_params = sum(p.numel() for p in model.parameters())
-
-    if tensor.numel() != total_params:
-        raise ValueError(f"Total number of parameters {total_params} does not match the size of the tensor {tensor.numel()}")
-
-    for param in model.parameters():
-        num_param = param.numel()
-        logging.debug(f"Pointer: {pointer}, Num param: {num_param}, Tensor size: {tensor.numel()}")
-
-        if pointer + num_param > tensor.numel():
-            raise ValueError(f"Pointer {pointer} with num_param {num_param} exceeds tensor size {tensor.numel()}")
-
-        param.data = tensor[pointer:pointer + num_param].view(param.size()).to(device)
-        pointer += num_param
-
-    return model
-
-def initialize_distributed_environment_and_globals():
-    global freqs_cis, mask
-
-    logging.info("Initializing distributed environment")
-    initialize_distributed_environment(args.backend)
-    initialize_model_parallel(model_parallel_size_=1)
-
-    logging.info("Environment and global variables initialized")
 
 def download_file(url):
     response = requests.get(url)
@@ -592,7 +559,7 @@ async def get_all_task_ids(last_checked_task_ids):
 async def main():
     logging.info("Starting main process")
     torch.set_default_device(device)
-    initialize_distributed_environment_and_globals()
+    initialize_distributed_environment_and_globals(args.backend)
 
     await initialize_contracts()
 

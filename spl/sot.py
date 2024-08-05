@@ -5,7 +5,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import Model, model_args, tokenizer, batch_size, initialize_distributed_environment, TENSOR_VERSION_INTERVAL, BUFFER_SIZE, TENSOR_NAME
+from common import Model, model_args, tokenizer, batch_size, initialize_distributed_environment_and_globals, TENSOR_VERSION_INTERVAL, BUFFER_SIZE, TENSOR_NAME
 from datasets import load_dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
@@ -77,12 +77,6 @@ num_of_updates_dict = defaultdict(int)
 
 latest_loss = {'value': None}
 latest_loss_lock = threading.Lock()
-
-def initialize_distributed_environment_and_globals():
-    logging.info("Initializing distributed environment")
-    initialize_distributed_environment('gloo')
-    initialize_model_parallel(model_parallel_size_=1)
-    logging.info("Environment and global variables initialized")
 
 def initialize_tensor(name, sync_version_number=None, random_init=True):
     if sync_version_number is None:
@@ -207,7 +201,7 @@ def preload_batch():
 
 def initialize_service():
     logging.info("Initializing distributed environment and tensors")
-    initialize_distributed_environment_and_globals()
+    initialize_distributed_environment_and_globals('gloo')
     initialize_all_tensors()
     preload_batch()
 

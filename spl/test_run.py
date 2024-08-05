@@ -7,7 +7,7 @@ import requests
 import threading
 import curses
 from flask import Flask, request, jsonify
-from common import model_args, load_abi, async_transact_with_contract_function
+from common import model_args, load_abi, async_transact_with_contract_function, wait_for_sot
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
@@ -73,20 +73,6 @@ def report_sync():
     global synced_workers
     synced_workers += 1
     return jsonify({'status': 'ok'})
-
-def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
-    """Wait for the SOT service to be available."""
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(f"{sot_url}/health")
-            if response.status_code == 200:
-                logging.debug("SOT service is available.")
-                return True
-        except requests.ConnectionError as e:
-            logging.debug(f"Waiting for SOT service to be available... {e}")
-        time.sleep(2)
-    return False
 
 def wait_for_workers_to_sync(worker_count, timeout=600):
     global synced_workers
