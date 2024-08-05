@@ -67,10 +67,10 @@ def parse_args():
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
     parser.add_argument('--sync_url', type=str, required=False, help="URL for reporting sync status", default='http://localhost:5002')
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
-    parser.add_argument('--max_stakes', type=int, default=1, help="Maximum number of stakes to maintain")
+    parser.add_argument('--max_stakes', type=int, default=4, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
-    parser.add_argument('--max_queued_tasks', type=int, default=1, help="Maximum number of tasks allowed in the queue awaiting processing")
+    parser.add_argument('--max_queued_tasks', type=int, default=4, help="Maximum number of tasks allowed in the queue awaiting processing")
     return parser.parse_args()
 
 args = parse_args()
@@ -319,32 +319,33 @@ async def process_tasks():
             updates, loss = model_task(batch, targets, accumulation_steps)
             task_end_time = time.time()
             logging.debug(f"Task took {task_end_time - task_start_time:.2f} seconds")
-            logging.info(f"Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
-            result = await upload_results(version_number, updates, loss)
-            logging.info(f"Uploaded results for task {task_id}")
+        logging.info(f"Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
+        result = await upload_results(version_number, updates, loss)
+        del updates
+        logging.info(f"Uploaded results for task {task_id}")
 
-            submit_solution_start_time = time.time()
-            await submit_solution(task_id, result, contract_index)
-            submit_solution_end_time = time.time()
-            logging.debug(f"submit_solution() took {submit_solution_end_time - submit_solution_start_time:.2f} seconds")
+        submit_solution_start_time = time.time()
+        await submit_solution(task_id, result, contract_index)
+        submit_solution_end_time = time.time()
+        logging.debug(f"submit_solution() took {submit_solution_end_time - submit_solution_start_time:.2f} seconds")
 
-            processed_tasks.add((task_id, contract_index))
+        processed_tasks.add((task_id, contract_index))
 
-            logging.info(f"Processed task {task_id} for task type {task_type} successfully")
+        logging.info(f"Processed task {task_id} for task type {task_type} successfully")
 
-            # Log the time taken to process the task
-            with task_start_times_lock:
-                task_start_time = task_start_times.pop(task_id, None)
-            if task_start_time:
-                total_time = time.time() - task_start_time
-                logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
+        # Log the time taken to process the task
+        with task_start_times_lock:
+            task_start_time = task_start_times.pop(task_id, None)
+        if task_start_time:
+            total_time = time.time() - task_start_time
+            logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
 
-            end_time = time.time()
-            logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
+        end_time = time.time()
+        logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
 
-            with concurrent_tasks_counter_lock:
-                # Decrease the counter when a task is completed
-                concurrent_tasks_counter -= 1
+        with concurrent_tasks_counter_lock:
+            # Decrease the counter when a task is completed
+            concurrent_tasks_counter -= 1
     except Exception as e:
         logging.error(f"Error processing task: {e}", exc_info=True)
         with concurrent_tasks_counter_lock:
@@ -466,14 +467,11 @@ def model_task(inputs, targets, accumulation_steps):
 async def upload_results(version_number, updates, loss):
     grads_url = await upload_tensor(updates, 'grads')
 
-    result = {
+    return {
         'grads_url': grads_url,
         'loss': loss,
         'version_number': version_number
     }
-    
-    del updates
-    return result
 
 async def report_sync_status():
     
