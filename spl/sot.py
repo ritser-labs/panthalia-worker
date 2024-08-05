@@ -40,26 +40,35 @@ os.makedirs(state_dir, exist_ok=True)
 temp_dir = os.path.join(state_dir, 'temp')
 os.makedirs(temp_dir, exist_ok=True)
 
-# File to store block timestamps
+# File paths to store block timestamps, num_updates, and last_future_version_number
 block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
+num_updates_file = os.path.join(state_dir, 'num_updates.json')
+last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
 
-# Initialize a lock for block_timestamps
+# Initialize locks for these dicts
 block_timestamps_lock = threading.Lock()
+num_updates_lock = threading.Lock()
+last_future_version_lock = threading.Lock()
 
-def load_block_timestamps():
-    with block_timestamps_lock:
-        if os.path.exists(block_timestamps_file):
-            with open(block_timestamps_file, 'r') as f:
-                return json.load(f)
-        return {}
+def load_json(file_path, default):
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    else:
+        save_json(file_path, default)
+        return default
 
-def save_block_timestamps(block_timestamps):
-    with block_timestamps_lock:
-        with open(block_timestamps_file, 'w') as f:
-            json.dump(block_timestamps, f)
+def save_json(file_path, data):
+    with open(file_path, 'w') as f:
+        json.dump(data, f)
 
-# Load existing block timestamps on startup
-block_timestamps = load_block_timestamps()
+# Load existing block timestamps, num_updates, and last_future_version_number on startup
+with block_timestamps_lock:
+    block_timestamps = load_json(block_timestamps_file, {})
+with num_updates_lock:
+    num_updates = load_json(num_updates_file, {})
+with last_future_version_lock:
+    last_future_version_number = load_json(last_future_version_file, {})
 
 # Dictionary to store gradient updates
 executor = ThreadPoolExecutor(max_workers=10)
@@ -72,8 +81,6 @@ master_public_keys = []
 
 # Dictionary to store used nonces
 used_nonces = {}
-
-num_of_updates_dict = defaultdict(int)
 
 latest_loss = {'value': None}
 latest_loss_lock = threading.Lock()
@@ -110,7 +117,10 @@ def initialize_tensor(name, sync_version_number=None, random_init=True):
     torch.save(tensor, file_path)
     with block_timestamps_lock:
         block_timestamps[name] = sync_version_number
-    save_block_timestamps(block_timestamps)
+    save_json(block_timestamps_file, block_timestamps)
+    with last_future_version_lock:
+        last_future_version_number[name] = sync_version_number
+    save_json(last_future_version_file, last_future_version_number)
 
 def initialize_all_tensors():
     initialize_tensor(TENSOR_NAME, random_init=True)
@@ -270,7 +280,6 @@ def requires_authentication(f):
         return f(*args, **kwargs)
     return decorated_function
 
-
 @app.route('/latest_model_params', methods=['GET'])
 def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
@@ -405,6 +414,19 @@ def update_state():
 
     future_version_number = (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
 
+    with last_future_version_lock:
+        if last_future_version_number.get(tensor_name, 0) < future_version_number:
+            if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
+                with block_timestamps_lock:
+                    block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
+                save_json(block_timestamps_file, block_timestamps)
+            last_future_version_number[tensor_name] = future_version_number
+            save_json(last_future_version_file, last_future_version_number)
+        with num_updates_lock:
+            num_updates[tensor_name] = 0
+            save_json(num_updates_file, num_updates)
+        logging.info(f"Future version number for {tensor_name}: {future_version_number}")
+
     try:
         with requests.Session() as session:
             tensor_data = fetch(session, result_url)
@@ -429,16 +451,13 @@ def update_state():
 
         # Calculate the future tensor
         current_version_number = block_timestamps.get(tensor_name, 0)
-        current_state_file_path = os.path.join(state_dir, f'{tensor_name}_{current_version_number}.pt')
-        if os.path.exists(current_state_file_path):
-            current_tensor = torch.load(current_state_file_path, map_location=device)
-        else:
-            raise ValueError(f"Current state file not found for {tensor_name}")
 
-        num_of_updates = num_of_updates_dict.get(f'{tensor_name}_updates_{future_version_number}', 0) + 1
-        num_of_updates_dict[f'{tensor_name}_updates_{future_version_number}'] = num_of_updates
+        with num_updates_lock:
+            num_of_updates = num_updates[tensor_name] + 1
+            num_updates[tensor_name] = num_of_updates
+            save_json(num_updates_file, num_updates)
+            
         averaged_grads = accumulated_grads / num_of_updates
-        #future_tensor = accumulated_grads / num_of_updates + current_tensor
         future_tensor, m_update, v_update = apply_adamw(
             current_version_number,
             tensor_name,
@@ -451,7 +470,6 @@ def update_state():
             data.get('t', 1)
         )
 
-
         torch.save(future_tensor, future_tensor_path)
         torch.save(m_update, future_tensor_adam_m_path)
         torch.save(v_update, future_tensor_adam_v_path)
@@ -460,11 +478,6 @@ def update_state():
         for filename in os.listdir(state_dir):
             if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
                 os.remove(os.path.join(state_dir, filename))
-
-        # Update block timestamps and number of updates
-        with block_timestamps_lock:
-            block_timestamps[tensor_name] = future_version_number
-        save_block_timestamps(block_timestamps)
 
         logging.debug(f"Updated state for {tensor_name}")
         return jsonify({'status': 'success', 'version_number': future_version_number})
