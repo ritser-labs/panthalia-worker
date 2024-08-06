@@ -466,7 +466,7 @@ def update_state():
             current_version_number,
             tensor_name,
             averaged_grads,
-            data.get('learning_rate', 0.002),
+            data.get('learning_rate', 0.002) * num_of_updates,
             data.get('beta1', 0.9),
             data.get('beta2', 0.99),
             data.get('epsilon', 1e-6),

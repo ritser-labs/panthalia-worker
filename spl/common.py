@@ -446,8 +446,8 @@ def get_learning_hyperparameters(current_iteration):
     """
     T_0 = 5000  # Initial number of iterations for the first cycle
     T_mult = 2  # Factor to increase the cycle length after each restart
-    eta_max = 0.002  # Initial learning rate (maximum)
-    eta_min = 0.00001  # Minimum learning rate
+    eta_max = 0.002 * NUM_MICROBATCHES  # Initial learning rate (maximum)
+    eta_min = 0.00001 * NUM_MICROBATCHES  # Minimum learning rate
 
     # Determine the current cycle length
     cycle_length = T_0
