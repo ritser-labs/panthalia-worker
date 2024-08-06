@@ -243,7 +243,7 @@ def monitor_processes(stdscr, processes, task_counts):
 
         # Fetch and display the latest loss
         latest_loss = fetch_latest_loss(args.sot_url)
-        loss_display = f"Latest Loss: {latest_loss}" if latest_loss is not None else "Latest Loss: N/A"
+        loss_display = f"Latest Loss: {latest_loss:.3f}" if latest_loss is not None else "Latest Loss: N/A"
         loss_y = height - len(task_counts) - 5
         stdscr.addstr(loss_y, split_point, loss_display, curses.color_pair(4))
 
