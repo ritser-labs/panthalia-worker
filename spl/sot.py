@@ -24,7 +24,7 @@ import functools
 
 app = Flask(__name__)
 sync_status = {}
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
     logging.StreamHandler()
 ])
 
@@ -364,7 +364,7 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
     logging.debug(f"Flattened gradients: {grads_flat}")
 
     # Clip gradients
-    grads_flat = torch.nn.utils.clip_grad_norm_(grads_flat, clip_grad)
+    grads_flat = torch.nn.utils.clip_grad_norm_(grads_flat, clip_grad).to(device)  # Move gradients to device
 
     if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
         logging.error(f"NaNs or Infs detected in gradients before AdamW update for {tensor_name}")
@@ -376,9 +376,9 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
     adam_m, adam_v = None, None
 
     if os.path.exists(tensor_adam_m_path):
-        adam_m = torch.load(tensor_adam_m_path, map_location=device)
+        adam_m = torch.load(tensor_adam_m_path, map_location=device).to(device)
     if os.path.exists(tensor_adam_v_path):
-        adam_v = torch.load(tensor_adam_v_path, map_location=device)
+        adam_v = torch.load(tensor_adam_v_path, map_location=device).to(device)
 
     if adam_m is None or adam_v is None:
         adam_m = torch.zeros_like(tensor, device=device)
@@ -386,6 +386,8 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
 
     logging.debug(f"m before AdamW: {adam_m}")
     logging.debug(f"v before AdamW: {adam_v}")
+    
+    clip_threshold = 1.0
 
     # Get the StableAdamW updates
     param_update, m_update, v_update = stable_adamw_update(
@@ -394,10 +396,11 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
         adam_m,
         adam_v,
         learning_rate,
+        weight_decay,
         beta1,
         beta2,
         epsilon,
-        weight_decay,
+        clip_threshold,
         t
     )
 
@@ -445,12 +448,12 @@ def update_state():
 
         # Load or initialize the accumulated_grads tensor
         if os.path.exists(accumulated_grads_path):
-            accumulated_grads = torch.load(accumulated_grads_path, map_location=device)
+            accumulated_grads = torch.load(accumulated_grads_path, map_location=device).to(device)
         else:
-            accumulated_grads = torch.zeros_like(tensor)
+            accumulated_grads = torch.zeros_like(tensor, device=device)
 
         # Update the accumulated_grads tensor
-        accumulated_grads += tensor
+        accumulated_grads += tensor.to(device)
         torch.save(accumulated_grads, accumulated_grads_path)
 
         # Calculate the future tensor
@@ -462,7 +465,7 @@ def update_state():
             num_updates[tensor_name] = num_of_updates
             save_json(num_updates_file, num_updates)
             
-        averaged_grads = accumulated_grads / num_of_updates
+        averaged_grads = (accumulated_grads / num_of_updates).to(device)
         future_tensor, m_update, v_update = apply_adamw(
             current_version_number,
             tensor_name,
@@ -496,6 +499,7 @@ def update_state():
     except Exception as e:
         logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
     return jsonify({'error': 'Could not update state'}), 500
+
 
 @app.route('/latest_state', methods=['GET'])
 def latest_state():

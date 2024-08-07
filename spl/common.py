@@ -47,11 +47,11 @@ EXAMPLES_PER_MICROBATCH = 32
 
 batch_size = NUM_MICROBATCHES * EXAMPLES_PER_MICROBATCH
 
-BUFFER_SIZE = 32768  # Size of the buffer to shuffle data
+BUFFER_SIZE = 1024  # Size of the buffer to shuffle data
 
 ACCUMULATION_STEPS = NUM_MICROBATCHES
 
-TENSOR_VERSION_INTERVAL = 15
+TENSOR_VERSION_INTERVAL = 1
 
 MAX_SUBMIT_TASK_RETRY_DURATION = 300
 
@@ -444,7 +444,7 @@ def get_learning_hyperparameters(current_iteration):
     Returns:
         dict: A dictionary containing the learning rate and Adam optimizer parameters.
     """
-    T_0 = 5000  # Initial number of iterations for the first cycle
+    T_0 = 5000 / NUM_MICROBATCHES  # Initial number of iterations for the first cycle
     T_mult = 2  # Factor to increase the cycle length after each restart
     eta_max = 0.002 * NUM_MICROBATCHES  # Initial learning rate (maximum)
     eta_min = 0.00001 * NUM_MICROBATCHES  # Minimum learning rate
