@@ -25,6 +25,7 @@ from eth_abi import decode
 current_dir = os.path.dirname(os.path.abspath(__file__))
 # IMPORTANT: if you change tokenizer, dont forget to comment out the code in tokenizer.py
 # that ignores non ascii characters
+# and change pad_id
 tokenizer_path = os.path.join(current_dir, 'tokenizers', 'char.tiktoken')
 
 tokenizer = Tokenizer(tokenizer_path)
