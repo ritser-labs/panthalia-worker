@@ -5,17 +5,24 @@ import torch
 import time
 import requests
 from model import ModelArgs, Transformer
-from common import Model, wait_for_sot, tensor_to_model, initialize_distributed_environment_and_globals, model_args
+from common import Model, wait_for_sot, tensor_to_model, initialize_distributed_environment_and_globals, model_args, tokenizer
 from device import device
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
 from io import BytesIO
+import torch.nn as nn
+import torch.nn.functional as F
 
 # Constants
 SOT_URL = 'http://localhost:5001'
 MASTER_WALLETS_FILE = 'master_wallets.json'
 batch_size = 32  # Fixed batch size
+
+def random_init_all_params(model):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            nn.init.normal_(param, mean=0.0, std=0.02)
 
 # Load the master wallet information
 def load_master_wallet():
@@ -38,6 +45,7 @@ def start_sot():
 def load_model(tensor_path):
     model_tensor = torch.load(tensor_path, map_location=device)
     model = tensor_to_model(model_tensor)
+    random_init_all_params(model)  # Apply random initialization to all parameters
     model.train()  # Set model to training mode
     return model
 
@@ -78,30 +86,35 @@ def get_batch(wallet):
         return None, None
 
 # Function to train the model on the retrieved batch
-def train_model(batch, targets, accumulation_steps):
-    global model
-
-    # Set model to training mode
+def train_model(model, optimizer, batch, targets, accumulation_steps):
     model.train()
 
-    # Initialize optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
-
-    # Divide the batch into microbatches for gradient accumulation
     microbatch_size = batch_size // accumulation_steps
 
+    total_loss = 0.0
     for i in range(accumulation_steps):
         inputs = batch[i * microbatch_size:(i + 1) * microbatch_size].to(device)
         target = targets[i * microbatch_size:(i + 1) * microbatch_size].to(device)
 
         optimizer.zero_grad()
+        print(f'Inputs: {inputs}')
+        print(f'Targets: {target}')
 
         outputs = model(inputs, start_pos=0)
-        loss = torch.nn.functional.cross_entropy(outputs.view(-1, model_args.vocab_size), target.view(-1))
+        print(f'Outputs: {outputs}')
+
+        # Ensure the shapes are correct for cross-entropy loss
+        assert outputs.shape[-1] == model_args.vocab_size, f"Expected outputs last dimension to be {model_args.vocab_size}, got {outputs.shape[-1]}"
+        assert outputs.shape[:-1] == target.shape, f"Expected outputs shape {outputs.shape[:-1]} to match targets shape {target.shape}"
+
+        loss = torch.nn.functional.cross_entropy(outputs.view(-1, model_args.vocab_size), target.view(-1), ignore_index=tokenizer.pad_id)
+        print(f'Loss: {loss.item()}')
+
         loss.backward()
+        total_loss += loss.item()
 
         optimizer.step()
-        
+
         # Detach cache tensors
         if hasattr(model, 'layers'):
             for layer in model.layers:
@@ -111,8 +124,9 @@ def train_model(batch, targets, accumulation_steps):
 
         print(f"Accumulation step {i+1}/{accumulation_steps} - Loss: {loss.item()}")
 
-    print("Training completed for the batch.")
+    print(f"Training completed for the batch. Total loss: {total_loss / accumulation_steps}")
 
+# Adjust main() to initialize optimizer outside the train_model() function call
 def main():
     global model
     os.environ['RANK'] = '0'
@@ -131,12 +145,17 @@ def main():
 
     # Load the initial model
     model = Model(model_args).to(device)
+    random_init_all_params(model)  # Apply random initialization to all parameters
+
     if model:
-        print("Model loaded successfully.")
+        print("Model loaded and initialized successfully.")
     else:
         print("Failed to load the model. Exiting...")
         sot_process.terminate()
         return
+
+    # Initialize optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
 
     # Train indefinitely
     try:
@@ -145,7 +164,7 @@ def main():
             batch, targets = get_batch(wallet)
             if batch is not None and targets is not None:
                 print("Batch retrieved. Starting training...")
-                train_model(batch, targets, accumulation_steps=4)
+                train_model(model, optimizer, batch, targets, accumulation_steps=4)
             else:
                 print("Failed to retrieve a valid batch, skipping this round.")
             time.sleep(1)  # Optional: Add a short delay to avoid hammering the SOT service
