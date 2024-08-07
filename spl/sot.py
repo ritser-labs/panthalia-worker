@@ -102,8 +102,9 @@ def initialize_tensor(name, sync_version_number=None, random_init=True):
     if random_init:
         for param in module.parameters():
             if param.dim() > 1:
-                init.xavier_uniform_(param)
-    else: # Zero initialization for Adam tensors
+                init.kaiming_uniform_(param, a=0)  # He initialization (uniform)
+                # Alternatively, use init.kaiming_normal_(param, a=0) for normal distribution
+    else:  # Zero initialization for Adam tensors
         for param in module.parameters():
             param.data.fill_(0)
 
