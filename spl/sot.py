@@ -103,7 +103,7 @@ def initialize_tensor(name, sync_version_number=None, zero_init=False):
         # Initialize module parameters with Kaiming (He) initialization for all parameters
         for param in module.parameters():
             if param.requires_grad:
-                init.normal_(param, mean=0.0, std=0.02)
+                init.kaiming_uniform_(param, a=0)  # He initialization (uniform)
         
         tensors = [param.data for param in module.parameters()]
         tensor = torch.cat([tensor.view(-1) for tensor in tensors])
@@ -309,9 +309,9 @@ def get_batch():
             preloaded_batch_condition.wait()
 
         batch_filename, targets_filename = preloaded_batch
-        #preloaded_batch = None
+        preloaded_batch = None
 
-    #preload_batch()
+    preload_batch()
 
     try:
         return jsonify({
