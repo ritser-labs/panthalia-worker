@@ -103,8 +103,10 @@ def initialize_tensor(name, sync_version_number=None, zero_init=False):
         # Initialize module parameters with Kaiming (He) initialization for all parameters
         for param in module.parameters():
             if param.requires_grad:
-                init.kaiming_uniform_(param, a=0)  # He initialization (uniform)
-        
+                if param.ndimension() >= 2:  # Ensure the parameter tensor has at least 2 dimensions
+                    init.kaiming_uniform_(param, a=0)  # He initialization (uniform)
+                else:
+                    param.data.uniform_(-0.01, 0.01)  # Small random uniform initialization for scalars or 1D tensors
         tensors = [param.data for param in module.parameters()]
         tensor = torch.cat([tensor.view(-1) for tensor in tensors])
     else:  # Zero initialization for Adam tensors
@@ -453,6 +455,7 @@ def update_state():
         # Paths for accumulated grads and future tensor
         accumulated_grads_path = os.path.join(state_dir, f'accumulated_grads_{tensor_name}_{future_version_number}.pt')
         future_tensor_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
+        unversioned_tensor_path = os.path.join(state_dir, f'{tensor_name}.pt')
         future_tensor_adam_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{future_version_number}.pt')
         future_tensor_adam_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{future_version_number}.pt')
 
@@ -489,6 +492,7 @@ def update_state():
         )
 
         torch.save(future_tensor, future_tensor_path)
+        torch.save(future_tensor, unversioned_tensor_path)
         torch.save(m_update, future_tensor_adam_m_path)
         torch.save(v_update, future_tensor_adam_v_path)
         
