@@ -85,7 +85,7 @@ used_nonces = {}
 latest_loss = {'value': None}
 latest_loss_lock = threading.Lock()
 
-def initialize_tensor(name, sync_version_number=None, random_init=True):
+def initialize_tensor(name, sync_version_number=None, zero_init=False):
     if sync_version_number is None:
         sync_version_number = block_timestamps.get(
             0, int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL)
@@ -99,21 +99,17 @@ def initialize_tensor(name, sync_version_number=None, random_init=True):
     else:
         raise ValueError(f"Unsupported tensor name: {name}")
 
-    if random_init:
+    if not zero_init:
+        # Initialize module parameters with Kaiming (He) initialization for all parameters
         for param in module.parameters():
-            if param.dim() > 1:
-                init.kaiming_uniform_(param, a=0)  # He initialization (uniform)
-                # Alternatively, use init.kaiming_normal_(param, a=0) for normal distribution
-    else:  # Zero initialization for Adam tensors
-        for param in module.parameters():
-            param.data.fill_(0)
-
-    if isinstance(module, list):  # final_logits case
-        tensors = [param.data for submodule in module for param in submodule.parameters()]
-        tensor = torch.cat([tensor.view(-1) for tensor in tensors])
-    else:
+            if param.requires_grad:
+                init.normal_(param, mean=0.0, std=0.02)
+        
         tensors = [param.data for param in module.parameters()]
         tensor = torch.cat([tensor.view(-1) for tensor in tensors])
+    else:  # Zero initialization for Adam tensors
+        tensors = [param.data for param in module.parameters()]
+        tensor = torch.cat([torch.zeros_like(tensor).view(-1) for tensor in tensors])
 
     torch.save(tensor, file_path)
     with block_timestamps_lock:
@@ -124,9 +120,9 @@ def initialize_tensor(name, sync_version_number=None, random_init=True):
     save_json(last_future_version_file, last_future_version_number)
 
 def initialize_all_tensors():
-    initialize_tensor(TENSOR_NAME, random_init=True)
-    initialize_tensor(f'{TENSOR_NAME}_adam_m', random_init=False)
-    initialize_tensor(f'{TENSOR_NAME}_adam_v', random_init=False)
+    initialize_tensor(TENSOR_NAME, zero_init=False)
+    initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
+    initialize_tensor(f'{TENSOR_NAME}_adam_v', zero_init=True)
 
 logging.info("Loading Wikipedia dataset...")
 dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
@@ -163,7 +159,7 @@ def generate_examples(buffer_size=BUFFER_SIZE):
 
                 for seq_len in range(1, min(len(tokens), max_seq_len) + 1):
                     inputs = truncate_tokens(tokens[:seq_len], max_seq_len)
-                    targets = truncate_tokens(tokens[1:seq_len + 1], max_seq_len, tokenizer.eos_id)
+                    targets = truncate_tokens(tokens[1:seq_len + 1], max_seq_len)
                     buffer.append((inputs, targets))
 
             # Shuffle the buffer
@@ -313,9 +309,9 @@ def get_batch():
             preloaded_batch_condition.wait()
 
         batch_filename, targets_filename = preloaded_batch
-        preloaded_batch = None
+        #preloaded_batch = None
 
-    preload_batch()
+    #preload_batch()
 
     try:
         return jsonify({
@@ -327,11 +323,16 @@ def get_batch():
         return jsonify({'error': 'Could not get batch'}), 500
 
 def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
-    beta1hat = beta1 * (1 - beta1**(step - 1)) / (1 - beta1**step)
-    beta2hat = beta2 * (1 - beta2**(step - 1)) / (1 - beta2**step)
+    logging.debug(f"Params before update: {params}")
+    logging.debug(f"Grads: {grads}")
+    logging.debug(f"m before update: {m}")
+    logging.debug(f"v before update: {v}")
+
+    m = beta1 * m + (1 - beta1) * grads
+    v = beta2 * v + (1 - beta2) * grads ** 2
     
-    m = beta1hat * m + (1 - beta1hat) * grads
-    v = beta2hat * v + (1 - beta2hat) * grads ** 2
+    logging.debug(f"Updated m: {m}")
+    logging.debug(f"Updated v: {v}")
     
     m_hat = m / (1 - beta1 ** step)
     v_hat = v / (1 - beta2 ** step)
@@ -344,7 +345,15 @@ def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0
     
     params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
     
+    logging.debug(f"m_hat: {m_hat}")
+    logging.debug(f"v_hat: {v_hat}")
+    logging.debug(f"denominator: {denominator}")
+    logging.debug(f"rms: {rms}")
+    logging.debug(f"new_lr: {new_lr}")
+    logging.debug(f"Updated params: {params}")
+
     return params, m, v
+
 
 def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
     tensor_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
@@ -363,8 +372,6 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
 
     logging.debug(f"Flattened gradients: {grads_flat}")
 
-    # Clip gradients
-    grads_flat = torch.nn.utils.clip_grad_norm_(grads_flat, clip_grad).to(device)  # Move gradients to device
 
     if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
         logging.error(f"NaNs or Infs detected in gradients before AdamW update for {tensor_name}")
@@ -381,6 +388,7 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
         adam_v = torch.load(tensor_adam_v_path, map_location=device).to(device)
 
     if adam_m is None or adam_v is None:
+        logging.debug(f'adam_m or adam_v not found for {tensor_name}, initializing to zeros')
         adam_m = torch.zeros_like(tensor, device=device)
         adam_v = torch.zeros_like(tensor, device=device)
 
@@ -405,6 +413,8 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
     )
 
     logging.debug(f"Updates after applying StableAdamW: {param_update}")
+    logging.debug(f"m after AdamW: {m_update}")
+    logging.debug(f"v after AdamW: {v_update}")
 
     return param_update.view(-1), m_update.view(-1), v_update.view(-1)
 
