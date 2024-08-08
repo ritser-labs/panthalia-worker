@@ -33,20 +33,24 @@ class SimpleLinearModel(nn.Module):
         return self.linear(x)
 
 # Stable AdamW update function
-def stable_adamw_update(params, grads, m, v, lr=0.01, weight_decay=0.01, beta1=0.9, beta2=0.999, eps=1e-8, step=1):
-    grads = torch.clamp(grads, -1.0, 1.0)  # Clip gradients
-
-    m = beta1 * m + (1 - beta1) * grads
-    v = beta2 * v + (1 - beta2) * grads * grads
-
+def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
+    beta1hat = beta1 * (1 - beta1**(step - 1)) / (1 - beta1**step)
+    beta2hat = beta2 * (1 - beta2**(step - 1)) / (1 - beta2**step)
+    
+    m = beta1hat * m + (1 - beta1hat) * grads
+    v = beta2hat * v + (1 - beta2hat) * grads ** 2
+    
     m_hat = m / (1 - beta1 ** step)
     v_hat = v / (1 - beta2 ** step)
-
-    param_update = m_hat / (torch.sqrt(v_hat) + eps)
-    param_update += weight_decay * params
-
-    params = params - lr * param_update
-
+    
+    denominator = torch.sqrt(v_hat) + eps
+    
+    rms = torch.sqrt(torch.mean(grads * grads / torch.max(v, (eps * eps) * torch.ones_like(v))))
+    
+    new_lr = lr * (1. / max(1., rms / clip_thresh))
+    
+    params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
+    
     return params, m, v
 
 # Base class for model adapters
@@ -203,7 +207,7 @@ def train_model(adapter_class, lr=0.01, weight_decay=0.01, epochs=1, accumulatio
     adapter = adapter_class()
     adapter.random_init_all_params()
 
-    data, targets = adapter.generate_synthetic_data(num_samples=100)  # Generate a larger dataset
+    data, targets = adapter.generate_synthetic_data(num_samples=128)  # Generate a larger dataset
     adapter.train_step(data, targets, lr, weight_decay, epochs, accumulation_steps)
 
 def main():
@@ -215,7 +219,7 @@ def main():
     else:
         raise ValueError("Invalid model type specified.")
 
-    train_model(adapter_class, lr=0.01, weight_decay=0.01, epochs=100, accumulation_steps=4)
+    train_model(adapter_class, lr=0.01, weight_decay=0.01, epochs=10, accumulation_steps=4)
 
 if __name__ == "__main__":
     main()
