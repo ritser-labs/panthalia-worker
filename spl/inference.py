@@ -11,27 +11,13 @@ from io import BytesIO
 # The URL where the SOT service is running
 SOT_URL = 'http://localhost:5001'
 
-# Start the SOT service
-def start_sot():
-    sot_process = subprocess.Popen(
-        ['python', 'sot.py', '--public_keys_file', 'master_public_keys.json'],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
-    return sot_process
 
 # Load the model from the SOT service
 def load_model():
-    response = requests.get(f'{SOT_URL}/latest_state', params={'tensor_name': 'model'})
-    if response.status_code == 200:
-        tensor_data = BytesIO(response.content)
-        model_tensor = torch.load(tensor_data, map_location=device)
-        model = tensor_to_model(model_tensor)
-        model.eval()  # Set model to evaluation mode
-        return model
-    else:
-        print(f"Failed to load model: {response.text}")
-        return None
+    flattened_params = torch.load(os.path.join('data', 'state', 'model.pt'), map_location=device)
+    model = tensor_to_model(flattened_params)
+    model.train()
+    return model
 
 # Initialize the model
 model = None
@@ -61,18 +47,12 @@ def main():
     
     initialize_distributed_environment_and_globals('nccl')
 
-    # Start the SOT service
-    sot_process = start_sot()
-
-    wait_for_sot(SOT_URL)
-
     # Load the model
     model = load_model()
     if model:
         print("Model loaded successfully.")
     else:
         print("Failed to load the model. Exiting...")
-        sot_process.terminate()
         return
 
     # Main prediction loop
@@ -86,8 +66,6 @@ def main():
             print(f"Prediction: {prediction}")
     except KeyboardInterrupt:
         print("Shutting down...")
-    finally:
-        sot_process.terminate()
 
 if __name__ == "__main__":
     main()
