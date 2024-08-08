@@ -21,6 +21,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(mes
 # Constants
 SOT_URL = 'http://localhost:5001'
 MASTER_WALLETS_FILE = 'master_wallets.json'
+MAX_BATCH_SIZE = 32  # Fixed batch size
 
 # Simple linear model
 class SimpleLinearModel(nn.Module):
@@ -72,7 +73,7 @@ class SimpleLinearAdapter(ModelAdapter):
     def __init__(self):
         super().__init__(SimpleLinearModel())
 
-    def generate_synthetic_data(self, num_samples=100):
+    def generate_synthetic_data(self, num_samples=1000):  # Increase the number of samples
         x = torch.randn(num_samples, 1)  # Random input data
         y = 2 * x + 3  # Linear function y = 2x + 3
         return x, y
@@ -86,13 +87,15 @@ class SimpleLinearAdapter(ModelAdapter):
         m = torch.zeros_like(params)
         v = torch.zeros_like(params)
         
-        microbatch_size = data.size(0) // accumulation_steps
-        
-        for epoch in range(epochs):
+        num_samples = data.size(0)
+        microbatch_size = MAX_BATCH_SIZE
+        steps_per_epoch = num_samples // microbatch_size
+
+        for epoch in range(1):  # Only one epoch
             grads_accumulated = torch.zeros_like(params)
             total_loss = 0.0
             
-            for step in range(accumulation_steps):
+            for step in range(steps_per_epoch):
                 self.model.zero_grad()  # Zero the gradients
                 
                 start_idx = step * microbatch_size
@@ -105,8 +108,10 @@ class SimpleLinearAdapter(ModelAdapter):
                 grads = torch.cat([param.grad.view(-1) for param in self.model.parameters() if param.grad is not None])
                 grads_accumulated += grads
                 total_loss += loss.item()
+
+                logging.info(f"Microbatch [{step+1}/{steps_per_epoch}], Loss: {loss.item():.4f}")
                 
-            grads_accumulated /= accumulation_steps
+            grads_accumulated /= steps_per_epoch
             
             params, m, v = stable_adamw_update(params, grads_accumulated, m, v, lr, weight_decay, step=epoch+1)
             
@@ -118,8 +123,7 @@ class SimpleLinearAdapter(ModelAdapter):
                     param.data = params[idx:idx + param_size].view_as(param).data
                     idx += param_size
 
-            if epoch % 10 == 0:
-                logging.info(f"Epoch [{epoch}/{epochs}], Loss: {total_loss/accumulation_steps:.4f}")
+            logging.info(f"Epoch [{epoch}/{1}], Average Loss: {total_loss/steps_per_epoch:.4f}")
 
 # Transformer LLM Adapter
 class TransformerLLMAdapter(ModelAdapter):
@@ -135,9 +139,8 @@ class TransformerLLMAdapter(ModelAdapter):
         super().__init__(model)
         self.model.to(device)
 
-    def generate_synthetic_data(self, num_samples=100):
-        batch_size = model_args.max_batch_size  # Ensure it matches model_args.max_batch_size
-        data = torch.randint(0, model_args.vocab_size, (batch_size, 50), dtype=torch.long).to(device)  # Random input data
+    def generate_synthetic_data(self, num_samples=1000):  # Increase the number of samples
+        data = torch.randint(0, model_args.vocab_size, (num_samples, 50), dtype=torch.long).to(device)  # Random input data
         targets = data.clone()  # For simplicity, the targets can be the same as inputs in a dummy example
         return data, targets
 
@@ -150,13 +153,15 @@ class TransformerLLMAdapter(ModelAdapter):
         m = torch.zeros_like(params)
         v = torch.zeros_like(params)
         
-        microbatch_size = data.size(0) // accumulation_steps
-        
-        for epoch in range(epochs):
+        num_samples = data.size(0)
+        microbatch_size = MAX_BATCH_SIZE
+        steps_per_epoch = num_samples // microbatch_size
+
+        for epoch in range(epochs):  # Only one epoch
             grads_accumulated = torch.zeros_like(params)
             total_loss = 0.0
             
-            for step in range(accumulation_steps):
+            for step in range(steps_per_epoch):
                 self.model.zero_grad()  # Zero the gradients
                 
                 start_idx = step * microbatch_size
@@ -169,6 +174,8 @@ class TransformerLLMAdapter(ModelAdapter):
                 grads = torch.cat([param.grad.view(-1) for param in self.model.parameters() if param.grad is not None])
                 grads_accumulated += grads
                 total_loss += loss.item()
+
+                logging.info(f"Microbatch [{step+1}/{steps_per_epoch}], Loss: {loss.item():.4f}")
                 
                 # Detach cache tensors
                 if hasattr(self.model, 'layers'):
@@ -177,7 +184,7 @@ class TransformerLLMAdapter(ModelAdapter):
                             layer.attention.cache_k = layer.attention.cache_k.detach()
                             layer.attention.cache_v = layer.attention.cache_v.detach()
                 
-            grads_accumulated /= accumulation_steps
+            grads_accumulated /= steps_per_epoch
             
             params, m, v = stable_adamw_update(params, grads_accumulated, m, v, lr, weight_decay, step=epoch+1)
             
@@ -189,19 +196,18 @@ class TransformerLLMAdapter(ModelAdapter):
                     param.data = params[idx:idx + param_size].view_as(param).data
                     idx += param_size
 
-            if epoch % 10 == 0:
-                logging.info(f"Epoch [{epoch}/{epochs}], Loss: {total_loss/accumulation_steps:.4f}")
+            logging.info(f"Epoch [{epoch}/{epochs}], Average Loss: {total_loss/steps_per_epoch:.4f}")
 
 # Function to train the selected model
-def train_model(adapter_class, lr=0.01, weight_decay=0.01, epochs=100, accumulation_steps=4):
+def train_model(adapter_class, lr=0.01, weight_decay=0.01, epochs=1, accumulation_steps=4):
     adapter = adapter_class()
     adapter.random_init_all_params()
 
-    data, targets = adapter.generate_synthetic_data()
+    data, targets = adapter.generate_synthetic_data(num_samples=100)  # Generate a larger dataset
     adapter.train_step(data, targets, lr, weight_decay, epochs, accumulation_steps)
 
 def main():
-    model_type = "transformer_llm"  # Change this to "transformer_llm" to switch models
+    model_type = "transformer_llm"  # Change this to "simple_linear" to switch models
     if model_type == "simple_linear":
         adapter_class = SimpleLinearAdapter
     elif model_type == "transformer_llm":
