@@ -298,18 +298,16 @@ async def process_tasks():
             # Process the task...
             logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
             download_start_time = time.time()
-            batch = download_json(task_params['batch_url'])
+            batch = download_file(task_params['batch_url'])
             download_end_time = time.time()
             logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
-            logging.info(f"Batch tensor memory size: {tensor_memory_size(batch):.2f} MB")
 
 
             logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
             download_start_time = time.time()
-            targets = download_json(task_params['targets_url'])
+            targets = download_file(task_params['targets_url'])
             download_end_time = time.time()
             logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
-            logging.info(f"Targets tensor memory size: {tensor_memory_size(targets):.2f} MB")
 
             result = {}
             accumulation_steps = task_params['accumulation_steps']

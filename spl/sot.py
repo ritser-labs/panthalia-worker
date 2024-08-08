@@ -141,19 +141,27 @@ def preload_batch():
     for inputs, target_tokens in dataset:
         if len(batch) >= batch_size:
             break
+        # Convert each list to a tensor, adding a new dimension
+        if isinstance(inputs, list):
+            inputs = torch.tensor(inputs)  # Convert list to tensor
+        if isinstance(target_tokens, list):
+            target_tokens = torch.tensor(target_tokens)  # Convert list to tensor
         batch.append(inputs)
         targets.append(target_tokens)
 
     if batch:
+        # Stack the tensors along a new dimension
+        batch_tensor = torch.stack(batch)
+        targets_tensor = torch.stack(targets)
+
         timestamp = int(time.time())
         random_suffix = random.randint(1000, 9999)
-        batch_filename = f'batch_{timestamp}_{random_suffix}.json'
-        targets_filename = f'targets_{timestamp}_{random_suffix}.json'
+        batch_filename = f'batch_{timestamp}_{random_suffix}.pt'
+        targets_filename = f'targets_{timestamp}_{random_suffix}.pt'
 
-        with open(os.path.join(temp_dir, batch_filename), 'w') as file:
-            file.write(json.dumps(batch))
-        with open(os.path.join(temp_dir, targets_filename), 'w') as file:
-            file.write(json.dumps(targets))
+        # Save the stacked tensors
+        torch.save(batch_tensor, os.path.join(temp_dir, batch_filename))
+        torch.save(targets_tensor, os.path.join(temp_dir, targets_filename))
 
         # Set the global preloaded_batch variable here
         with preloaded_batch_lock:
@@ -161,6 +169,7 @@ def preload_batch():
             preloaded_batch_condition.notify_all()
 
         return batch_filename, targets_filename
+
 
 def initialize_service():
     logging.info("Initializing distributed environment and tensors")
