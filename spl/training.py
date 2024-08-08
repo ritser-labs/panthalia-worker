@@ -90,54 +90,21 @@ def get_batch(wallet):
         print(f"Failed to retrieve batch: {response.text}")
         return None, None
 
-def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
-    """
-    Apply the AdamW update rule with numerical stability improvements.
-    
-    Args:
-        params (torch.Tensor): Flattened model parameters.
-        grads (torch.Tensor): Flattened gradients.
-        m (torch.Tensor): First moment vector.
-        v (torch.Tensor): Second moment vector.
-        lr (float): Learning rate.
-        weight_decay (float): Weight decay (L2 penalty).
-        beta1 (float): Exponential decay rate for the first moment estimates.
-        beta2 (float): Exponential decay rate for the second moment estimates.
-        eps (float): Term added to the denominator to improve numerical stability.
-        clip_thresh (float): Gradient clipping threshold.
-        step (int): Current optimization step.
-        
-    Returns:
-        tuple: Updated (params, m, v).
-    """
+def stable_adamw_update(params, grads, m, v, lr=0.01, weight_decay=0.01, beta1=0.9, beta2=0.999, eps=1e-8, step=1):
+    grads = torch.clamp(grads, -1.0, 1.0)  # Clip gradients
 
-    # Clip gradients to avoid exploding gradients
-    grads = torch.clamp(grads, -clip_thresh, clip_thresh)
-    
-    # Update biased first moment estimate
     m = beta1 * m + (1 - beta1) * grads
-    
-    # Update biased second raw moment estimate
     v = beta2 * v + (1 - beta2) * grads * grads
-    
-    # Compute bias-corrected first moment estimate
+
     m_hat = m / (1 - beta1 ** step)
-    
-    # Compute bias-corrected second raw moment estimate
     v_hat = v / (1 - beta2 ** step)
-    
-    # Compute the AdamW parameter update
+
     param_update = m_hat / (torch.sqrt(v_hat) + eps)
-    
-    # Apply weight decay
     param_update += weight_decay * params
-    
-    # Update parameters
+
     params = params - lr * param_update
-    
+
     return params, m, v
-
-
 def apply_adamw(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, step=1):
     # Clip gradients
     grads = torch.nn.utils.clip_grad_norm_(grads, 1.0).to(device)
@@ -156,7 +123,6 @@ def apply_adamw(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta
         beta1,
         beta2,
         eps,
-        clip_thresh=1.0,
         step=step
     )
 
