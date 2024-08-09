@@ -4,7 +4,7 @@ import os
 import time
 import torch
 from model import ModelArgs, Transformer
-from common import tokenizer, wait_for_sot, tensor_to_model, initialize_distributed_environment_and_globals
+from common import tokenizer, wait_for_sot, model_adapter, initialize_distributed_environment_and_globals
 from device import device
 from io import BytesIO
 
@@ -15,7 +15,7 @@ SOT_URL = 'http://localhost:5001'
 # Load the model from the SOT service
 def load_model():
     flattened_params = torch.load(os.path.join('data', 'state', 'model.pt'), map_location=device)
-    model = tensor_to_model(flattened_params)
+    model = model_adapter.tensor_to_model(flattened_params)
     model.train()
     return model
 
