@@ -20,7 +20,7 @@ import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
-from dataloader import WikipediaDataLoader, ShakespeareDataLoader
+from dataloader import WikipediaDataLoader, ShakespeareDataLoader, LowercaseAlphabetDataLoader
 from model_config import TransformerModelConfig
 from model_adapter import TransformerModelAdapter
 
@@ -51,7 +51,7 @@ EXAMPLES_PER_MICROBATCH = 32
 
 batch_size = NUM_MICROBATCHES * EXAMPLES_PER_MICROBATCH
 
-BUFFER_SIZE = 1024  # Size of the buffer to shuffle data
+BUFFER_SIZE = 100000  # Size of the buffer to shuffle data
 
 ACCUMULATION_STEPS = NUM_MICROBATCHES
 
@@ -67,7 +67,7 @@ TENSOR_NAME = 'model'
 
 model_config = TransformerModelConfig(tokenizer, model_args)
 
-dataset = ShakespeareDataLoader(model_config, buffer_size=BUFFER_SIZE)
+dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE)
 
 model_adapter = TransformerModelAdapter(model_config)
 

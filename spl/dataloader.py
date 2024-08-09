@@ -99,3 +99,40 @@ class ShakespeareDataLoader(LanguageDataLoader):
         except StopIteration:
             while buffer:
                 yield buffer.pop()
+
+
+class LowercaseAlphabetDataLoader(LanguageDataLoader):
+    def __init__(self, model_config: TransformerModelConfig, buffer_size: int):
+        super().__init__(model_config, buffer_size)
+        self.alphabet = list('abcdefghijklmnopqrstuvwxyz')
+
+    def __iter__(self):
+        max_seq_len = self.model_config.model_args.max_seq_len
+        buffer = []
+
+        try:
+            while True:
+                while len(buffer) < self.buffer_size:
+                    start_index = random.randint(0, len(self.alphabet) - 1)
+                    end_index = random.randint(start_index, len(self.alphabet))
+                    sequence = ''.join(self.alphabet[start_index:end_index])
+
+                    tokens = self.model_config.tokenizer.encode(
+                        sequence,
+                        bos=False,
+                        eos=False,
+                        allowed_special=set(),
+                        disallowed_special=(),
+                    )
+
+                    for seq_len in range(1, min(len(tokens), max_seq_len) + 1):
+                        inputs = self.truncate_tokens(tokens[:seq_len], max_seq_len, self.model_config.tokenizer.pad_id)
+                        targets = self.truncate_tokens(tokens[1:seq_len + 1], max_seq_len, self.model_config.tokenizer.pad_id)
+                        buffer.append((inputs, targets))
+
+                random.shuffle(buffer)
+                while buffer:
+                    yield buffer.pop()
+        except StopIteration:
+            while buffer:
+                yield buffer.pop()
