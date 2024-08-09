@@ -20,6 +20,9 @@ import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
+from dataloader import WikipediaDataLoader, ShakespeareDataLoader
+from model_config import TransformerModelConfig
+from model_adapter import TransformerModelAdapter
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -62,34 +65,12 @@ SLEEP_TIME = 1
 
 TENSOR_NAME = 'model'
 
-Model = Transformer
+model_config = TransformerModelConfig(tokenizer, model_args)
 
-def get_dummy_input():
-    return torch.randint(0, model_args.vocab_size, (1, model_args.max_seq_len)).to(device)
+dataset = ShakespeareDataLoader(model_config, buffer_size=BUFFER_SIZE)
 
-def model_to_tensor(model: Model) -> torch.Tensor:
-    params = list(model.parameters())
-    return torch.cat([p.view(-1) for p in params])
+model_adapter = TransformerModelAdapter(model_config)
 
-def tensor_to_model(tensor: torch.Tensor) -> Model:
-    model = Model(model_args).to(device)
-    pointer = 0
-    total_params = sum(p.numel() for p in model.parameters())
-
-    if tensor.numel() != total_params:
-        raise ValueError(f"Total number of parameters {total_params} does not match the size of the tensor {tensor.numel()}")
-
-    for param in model.parameters():
-        num_param = param.numel()
-        logging.debug(f"Pointer: {pointer}, Num param: {num_param}, Tensor size: {tensor.numel()}")
-
-        if pointer + num_param > tensor.numel():
-            raise ValueError(f"Pointer {pointer} with num_param {num_param} exceeds tensor size {tensor.numel()}")
-
-        param.data = tensor[pointer:pointer + num_param].view(param.size()).to(device)
-        pointer += num_param
-
-    return model
 
 def initialize_distributed_environment_and_globals(backend='nccl'):
     logging.info("Initializing distributed environment")
@@ -447,7 +428,7 @@ def get_learning_hyperparameters(current_iteration):
     """
     T_0 = 5000 / NUM_MICROBATCHES  # Initial number of iterations for the first cycle
     T_mult = 2  # Factor to increase the cycle length after each restart
-    eta_max = 0.002 * NUM_MICROBATCHES  # Initial learning rate (maximum)
+    eta_max = 0.001 * NUM_MICROBATCHES  # Initial learning rate (maximum)
     eta_min = 0.00001 * NUM_MICROBATCHES  # Minimum learning rate
 
     # Determine the current cycle length

@@ -5,8 +5,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import Model, model_args, batch_size, initialize_distributed_environment_and_globals, TENSOR_VERSION_INTERVAL, BUFFER_SIZE, TENSOR_NAME
-from dataloader import WikipediaDataLoader, ShakespeareDataLoader
+from common import model_config, model_adapter, batch_size, initialize_distributed_environment_and_globals, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from device import device
@@ -15,7 +14,6 @@ import time
 import random
 from werkzeug.utils import secure_filename
 from tqdm import tqdm
-import torch.nn.init as init
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -94,24 +92,10 @@ def initialize_tensor(name, sync_version_number=None, zero_init=False):
     if os.path.exists(file_path):
         return
 
-    if TENSOR_NAME in name:
-        module = Model(model_args).to(device)
-    else:
+    if TENSOR_NAME not in name:
         raise ValueError(f"Unsupported tensor name: {name}")
-
-    if not zero_init:
-        # Initialize module parameters with Kaiming (He) initialization for all parameters
-        for param in module.parameters():
-            if param.requires_grad:
-                if param.ndimension() >= 2:  # Ensure the parameter tensor has at least 2 dimensions
-                    init.kaiming_uniform_(param, a=0)  # He initialization (uniform)
-                else:
-                    param.data.uniform_(-0.01, 0.01)  # Small random uniform initialization for scalars or 1D tensors
-        tensors = [param.data for param in module.parameters()]
-        tensor = torch.cat([tensor.view(-1) for tensor in tensors])
-    else:  # Zero initialization for Adam tensors
-        tensors = [param.data for param in module.parameters()]
-        tensor = torch.cat([torch.zeros_like(tensor).view(-1) for tensor in tensors])
+    
+    tensor = model_adapter.init_tensor(zero_init)
 
     torch.save(tensor, file_path)
     with block_timestamps_lock:
@@ -125,9 +109,6 @@ def initialize_all_tensors():
     initialize_tensor(TENSOR_NAME, zero_init=False)
     initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
     initialize_tensor(f'{TENSOR_NAME}_adam_v', zero_init=True)
-
-logging.info("Starting da...")
-dataset = WikipediaDataLoader(buffer_size=BUFFER_SIZE)
 
 preloaded_batch = None
 preloaded_batch_lock = threading.Lock()
@@ -247,15 +228,15 @@ def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
     try:
         model_params = {
-            "vocab_size": model_args.vocab_size,
-            "dim": model_args.dim,
-            "n_layers": model_args.n_layers,
-            "n_heads": model_args.n_heads,
-            "multiple_of": model_args.multiple_of,
-            "norm_eps": model_args.norm_eps,
-            "rope_theta": model_args.rope_theta,
-            "max_batch_size": model_args.max_batch_size,
-            "max_seq_len": model_args.max_seq_len
+            "vocab_size": model_config.model_args.vocab_size,
+            "dim": model_config.model_args.dim,
+            "n_layers": model_config.model_args.n_layers,
+            "n_heads": model_config.model_args.n_heads,
+            "multiple_of": model_config.model_args.multiple_of,
+            "norm_eps": model_config.model_args.norm_eps,
+            "rope_theta": model_config.model_args.rope_theta,
+            "max_batch_size": model_config.model_args.max_batch_size,
+            "max_seq_len": model_config.model_args.max_seq_len
         }
         return jsonify(model_params)
     except Exception as e:

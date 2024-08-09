@@ -11,7 +11,7 @@ from web3.exceptions import ContractCustomError
 from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from device import device
-from common import get_dummy_input, Model, Task, TaskStatus, model_args, tokenizer, initialize_distributed_environment, load_abi, upload_tensor, tensor_to_model, initialize_distributed_environment_and_globals, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
+from common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, initialize_distributed_environment_and_globals, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Optional, Tuple
 from io import BytesIO
@@ -257,7 +257,7 @@ def tensor_memory_size(tensor):
     return size_in_mb
 
 async def process_tasks():
-    global task_queue, concurrent_tasks_counter
+    global task_queue, concurrent_tasks_counter, model
     try:
         # Ensure only one task is processed at a time
         with task_processing_lock:
@@ -314,7 +314,7 @@ async def process_tasks():
             
             logging.debug("Executing training task")
             task_start_time = time.time()
-            updates, loss = model_task(batch, targets, accumulation_steps)
+            updates, loss = model_adapter.train_task(model, batch, targets, accumulation_steps)
             task_end_time = time.time()
             logging.debug(f"Task took {task_end_time - task_start_time:.2f} seconds")
         logging.info(f"Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
@@ -384,84 +384,6 @@ async def submit_solution(task_id, result, contract_index):
         logging.error(f"Error submitting solution for task {task_id}: {e}")
         raise
 
-def model_task(inputs, targets, accumulation_steps):
-    global model, tensors
-    logging.info("Starting model_task")
-
-    start_time = time.time()
-    inputs = inputs.to(device, non_blocking=True)
-    targets = targets.to(device, non_blocking=True)
-
-    logging.debug(f"Moved inputs and targets to device. Time taken: {time.time() - start_time:.2f} seconds")
-
-    microbatch_size = inputs.shape[0] // accumulation_steps
-
-    # Preallocate gradient accumulation tensors and zero them
-    grads_accumulated = [torch.zeros_like(param, device=device) for param in model.parameters()]
-
-    total_loss = 0.0
-
-    logging.info(f"Accumulation steps: {accumulation_steps}, Microbatch size: {microbatch_size}")
-
-    for i in range(accumulation_steps):
-        batch_start_time = time.time()
-        try:
-            microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size].detach()
-            microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size].detach()
-
-            start_pos = 0
-            # Forward pass
-            output = model(microbatch_inputs, start_pos=start_pos)
-
-            reshaped_logits = output.view(-1, model_args.vocab_size)
-            reshaped_targets = microbatch_targets.view(-1)
-
-            # Compute loss
-            loss = F.cross_entropy(reshaped_logits, reshaped_targets, ignore_index=tokenizer.pad_id)
-            total_loss += loss.item()
-
-            logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
-
-            # Backward pass and accumulate gradients
-            loss.backward()
-
-            with torch.no_grad():
-                for j, param in enumerate(model.parameters()):
-                    if param.grad is not None:
-                        grads_accumulated[j] += param.grad
-
-            # Clear gradients for next accumulation step
-            model.zero_grad()
-
-            # Detach cache tensors
-            if hasattr(model, 'layers'):
-                for layer in model.layers:
-                    if hasattr(layer, 'attention'):
-                        layer.attention.cache_k = layer.attention.cache_k.detach()
-                        layer.attention.cache_v = layer.attention.cache_v.detach()
-
-            # Delete intermediate variables
-            del output, reshaped_logits, reshaped_targets, loss, microbatch_inputs, microbatch_targets
-            torch.cuda.empty_cache()
-
-            logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Backward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
-
-        except Exception as e:
-            logging.error(f"Error processing microbatch {i + 1}/{accumulation_steps}: {e}", exc_info=True)
-            raise  # Re-raise the exception after logging
-
-    # Normalize accumulated gradients
-    with torch.no_grad():
-        for grad in grads_accumulated:
-            grad.div_(accumulation_steps)
-
-    updates = torch.cat([grad.view(-1) for grad in grads_accumulated])
-    loss = total_loss / accumulation_steps
-
-    logging.info(f"Model task completed. Total loss: {loss:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
-
-    return updates, loss
-
 async def upload_results(version_number, updates, loss):
     grads_url = await upload_tensor(updates, 'grads')
 
@@ -496,13 +418,13 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
         latest_block_timestamps[tensor_name] = sync_version_number
         logging.info(f"Successfully initialized tensor: {tensor_name}")
 
-        model = tensor_to_model(tensor.detach())
+        model = model_adapter.tensor_to_model(tensor.detach())
         model.train()
         if args.torch_compile:
             # Compile the model after loading state_dict
             model = torch.compile(model)
             # Warmup
-            _ = model(get_dummy_input())
+            _ = model(model_adapter.get_dummy_input())
             logging.info("Model model compiled and warmed up")
 
     except requests.exceptions.RequestException as e:
