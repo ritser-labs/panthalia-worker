@@ -1,7 +1,7 @@
 import torch
 import os
 from tokenizer import Tokenizer
-from model import ModelArgs
+from model import ModelArgs, Transformer
 import json
 import logging
 import torch.distributed as dist
@@ -14,16 +14,21 @@ import web3 as Web3Module
 from collections import namedtuple
 from web3.datastructures import AttributeDict
 from web3.exceptions import ContractLogicError
+from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from device import device
 import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
+from dataloader import WikipediaDataLoader, ShakespeareDataLoader, LowercaseAlphabetDataLoader
+from model_config import TransformerModelConfig
+from model_adapter import TransformerModelAdapter
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
 # IMPORTANT: if you change tokenizer, dont forget to comment out the code in tokenizer.py
 # that ignores non ascii characters
+# and change pad_id
 tokenizer_path = os.path.join(current_dir, 'tokenizers', 'char.tiktoken')
 
 tokenizer = Tokenizer(tokenizer_path)
@@ -40,29 +45,64 @@ model_args = ModelArgs(
     max_seq_len=256
 )
 
-batch_size = 16
+NUM_MICROBATCHES = 32
 
-BUFFER_SIZE = 1000  # Size of the buffer to shuffle data
+EXAMPLES_PER_MICROBATCH = 32
 
-TENSOR_VERSION_INTERVAL = 30
+batch_size = NUM_MICROBATCHES * EXAMPLES_PER_MICROBATCH
 
-MAX_SOLVER_SELECTION_DURATION = 300
+BUFFER_SIZE = 100000  # Size of the buffer to shuffle data
+
+ACCUMULATION_STEPS = NUM_MICROBATCHES
+
+TENSOR_VERSION_INTERVAL = 1
+
+MAX_SUBMIT_TASK_RETRY_DURATION = 300
 
 MIN_REMAINING_TIME_SECONDS = 3
 
 SLEEP_TIME = 1
 
+TENSOR_NAME = 'model'
+
+model_config = TransformerModelConfig(tokenizer, model_args)
+
+dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE)
+
+model_adapter = TransformerModelAdapter(model_config)
+
+
+def initialize_distributed_environment_and_globals(backend='nccl'):
+    logging.info("Initializing distributed environment")
+    initialize_distributed_environment(backend)
+    initialize_model_parallel(model_parallel_size_=1)
+
+    logging.info("Environment and global variables initialized")
+
+def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
+    """Wait for the SOT service to be available."""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            response = requests.get(f"{sot_url}/health")
+            if response.status_code == 200:
+                logging.debug("SOT service is available.")
+                return True
+        except requests.ConnectionError as e:
+            logging.debug(f"Waiting for SOT service to be available... {e}")
+        time.sleep(2)
+    return False
+
 # Define Enums
 class TaskStatus(Enum):
     SelectingSolver = 0
-    SolverSelectedStakeNotRemoved = 1
-    SolverSelected = 2
-    SolutionSubmitted = 3
-    Disputed = 4
-    VerifiersSelected = 5
-    Verified = 6
-    ResolvedCorrect = 7
-    ResolvedIncorrect = 8
+    SolverSelected = 1
+    SolutionSubmitted = 2
+    Disputed = 3
+    VerifiersSelected = 4
+    Verified = 5
+    ResolvedCorrect = 6
+    ResolvedIncorrect = 7
 
 class Vote(Enum):
     NoVote = 0
@@ -76,8 +116,8 @@ class PoolState(Enum):
 
 # Define Task named tuple
 Task = namedtuple('Task', [
-    'status', 'submitter', 'solver', 'timeStatusChanged', 'selectionId', 'numVerifiers', 
-    'selectedStakeId', 'params', 'postedSolution', 'verificationRounds', 'verifierStake', 
+    'status', 'submitter', 'solver', 'timeStatusChanged', 'subSelectionId', 'numVerifiers', 
+    'params', 'postedSolution', 'verificationRounds', 'verifierStake', 
     'disputerStake'
 ])
 
@@ -386,10 +426,10 @@ def get_learning_hyperparameters(current_iteration):
     Returns:
         dict: A dictionary containing the learning rate and Adam optimizer parameters.
     """
-    T_0 = 5000  # Initial number of iterations for the first cycle
+    T_0 = 5000 / NUM_MICROBATCHES  # Initial number of iterations for the first cycle
     T_mult = 2  # Factor to increase the cycle length after each restart
-    eta_max = 0.002  # Initial learning rate (maximum)
-    eta_min = 0.00001  # Minimum learning rate
+    eta_max = 0.001 * NUM_MICROBATCHES  # Initial learning rate (maximum)
+    eta_min = 0.00001 * NUM_MICROBATCHES  # Minimum learning rate
 
     # Determine the current cycle length
     cycle_length = T_0
@@ -408,7 +448,7 @@ def get_learning_hyperparameters(current_iteration):
         'epsilon': 1e-8,
         'weight_decay': 0.01,
         't': t,  # Add the current iteration as 't'
-        'accumulation_steps': 1  # Set the accumulation steps to 1
+        'accumulation_steps': ACCUMULATION_STEPS
     }
 
 # Global state tracking variable
@@ -441,18 +481,21 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
             # Check if there are at least MIN_REMAINING_TIME_SECONDS remaining in the target state
             latest_block = await web3.eth.get_block('latest')
             current_time = latest_block['timestamp']
-            remaining_time = (await pool.functions.lastStateChangeTime().call() + 
-                              (await pool.functions.UNLOCKED_MIN_PERIOD().call() 
-                              if current_global_state == PoolState.Unlocked else 
-                              await pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call())) - current_time
-
-            if remaining_time >= MIN_REMAINING_TIME_SECONDS:
-                logging.info(f'Pool state is now {PoolState(target_state).name} with {remaining_time} seconds remaining')
-                return
+            if target_state == PoolState.Unlocked.value:
+                remaining_time = (await pool.functions.lastStateChangeTime().call() + 
+                                  (await pool.functions.UNLOCKED_MIN_PERIOD().call())) - current_time
+                if remaining_time >= MIN_REMAINING_TIME_SECONDS:
+                    logging.info(f'Pool state is now {PoolState(target_state).name} with {remaining_time} seconds remaining')
+                    return
+                else:
+                    logging.info(f'Not enough remaining time {remaining_time} seconds in {PoolState(target_state).name}, sleeping and rechecking state')
+                    await asyncio.sleep(max(remaining_time, SLEEP_TIME))
+                    await update_current_global_state(pool)
             else:
-                logging.info(f'Not enough remaining time {remaining_time} seconds in {PoolState(target_state).name}, sleeping and rechecking state')
-                await asyncio.sleep(max(remaining_time, SLEEP_TIME))
-                await update_current_global_state(pool)
+                logging.info(f'Pool state is now {PoolState(target_state).name}')
+                return
+
+           
 
         # Try to perform the state transition if needed
         if not state_changing:
@@ -466,8 +509,8 @@ async def wait_for_state_change(web3, pool, target_state, private_key):
                     logging.info("Triggering finalizeSelections to change state to SelectionsFinalizing")
                     await finalize_selections(web3, pool, private_key)
                 elif current_global_state == PoolState.SelectionsFinalizing:
-                    logging.info("Triggering removeGlobalLock to change state to Unlocked")
-                    await trigger_remove_global_lock(web3, pool, private_key)
+                    logging.info("Triggering selectStakes to change state to Unlocked")
+                    await select_stakes(web3, pool, private_key)
 
                 # Update the global state after the transaction
                 await update_current_global_state(pool)
@@ -501,7 +544,7 @@ async def trigger_lock_global_state(web3, pool, private_key):
 
     if remaining_time > 0:
         logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
-        await asyncio.sleep(remaining_time)
+        await asyncio.sleep(remaining_time + 1)
     else:
         logging.info("UNLOCKED_MIN_PERIOD is already over, proceeding with lockGlobalState")
 
@@ -512,22 +555,10 @@ async def trigger_lock_global_state(web3, pool, private_key):
         logging.error(f"Error triggering lock global state: {e}")
         raise
 
-async def trigger_remove_global_lock(web3, pool, private_key):
-    selections_finalizing_min_period = await pool.functions.SELECTIONS_FINALIZING_MIN_PERIOD().call()
-    last_state_change_time = await pool.functions.lastStateChangeTime().call()
-    latest_block = await web3.eth.get_block('latest')
-    current_time = latest_block['timestamp']
-    remaining_time = (last_state_change_time + selections_finalizing_min_period) - current_time
-
-    if remaining_time > 0:
-        logging.info(f"Waiting for {remaining_time} seconds until SELECTIONS_FINALIZING_MIN_PERIOD is over")
-        await asyncio.sleep(remaining_time)
-    else:
-        logging.info("SELECTIONS_FINALIZING_MIN_PERIOD is already over, proceeding with removeGlobalLock")
-
+async def select_stakes(web3, pool, private_key):
     try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'removeGlobalLock', private_key, attempts=1)
-        logging.info(f"removeGlobalLock transaction receipt: {receipt}")
+        receipt = await async_transact_with_contract_function(web3, pool, 'selectStakes', private_key, attempts=1)
+        logging.info(f"selectStakes transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error triggering remove global lock: {e}")
         raise

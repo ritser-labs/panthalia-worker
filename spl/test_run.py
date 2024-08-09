@@ -7,7 +7,7 @@ import requests
 import threading
 import curses
 from flask import Flask, request, jsonify
-from common import model_args, load_abi, async_transact_with_contract_function
+from common import model_args, load_abi, async_transact_with_contract_function, wait_for_sot
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
@@ -30,7 +30,9 @@ BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
 # Configure logging to file and stdout
 os.makedirs(LOG_DIR, exist_ok=True)
-logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
+file_handler = logging.FileHandler(LOG_FILE)
+stream_handler = logging.StreamHandler()
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 for handler in logging.getLogger().handlers:
     handler.setFormatter(formatter)
@@ -48,48 +50,35 @@ def parse_args():
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
     parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
+    parser.add_argument('--worker_count', type=int, default=1, help="Number of workers to start")
     return parser.parse_args()
 
 args = parse_args()
 
+synced_workers = 0
 sync_status = {}
+# Define a global cache for the latest loss and last fetch time
+latest_loss_cache = {
+    'value': None,
+    'last_fetched': 0
+}
+
+# Define the interval (in seconds) to refresh the latest loss value
+LOSS_REFRESH_INTERVAL = 60  # For example, update every 60 seconds
 app = Flask(__name__)
 
-@app.route('/report_sync', methods=['GET'])
-def report_sync():
-    task_type = request.args.get('task_type')
-    status = request.args.get('status')
-    layer_idx = request.args.get('layer_idx')
-    key = f"{task_type}_{layer_idx}" if layer_idx else task_type
-    logging.debug(f"Received sync report for task_type={task_type}, layer_idx={layer_idx}, status={status}")
-    if task_type and status:
-        sync_status[key] = status
-        synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
-        total_workers = len(sync_status)
-        logging.debug(f"Synced {synced_workers}/{total_workers} workers.")
-        return jsonify({'status': 'success'})
-    else:
-        return jsonify({'status': 'error', 'message': 'Missing argument'}), 400
 
-def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
-    """Wait for the SOT service to be available."""
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(f"{sot_url}/health")
-            if response.status_code == 200:
-                logging.debug("SOT service is available.")
-                return True
-        except requests.ConnectionError as e:
-            logging.debug(f"Waiting for SOT service to be available... {e}")
-        time.sleep(2)
-    return False
+@app.route('/report_sync', methods=['POST'])
+def report_sync():
+    global synced_workers
+    synced_workers += 1
+    return jsonify({'status': 'ok'})
 
 def wait_for_workers_to_sync(worker_count, timeout=600):
+    global synced_workers
     """Wait for all workers to sync their deposit stake."""
     start_time = time.time()
     while time.time() - start_time < timeout:
-        synced_workers = sum(1 for status in sync_status.values() if status == 'synced')
         logging.debug(f"Synced {synced_workers}/{worker_count} workers.")
         if synced_workers >= worker_count:
             logging.debug("All workers have synced.")
@@ -171,15 +160,35 @@ def reset_logs(log_dir):
             except Exception as e:
                 logging.debug(f"Error erasing log file {file_path}: {e}")
 
-def monitor_processes(stdscr, processes, task_counts):
-    logger = logging.getLogger()
-    for handler in logger.handlers:
-        if isinstance(handler, logging.StreamHandler):
-            logger.removeHandler(handler)
+def fetch_latest_loss(sot_url):
+    global latest_loss_cache
+    current_time = time.time()
 
+    # Check if the cache is expired
+    if current_time - latest_loss_cache['last_fetched'] > LOSS_REFRESH_INTERVAL:
+        try:
+            response = requests.get(f"{sot_url}/get_loss")
+            if response.status_code == 200:
+                data = response.json()
+                latest_loss_cache['value'] = data.get('loss', None)
+                latest_loss_cache['last_fetched'] = current_time
+            else:
+                logging.error(f"Error fetching latest loss: {response.status_code} - {response.text}")
+        except requests.RequestException as e:
+            logging.error(f"Error fetching latest loss: {e}")
+            # In case of an error, do not update the last fetched time to retry on next fetch
+
+    return latest_loss_cache['value']
+
+
+def monitor_processes(stdscr, processes, task_counts):
+    global args
+    logger = logging.getLogger()
+    logger.removeHandler(stream_handler)
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
+    curses.noecho()
     selected_process = 0
     last_resize = None
 
@@ -198,7 +207,6 @@ def monitor_processes(stdscr, processes, task_counts):
         height, width = stdscr.getmaxyx()
         split_point = width - right_col_width
 
-
         # Order processes by name
         ordered_process_names = sorted(processes.keys(), key=lambda name: (
             name.startswith('worker_final_logits'),
@@ -207,7 +215,7 @@ def monitor_processes(stdscr, processes, task_counts):
             not name.startswith('worker'),
             name
         ))
-        
+
         # Display logs on the left side
         process_name = ordered_process_names[selected_process]
         log_file = os.path.join('logs', f"{process_name}.log")
@@ -231,32 +239,18 @@ def monitor_processes(stdscr, processes, task_counts):
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
 
-            if name == 'worker_final_logits':
-                task_count = task_counts.get('final_logits', (0, 0))
-                stdscr.addstr(i, split_point, f"{indicator} {name} ({task_count[0]}/{task_count[1]})", color)
-            elif 'worker_forward+backward' in name:
-                layer_idx = name.split('_')[-1]
-                forward_task = f"forward_layer_{layer_idx}"
-                backward_task = f"backward_layer_{layer_idx}"
+            stdscr.addstr(i, split_point, f"{indicator} {name}", color)
 
-                forward_count = task_counts.get(forward_task, (0, 0))
-                backward_count = task_counts.get(backward_task, (0, 0))
+        # Fetch and display the latest loss
+        latest_loss = fetch_latest_loss(args.sot_url)
+        loss_display = f"Latest Loss: {latest_loss:.3f}" if latest_loss is not None else "Latest Loss: N/A"
+        loss_y = height - len(task_counts) - 5
+        stdscr.addstr(loss_y, split_point, loss_display, curses.color_pair(4))
 
-                stdscr.addstr(i, split_point, f"{indicator} {name} ", color)
-                stdscr.addstr(f"({forward_count[0]}/{forward_count[1]}) ", curses.color_pair(3))
-                stdscr.addstr(f"({backward_count[0]}/{backward_count[1]})", curses.color_pair(4))
-            elif 'worker_embed+embed_backward' in name:
-                embed_task = "embed"
-                embed_backward_task = "embed_backward"
-
-                embed_count = task_counts.get(embed_task, (0, 0))
-                embed_backward_count = task_counts.get(embed_backward_task, (0, 0))
-
-                stdscr.addstr(i, split_point, f"{indicator} {name} ", color)
-                stdscr.addstr(f"({embed_count[0]}/{embed_count[1]}) ", curses.color_pair(3))
-                stdscr.addstr(f"({embed_backward_count[0]}/{embed_backward_count[1]})", curses.color_pair(4))
-            else:
-                stdscr.addstr(i, split_point, f"{indicator} {name}", color)
+        # Draw task counts below the latest loss
+        task_start = height - 3 - len(task_counts)
+        for i, (task_type, (solver_selected, active)) in enumerate(task_counts.items()):
+            stdscr.addstr(task_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
 
         stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
@@ -288,7 +282,6 @@ def monitor_processes(stdscr, processes, task_counts):
     stdscr.keypad(False)
     curses.endwin()
     os._exit(0)  # Force exit the program
-
 
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
@@ -421,7 +414,7 @@ async def main():
             json.dump(master_public_keys, f)
 
         # Generate wallets for workers and fund them
-        worker_wallets = generate_wallets(len(subnet_addresses))
+        worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
         await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
         await set_interval_mining(web3, 1)
 
@@ -446,51 +439,14 @@ async def main():
         # Print worker initialization stage
         logging.info("Starting worker processes...")
 
-        # Start worker.py for each subnet
-        task_combinations = []
 
-        # Collect task combinations
-        embed_task = None
-        embed_backward_task = None
-        final_logits_task = None
-        forward_backward_tasks = {}
-
-        # Iterate only over forward_layer and embed tasks, skip backward tasks
-        for task_type, subnet_address in subnet_addresses.items():
-            if task_type.startswith("forward_layer"):
-                layer_idx = int(task_type.split('_')[-1])
-                forward_backward_tasks[layer_idx] = (subnet_address, subnet_addresses.get(f"backward_layer_{layer_idx}", None))
-            elif task_type == "embed":
-                embed_task = subnet_address
-                embed_backward_task = subnet_addresses.get("embed_backward", None)
-            elif task_type == "final_logits":
-                final_logits_task = subnet_address
-
-        # Combine tasks and avoid double counting
-        if embed_task:
-            task_type = "embed+embed_backward" if embed_backward_task else "embed"
-            task_combinations.append((task_type, None, embed_task, embed_backward_task))
-
-        if final_logits_task:
-            task_combinations.append(("final_logits", None, final_logits_task, None))
-
-        for layer_idx, (forward_address, backward_address) in forward_backward_tasks.items():
-            if forward_address:
-                task_type = "forward" + ("+backward" if backward_address else "")
-                task_combinations.append((task_type, layer_idx, forward_address, backward_address))
-
-        worker_count = len(task_combinations)
-
-        for task_type, layer_idx, address_1, address_2 in task_combinations:
-            if address_2 is None:
-                worker_wallet = worker_wallets.pop(0)['private_key']
-            else:
-                worker_wallet = worker_wallets.pop(0)['private_key'] + '+' + worker_wallets.pop(0)['private_key']
+        for worker_idx in range(args.worker_count):
+            this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
             command = [
                 'python', 'worker.py',
-                '--task_types', task_type,
-                '--subnet_addresses', address_1 if address_2 is None else f"{address_1}+{address_2}",
-                '--private_keys', worker_wallet,
+                '--task_types', '+'.join(list(subnet_addresses.keys())),
+                '--subnet_addresses', '+'.join(list(subnet_addresses.values())),
+                '--private_keys', '+'.join([x['private_key'] for x in this_worker_wallets]),
                 '--rpc_url', args.rpc_url,
                 '--sot_url', args.sot_url,
                 '--pool_address', pool_address,
@@ -498,19 +454,16 @@ async def main():
                 '--local_storage_dir', args.local_storage_dir,
                 '--backend', args.backend,
             ]
-
-            if layer_idx is not None:
-                command.extend(['--layer_idx', str(layer_idx)])
-            worker_name = f'worker_{task_type + "_" + str(layer_idx) if layer_idx is not None else task_type}'
+            worker_name = f'worker_{worker_idx}'
             log_file_path = os.path.join(LOG_DIR, f"{worker_name}.log")
             log_file = open(log_file_path, 'w')
             worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
             processes[worker_name] = worker_process
-            logging.info(f"Started worker process for tasks {task_type} with command: {' '.join(command)}")
+            logging.info(f"Started worker process {worker_idx} for tasks with command: {' '.join(command)}")
 
         try:
             # Wait for all workers to sync
-            if not wait_for_workers_to_sync(worker_count):
+            if not wait_for_workers_to_sync(args.worker_count):
                 logging.error("Error: Not all workers synced within the timeout period.")
                 terminate_processes(processes.values())
                 exit(1)

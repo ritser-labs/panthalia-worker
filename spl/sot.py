@@ -1,11 +1,11 @@
+from collections import defaultdict
 import os
 import json
 import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import model_args, tokenizer, batch_size, initialize_distributed_environment, TENSOR_VERSION_INTERVAL, BUFFER_SIZE
-from datasets import load_dataset
+from common import model_config, model_adapter, batch_size, initialize_distributed_environment_and_globals, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from device import device
@@ -14,9 +14,7 @@ import time
 import random
 from werkzeug.utils import secure_filename
 from tqdm import tqdm
-import torch.nn.init as init
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
-from model import VocabParallelEmbedding, RMSNorm, ColumnParallelLinear, TransformerBlock
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
@@ -24,7 +22,7 @@ import functools
 
 app = Flask(__name__)
 sync_status = {}
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
     logging.StreamHandler()
 ])
 
@@ -40,26 +38,35 @@ os.makedirs(state_dir, exist_ok=True)
 temp_dir = os.path.join(state_dir, 'temp')
 os.makedirs(temp_dir, exist_ok=True)
 
-# File to store block timestamps
+# File paths to store block timestamps, num_updates, and last_future_version_number
 block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
+num_updates_file = os.path.join(state_dir, 'num_updates.json')
+last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
 
-# Initialize a lock for block_timestamps
+# Initialize locks for these dicts
 block_timestamps_lock = threading.Lock()
+num_updates_lock = threading.Lock()
+last_future_version_lock = threading.Lock()
 
-def load_block_timestamps():
-    with block_timestamps_lock:
-        if os.path.exists(block_timestamps_file):
-            with open(block_timestamps_file, 'r') as f:
-                return json.load(f)
-        return {}
+def load_json(file_path, default):
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    else:
+        save_json(file_path, default)
+        return default
 
-def save_block_timestamps(block_timestamps):
-    with block_timestamps_lock:
-        with open(block_timestamps_file, 'w') as f:
-            json.dump(block_timestamps, f)
+def save_json(file_path, data):
+    with open(file_path, 'w') as f:
+        json.dump(data, f)
 
-# Load existing block timestamps on startup
-block_timestamps = load_block_timestamps()
+# Load existing block timestamps, num_updates, and last_future_version_number on startup
+with block_timestamps_lock:
+    block_timestamps = load_json(block_timestamps_file, {})
+with num_updates_lock:
+    num_updates = load_json(num_updates_file, {})
+with last_future_version_lock:
+    last_future_version_number = load_json(last_future_version_file, {})
 
 # Dictionary to store gradient updates
 executor = ThreadPoolExecutor(max_workers=10)
@@ -73,49 +80,10 @@ master_public_keys = []
 # Dictionary to store used nonces
 used_nonces = {}
 
-def calculate_transformer_block_size(args):
-    head_dim = args.dim // args.n_heads
-    n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-    hidden_dim = int(2 * 4 * args.dim / 3)
-    hidden_dim = args.multiple_of * ((hidden_dim + args.multiple_of - 1) // args.multiple_of)
-    
-    attention_size = (
-        args.dim * args.n_heads * head_dim +  # wq
-        args.dim * n_kv_heads * head_dim +    # wk
-        args.dim * n_kv_heads * head_dim +    # wv
-        args.dim * args.n_heads * head_dim    # wo
-    )
-    feedforward_size = (
-        args.dim * hidden_dim +  # w1
-        hidden_dim * args.dim +  # w2
-        args.dim * hidden_dim    # w3
-    )
-    norm_size = 2 * args.dim  # Two RMSNorm layers
+latest_loss = {'value': None}
+latest_loss_lock = threading.Lock()
 
-    total_size = attention_size + feedforward_size + norm_size
-    return total_size
-
-# Update tensor sizes for each layer
-tensor_sizes = {
-    'embed': (model_args.vocab_size * model_args.dim,),
-    'embed_adam_m': (model_args.vocab_size * model_args.dim,),
-    'embed_adam_v': (model_args.vocab_size * model_args.dim,),
-    'final_logits': (model_args.dim + model_args.dim * model_args.vocab_size,),  # Add the size of RMSNorm and ColumnParallelLinear combined
-}
-
-for i in range(model_args.n_layers):
-    block_size = calculate_transformer_block_size(model_args)
-    tensor_sizes[f'layer_{i}'] = (block_size,)
-    tensor_sizes[f'layer_{i}_adam_m'] = (block_size,)
-    tensor_sizes[f'layer_{i}_adam_v'] = (block_size,)
-
-def initialize_distributed_environment_and_globals():
-    logging.info("Initializing distributed environment")
-    initialize_distributed_environment('gloo')
-    initialize_model_parallel(model_parallel_size_=1)
-    logging.info("Environment and global variables initialized")
-
-def initialize_tensor(name, sync_version_number=None, random_init=True):
+def initialize_tensor(name, sync_version_number=None, zero_init=False):
     if sync_version_number is None:
         sync_version_number = block_timestamps.get(
             0, int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL)
@@ -124,140 +92,57 @@ def initialize_tensor(name, sync_version_number=None, random_init=True):
     if os.path.exists(file_path):
         return
 
-    if "embed" in name:
-        module = VocabParallelEmbedding(model_args.vocab_size, model_args.dim).to(device)
-    elif "final_logits" in name:
-        norm = RMSNorm(model_args.dim, eps=model_args.norm_eps).to(device)
-        linear = ColumnParallelLinear(model_args.dim, model_args.vocab_size, bias=False).to(device)
-        module = [norm, linear]
-    elif "layer_" in name:
-        layer_idx = int(name.split('_')[1])
-        module = TransformerBlock(layer_idx, model_args).to(device)
-    else:
+    if TENSOR_NAME not in name:
         raise ValueError(f"Unsupported tensor name: {name}")
-
-    if random_init:
-        if isinstance(module, list):  # final_logits case
-            for submodule in module:
-                for param in submodule.parameters():
-                    if param.dim() > 1:
-                        init.xavier_uniform_(param)
-        else:
-            for param in module.parameters():
-                if param.dim() > 1:
-                    init.xavier_uniform_(param)
-    else: # Zero initialization for Adam tensors
-        if isinstance(module, list):
-            for submodule in module:
-                for param in submodule.parameters():
-                    param.data.fill_(0)
-        else:
-            for param in module.parameters():
-                param.data.fill_(0)
-
-    if isinstance(module, list):  # final_logits case
-        tensors = [param.data for submodule in module for param in submodule.parameters()]
-        tensor = torch.cat([tensor.view(-1) for tensor in tensors])
-    else:
-        tensors = [param.data for param in module.parameters()]
-        tensor = torch.cat([tensor.view(-1) for tensor in tensors])
+    
+    tensor = model_adapter.init_tensor(zero_init)
 
     torch.save(tensor, file_path)
     with block_timestamps_lock:
         block_timestamps[name] = sync_version_number
-    save_block_timestamps(block_timestamps)
+    save_json(block_timestamps_file, block_timestamps)
+    with last_future_version_lock:
+        last_future_version_number[name] = sync_version_number
+    save_json(last_future_version_file, last_future_version_number)
 
 def initialize_all_tensors():
-    # Initialize the embedding tensor
-    initialize_tensor('embed')
-    initialize_tensor('embed_adam_m', random_init=False)
-    initialize_tensor('embed_adam_v', random_init=False)
-
-    # Initialize the layer tensors
-    for i in range(model_args.n_layers):
-        initialize_tensor(f'layer_{i}')
-        initialize_tensor(f'layer_{i}_adam_m', random_init=False)
-        initialize_tensor(f'layer_{i}_adam_v', random_init=False)
-    
-    # Initialize the final logits tensor
-    initialize_tensor('final_logits')
-    initialize_tensor('final_logits_adam_m', random_init=False)
-    initialize_tensor('final_logits_adam_v', random_init=False)
-
-logging.info("Loading Wikipedia dataset...")
-dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
-dataset_iter = iter(dataset)
+    initialize_tensor(TENSOR_NAME, zero_init=False)
+    initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
+    initialize_tensor(f'{TENSOR_NAME}_adam_v', zero_init=True)
 
 preloaded_batch = None
 preloaded_batch_lock = threading.Lock()
 preloaded_batch_condition = threading.Condition(lock=preloaded_batch_lock)
 
-def truncate_tokens(tokens, max_seq_len, pad_token=tokenizer.pad_id):
-    if (len(tokens)) < max_seq_len:
-        tokens += [pad_token] * (max_seq_len - len(tokens))
-    elif len(tokens) > max_seq_len:
-        tokens = tokens[:max_seq_len]
-    return tokens
-
-def generate_examples(buffer_size=BUFFER_SIZE):
-    global dataset_iter
-    max_seq_len = model_args.max_seq_len
-    buffer = []
-
-    try:
-        while True:
-            # Fill the buffer
-            while len(buffer) < buffer_size:
-                example = next(dataset_iter)
-                tokens = tokenizer.encode(
-                    example['text'], 
-                    bos=False, 
-                    eos=False, 
-                    allowed_special=set(), 
-                    disallowed_special=(), 
-                )
-
-                for seq_len in range(1, min(len(tokens), max_seq_len) + 1):
-                    inputs = truncate_tokens(tokens[:seq_len], max_seq_len)
-                    targets = truncate_tokens(tokens[1:seq_len + 1], max_seq_len, tokenizer.eos_id)
-                    buffer.append((inputs, targets))
-
-            # Shuffle the buffer
-
-            random.shuffle(buffer)
-
-            # Yield items from the buffer
-            while buffer:
-                yield buffer.pop()
-    except StopIteration:
-        # Yield remaining items in buffer after StopIteration
-        while buffer:
-            yield buffer.pop()
-
 def preload_batch():
     global preloaded_batch
-    example_generator = generate_examples()
     batch = []
     targets = []
 
-    while len(batch) < batch_size:
-        try:
-            inputs, target_tokens = next(example_generator)
-            batch.append(inputs)
-            targets.append(target_tokens)
-        except StopIteration:
+    for inputs, target_tokens in dataset:
+        if len(batch) >= batch_size:
             break
+        # Convert each list to a tensor, adding a new dimension
+        if isinstance(inputs, list):
+            inputs = torch.tensor(inputs)  # Convert list to tensor
+        if isinstance(target_tokens, list):
+            target_tokens = torch.tensor(target_tokens)  # Convert list to tensor
+        batch.append(inputs)
+        targets.append(target_tokens)
 
     if batch:
+        # Stack the tensors along a new dimension
+        batch_tensor = torch.stack(batch)
+        targets_tensor = torch.stack(targets)
+
         timestamp = int(time.time())
         random_suffix = random.randint(1000, 9999)
-        batch_filename = f'batch_{timestamp}_{random_suffix}.json'
-        targets_filename = f'targets_{timestamp}_{random_suffix}.json'
+        batch_filename = f'batch_{timestamp}_{random_suffix}.pt'
+        targets_filename = f'targets_{timestamp}_{random_suffix}.pt'
 
-        with open(os.path.join(temp_dir, batch_filename), 'w') as file:
-            file.write(json.dumps(batch))
-        with open(os.path.join(temp_dir, targets_filename), 'w') as file:
-            file.write(json.dumps(targets))
+        # Save the stacked tensors
+        torch.save(batch_tensor, os.path.join(temp_dir, batch_filename))
+        torch.save(targets_tensor, os.path.join(temp_dir, targets_filename))
 
         # Set the global preloaded_batch variable here
         with preloaded_batch_lock:
@@ -266,9 +151,10 @@ def preload_batch():
 
         return batch_filename, targets_filename
 
+
 def initialize_service():
     logging.info("Initializing distributed environment and tensors")
-    initialize_distributed_environment_and_globals()
+    initialize_distributed_environment_and_globals('gloo')
     initialize_all_tensors()
     preload_batch()
 
@@ -337,21 +223,20 @@ def requires_authentication(f):
         return f(*args, **kwargs)
     return decorated_function
 
-
 @app.route('/latest_model_params', methods=['GET'])
 def get_latest_model_params():
     logging.info("Accessing /latest_model_params endpoint")
     try:
         model_params = {
-            "vocab_size": model_args.vocab_size,
-            "dim": model_args.dim,
-            "n_layers": model_args.n_layers,
-            "n_heads": model_args.n_heads,
-            "multiple_of": model_args.multiple_of,
-            "norm_eps": model_args.norm_eps,
-            "rope_theta": model_args.rope_theta,
-            "max_batch_size": model_args.max_batch_size,
-            "max_seq_len": model_args.max_seq_len
+            "vocab_size": model_config.model_args.vocab_size,
+            "dim": model_config.model_args.dim,
+            "n_layers": model_config.model_args.n_layers,
+            "n_heads": model_config.model_args.n_heads,
+            "multiple_of": model_config.model_args.multiple_of,
+            "norm_eps": model_config.model_args.norm_eps,
+            "rope_theta": model_config.model_args.rope_theta,
+            "max_batch_size": model_config.model_args.max_batch_size,
+            "max_seq_len": model_config.model_args.max_seq_len
         }
         return jsonify(model_params)
     except Exception as e:
@@ -384,11 +269,16 @@ def get_batch():
         return jsonify({'error': 'Could not get batch'}), 500
 
 def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
-    beta1hat = beta1 * (1 - beta1**(step - 1)) / (1 - beta1**step)
-    beta2hat = beta2 * (1 - beta2**(step - 1)) / (1 - beta2**step)
+    logging.debug(f"Params before update: {params}")
+    logging.debug(f"Grads: {grads}")
+    logging.debug(f"m before update: {m}")
+    logging.debug(f"v before update: {v}")
+
+    m = beta1 * m + (1 - beta1) * grads
+    v = beta2 * v + (1 - beta2) * grads ** 2
     
-    m = beta1hat * m + (1 - beta1hat) * grads
-    v = beta2hat * v + (1 - beta2hat) * grads ** 2
+    logging.debug(f"Updated m: {m}")
+    logging.debug(f"Updated v: {v}")
     
     m_hat = m / (1 - beta1 ** step)
     v_hat = v / (1 - beta2 ** step)
@@ -401,10 +291,21 @@ def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0
     
     params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
     
+    logging.debug(f"m_hat: {m_hat}")
+    logging.debug(f"v_hat: {v_hat}")
+    logging.debug(f"denominator: {denominator}")
+    logging.debug(f"rms: {rms}")
+    logging.debug(f"new_lr: {new_lr}")
+    logging.debug(f"Updated params: {params}")
+
     return params, m, v
+
 
 def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
     tensor_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
+    if not os.path.exists(tensor_path):
+        raise FileNotFoundError(f"Tensor file for {tensor_name} not found at {tensor_path}")
+    
     tensor = torch.load(tensor_path, map_location=device)
 
     if tensor is None:
@@ -417,26 +318,30 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
 
     logging.debug(f"Flattened gradients: {grads_flat}")
 
-    # Clip gradients
-    grads_flat = torch.nn.utils.clip_grad_norm_(grads_flat, clip_grad)
 
     if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
         logging.error(f"NaNs or Infs detected in gradients before AdamW update for {tensor_name}")
         raise ValueError(f"NaNs or Infs detected in gradients for {tensor_name}")
 
-
     tensor_adam_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
     tensor_adam_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{version_number}.pt')
 
-    adam_m = torch.load(tensor_adam_m_path, map_location=device)
-    adam_v = torch.load(tensor_adam_v_path, map_location=device)
+    adam_m, adam_v = None, None
+
+    if os.path.exists(tensor_adam_m_path):
+        adam_m = torch.load(tensor_adam_m_path, map_location=device).to(device)
+    if os.path.exists(tensor_adam_v_path):
+        adam_v = torch.load(tensor_adam_v_path, map_location=device).to(device)
 
     if adam_m is None or adam_v is None:
+        logging.debug(f'adam_m or adam_v not found for {tensor_name}, initializing to zeros')
         adam_m = torch.zeros_like(tensor, device=device)
         adam_v = torch.zeros_like(tensor, device=device)
 
     logging.debug(f"m before AdamW: {adam_m}")
     logging.debug(f"v before AdamW: {adam_v}")
+    
+    clip_threshold = 1.0
 
     # Get the StableAdamW updates
     param_update, m_update, v_update = stable_adamw_update(
@@ -445,14 +350,17 @@ def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, b
         adam_m,
         adam_v,
         learning_rate,
+        weight_decay,
         beta1,
         beta2,
         epsilon,
-        weight_decay,
+        clip_threshold,
         t
     )
 
     logging.debug(f"Updates after applying StableAdamW: {param_update}")
+    logging.debug(f"m after AdamW: {m_update}")
+    logging.debug(f"v after AdamW: {v_update}")
 
     return param_update.view(-1), m_update.view(-1), v_update.view(-1)
 
@@ -472,6 +380,16 @@ def update_state():
 
     future_version_number = (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
 
+    if last_future_version_number.get(tensor_name, 0) < future_version_number:
+        if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
+            with block_timestamps_lock:
+                block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
+            save_json(block_timestamps_file, block_timestamps)
+    with num_updates_lock:
+        num_updates[tensor_name] = 0
+        save_json(num_updates_file, num_updates)
+    logging.info(f"Future version number for {tensor_name}: {future_version_number}")
+
     try:
         with requests.Session() as session:
             tensor_data = fetch(session, result_url)
@@ -481,36 +399,35 @@ def update_state():
         # Paths for accumulated grads and future tensor
         accumulated_grads_path = os.path.join(state_dir, f'accumulated_grads_{tensor_name}_{future_version_number}.pt')
         future_tensor_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
+        unversioned_tensor_path = os.path.join(state_dir, f'{tensor_name}.pt')
         future_tensor_adam_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{future_version_number}.pt')
         future_tensor_adam_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{future_version_number}.pt')
 
         # Load or initialize the accumulated_grads tensor
         if os.path.exists(accumulated_grads_path):
-            accumulated_grads = torch.load(accumulated_grads_path, map_location=device)
+            accumulated_grads = torch.load(accumulated_grads_path, map_location=device).to(device)
         else:
-            accumulated_grads = torch.zeros_like(tensor)
+            accumulated_grads = torch.zeros_like(tensor, device=device)
 
         # Update the accumulated_grads tensor
-        accumulated_grads += tensor
+        accumulated_grads += tensor.to(device)
         torch.save(accumulated_grads, accumulated_grads_path)
 
         # Calculate the future tensor
         current_version_number = block_timestamps.get(tensor_name, 0)
-        current_state_file_path = os.path.join(state_dir, f'{tensor_name}_{current_version_number}.pt')
-        if os.path.exists(current_state_file_path):
-            current_tensor = torch.load(current_state_file_path, map_location=device)
-        else:
-            raise ValueError(f"Current state file not found for {tensor_name}")
+        logging.info(f'Updating state for {tensor_name}, future version number: {future_version_number}, current version number: {current_version_number}')
 
-        num_of_updates = block_timestamps.get(f'{tensor_name}_updates_{future_version_number}', 0) + 1
-        block_timestamps[f'{tensor_name}_updates_{future_version_number}'] = num_of_updates
-        averaged_grads = accumulated_grads / num_of_updates
-        #future_tensor = accumulated_grads / num_of_updates + current_tensor
+        with num_updates_lock:
+            num_of_updates = num_updates[tensor_name] + 1
+            num_updates[tensor_name] = num_of_updates
+            save_json(num_updates_file, num_updates)
+            
+        averaged_grads = (accumulated_grads / num_of_updates).to(device)
         future_tensor, m_update, v_update = apply_adamw(
             current_version_number,
             tensor_name,
             averaged_grads,
-            data.get('learning_rate', 0.002),
+            data.get('learning_rate', 0.002) * num_of_updates,
             data.get('beta1', 0.9),
             data.get('beta2', 0.99),
             data.get('epsilon', 1e-6),
@@ -518,20 +435,20 @@ def update_state():
             data.get('t', 1)
         )
 
-
         torch.save(future_tensor, future_tensor_path)
+        torch.save(future_tensor, unversioned_tensor_path)
         torch.save(m_update, future_tensor_adam_m_path)
         torch.save(v_update, future_tensor_adam_v_path)
+        
+        if last_future_version_number.get(tensor_name, 0) < future_version_number:
+            with last_future_version_lock:
+                last_future_version_number[tensor_name] = future_version_number
+                save_json(last_future_version_file, last_future_version_number)
 
         # Cleanup old accumulated grads tensors
         for filename in os.listdir(state_dir):
             if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
                 os.remove(os.path.join(state_dir, filename))
-
-        # Update block timestamps and number of updates
-        with block_timestamps_lock:
-            block_timestamps[tensor_name] = future_version_number
-        save_block_timestamps(block_timestamps)
 
         logging.debug(f"Updated state for {tensor_name}")
         return jsonify({'status': 'success', 'version_number': future_version_number})
@@ -540,6 +457,7 @@ def update_state():
     except Exception as e:
         logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
     return jsonify({'error': 'Could not update state'}), 500
+
 
 @app.route('/latest_state', methods=['GET'])
 def latest_state():
@@ -659,6 +577,32 @@ def upload_tensor():
 
     return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'{BASE_URL}/data/state/temp/{filename}'}), 200
 
+@app.route('/update_loss', methods=['POST'])
+def update_loss():
+    global latest_loss
+
+    # Get the loss value from the request data
+    data = request.get_json()
+    if not data or 'loss' not in data:
+        return jsonify({'error': 'Missing loss value'}), 400
+
+    loss = data['loss']
+    
+    # Update the loss value with thread-safety
+    with latest_loss_lock:
+        latest_loss['value'] = loss
+
+    logging.info(f"Updated latest loss: {loss}")
+    return jsonify({'status': 'success'}), 200
+
+@app.route('/get_loss', methods=['GET'])
+def get_loss():
+    global latest_loss
+    with latest_loss_lock:
+        loss = latest_loss['value']
+    if loss is None:
+        return jsonify({'error': 'Loss value not set'}), 404
+    return jsonify({'loss': loss}), 200
 
 if __name__ == "__main__":
     import argparse
