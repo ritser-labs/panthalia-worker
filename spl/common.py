@@ -19,7 +19,6 @@ from device import device
 import math
 import asyncio
 from hexbytes import HexBytes
-from dataloader import WikipediaDataLoader, ShakespeareDataLoader
 from eth_abi import decode
 
 # Define the new tokenizer and model arguments
@@ -62,8 +61,6 @@ MIN_REMAINING_TIME_SECONDS = 3
 SLEEP_TIME = 1
 
 TENSOR_NAME = 'model'
-
-dataset = WikipediaDataLoader(buffer_size=BUFFER_SIZE)
 
 Model = Transformer
 
