@@ -5,8 +5,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import Model, model_args, batch_size, initialize_distributed_environment_and_globals, TENSOR_VERSION_INTERVAL, BUFFER_SIZE, TENSOR_NAME
-from dataloader import WikipediaDataLoader, ShakespeareDataLoader
+from common import Model, model_args, batch_size, initialize_distributed_environment_and_globals, TENSOR_VERSION_INTERVAL, BUFFER_SIZE, TENSOR_NAME, dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from device import device
@@ -125,9 +124,6 @@ def initialize_all_tensors():
     initialize_tensor(TENSOR_NAME, zero_init=False)
     initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
     initialize_tensor(f'{TENSOR_NAME}_adam_v', zero_init=True)
-
-logging.info("Loading Wikipedia dataset...")
-dataset = WikipediaDataLoader(buffer_size=BUFFER_SIZE)
 
 preloaded_batch = None
 preloaded_batch_lock = threading.Lock()
