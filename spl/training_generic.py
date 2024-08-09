@@ -11,7 +11,7 @@ from eth_account.messages import encode_defunct
 from web3 import Web3
 import subprocess
 from model import ModelArgs, Transformer
-from common import Model, wait_for_sot, tensor_to_model, initialize_distributed_environment_and_globals, model_args, tokenizer
+from common import Model, model_adapter, model_args, tokenizer
 from device import device
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
@@ -137,7 +137,7 @@ class TransformerLLMAdapter(ModelAdapter):
         os.environ['MASTER_ADDR'] = 'localhost'
         os.environ['MASTER_PORT'] = '12355'
         
-        initialize_distributed_environment_and_globals('nccl')
+        model_adapter.initialize_environment('nccl')
 
         model = Model(model_args).to(device)
         super().__init__(model)

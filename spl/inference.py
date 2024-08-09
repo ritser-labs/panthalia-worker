@@ -4,7 +4,7 @@ import os
 import time
 import torch
 from model import ModelArgs, Transformer
-from common import tokenizer, wait_for_sot, model_adapter, initialize_distributed_environment_and_globals
+from common import tokenizer, wait_for_sot, model_adapter
 from device import device
 from io import BytesIO
 
@@ -45,7 +45,7 @@ def main():
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     
-    initialize_distributed_environment_and_globals('nccl')
+    model_adapter.initialize_environment('nccl')
 
     # Load the model
     model = load_model()

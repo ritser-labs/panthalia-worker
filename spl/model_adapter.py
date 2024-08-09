@@ -5,6 +5,9 @@ import time
 from device import device
 import torch.nn.functional as F
 from model_config import BaseModelConfig, TransformerModelConfig
+import torch.distributed as dist
+from fairscale.nn.model_parallel.initialize import initialize_model_parallel
+import os
 
 class ModelAdapter(ABC):
     def __init__(self, model_config: BaseModelConfig):
@@ -32,6 +35,9 @@ class ModelAdapter(ABC):
     
     @abstractmethod
     def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
+        pass
+    
+    def initialize_environment(self):
         pass
 
 class StandardModelAdapter(ModelAdapter):
@@ -169,6 +175,22 @@ class StandardModelAdapter(ModelAdapter):
             tensor = torch.cat([torch.zeros_like(tensor).view(-1) for tensor in tensors])
         return tensor
 
+class FairscaleModelAdapter(ModelAdapter):
+    def initialize_environment(self, backend='nccl'):
+        logging.info("Initializing distributed environment")
+        self.initialize_distributed_environment(backend)
+        initialize_model_parallel(model_parallel_size_=1)
+
+        logging.info("Environment and global variables initialized")
+    
+    def initialize_distributed_environment(self, backend, master_addr='localhost', master_port=None):
+        if master_port is None:
+            master_port = str(12356 + os.getpid() % 10000)
+        os.environ['MASTER_ADDR'] = master_addr
+        os.environ['MASTER_PORT'] = master_port
+        if not dist.is_initialized():
+            dist.init_process_group(backend=backend)
+
 class TransformerModelAdapter(StandardModelAdapter):    
     def loss_fn(self, logits, targets) -> torch.Tensor:
         return F.cross_entropy(logits, targets, ignore_index=self.model_config.tokenizer.pad_id)
@@ -191,3 +213,6 @@ class TransformerModelAdapter(StandardModelAdapter):
             self.model_config.model_args.vocab_size,
             (1, self.model_config.model_args.max_seq_len)
         ).to(device), 0)
+
+class LlamaModelAdapter(TransformerModelAdapter, FairscaleModelAdapter):
+    pass

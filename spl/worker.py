@@ -11,7 +11,7 @@ from web3.exceptions import ContractCustomError
 from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from device import device
-from common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, initialize_distributed_environment_and_globals, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
+from common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Optional, Tuple
 from io import BytesIO
@@ -486,7 +486,7 @@ async def get_all_task_ids(last_checked_task_ids):
 async def main():
     logging.info("Starting main process")
     torch.set_default_device(device)
-    initialize_distributed_environment_and_globals(args.backend)
+    model_adapter.initialize_environment(args.backend)
 
     await initialize_contracts()
 

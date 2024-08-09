@@ -5,7 +5,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import model_config, model_adapter, batch_size, initialize_distributed_environment_and_globals, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset
+from common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from device import device
@@ -154,7 +154,7 @@ def preload_batch():
 
 def initialize_service():
     logging.info("Initializing distributed environment and tensors")
-    initialize_distributed_environment_and_globals('gloo')
+    model_adapter.initialize_environment('gloo')
     initialize_all_tensors()
     preload_batch()
 

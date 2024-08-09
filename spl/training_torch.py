@@ -5,7 +5,7 @@ import torch
 import time
 import requests
 from model import ModelArgs, Transformer
-from common import Model, wait_for_sot, tensor_to_model, initialize_distributed_environment_and_globals, model_args, tokenizer
+from common import Model, wait_for_sot, tensor_to_model, model_args, tokenizer, model_adapter
 from device import device
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -134,7 +134,7 @@ def main():
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     
-    initialize_distributed_environment_and_globals('nccl')
+    model_adapter.initialize_environment('nccl')
 
     # Load the master wallet
     wallet = load_master_wallet()

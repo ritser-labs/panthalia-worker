@@ -4,7 +4,6 @@ from tokenizer import Tokenizer
 from model import ModelArgs, Transformer
 import json
 import logging
-import torch.distributed as dist
 import time
 from io import BytesIO
 import requests
@@ -14,7 +13,6 @@ import web3 as Web3Module
 from collections import namedtuple
 from web3.datastructures import AttributeDict
 from web3.exceptions import ContractLogicError
-from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from device import device
 import math
 import asyncio
@@ -22,7 +20,7 @@ from hexbytes import HexBytes
 from eth_abi import decode
 from dataloader import WikipediaDataLoader, ShakespeareDataLoader, LowercaseAlphabetDataLoader
 from model_config import TransformerModelConfig
-from model_adapter import TransformerModelAdapter
+from model_adapter import LlamaModelAdapter
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -69,15 +67,7 @@ model_config = TransformerModelConfig(tokenizer, model_args)
 
 dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE)
 
-model_adapter = TransformerModelAdapter(model_config)
-
-
-def initialize_distributed_environment_and_globals(backend='nccl'):
-    logging.info("Initializing distributed environment")
-    initialize_distributed_environment(backend)
-    initialize_model_parallel(model_parallel_size_=1)
-
-    logging.info("Environment and global variables initialized")
+model_adapter = LlamaModelAdapter(model_config)
 
 def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
     """Wait for the SOT service to be available."""
@@ -211,14 +201,6 @@ def upload_tensor(tensor, local_storage_dir):
 def download_file(url):
     response = requests.get(url)
     return torch.load(BytesIO(response.content))
-
-def initialize_distributed_environment(backend, master_addr='localhost', master_port=None):
-    if master_port is None:
-        master_port = str(12356 + os.getpid() % 10000)
-    os.environ['MASTER_ADDR'] = master_addr
-    os.environ['MASTER_PORT'] = master_port
-    if not dist.is_initialized():
-        dist.init_process_group(backend=backend)
 
 def process_trace(trace):
     if isinstance(trace, AttributeDict):
