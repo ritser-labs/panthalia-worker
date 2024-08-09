@@ -422,9 +422,7 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
         model.train()
         if args.torch_compile:
             # Compile the model after loading state_dict
-            model = torch.compile(model)
-            # Warmup
-            _ = model(model_adapter.get_dummy_input())
+            model = model_adapter.compile_model(model)
             logging.info("Model model compiled and warmed up")
 
     except requests.exceptions.RequestException as e:

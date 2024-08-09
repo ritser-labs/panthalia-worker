@@ -29,6 +29,10 @@ class ModelAdapter(ABC):
     @abstractmethod
     def init_tensor(self, zero_init: bool = False) -> torch.Tensor:
         pass
+    
+    @abstractmethod
+    def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
+        pass
 
 class StandardModelAdapter(ModelAdapter):
     @abstractmethod
@@ -114,6 +118,11 @@ class StandardModelAdapter(ModelAdapter):
 
         return updates, loss
     
+    def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
+        model = torch.compile(model)
+        _ = model(*self.get_dummy_input())
+        return model
+
     @abstractmethod
     def get_dummy_input(self):
         pass
@@ -177,8 +186,8 @@ class TransformerModelAdapter(StandardModelAdapter):
                     layer.attention.cache_v = layer.attention.cache_v.detach()
     
     def get_dummy_input(self):
-        return torch.randint(
+        return (torch.randint(
             0,
             self.model_config.model_args.vocab_size,
             (1, self.model_config.model_args.max_seq_len)
-        ).to(device)
+        ).to(device), 0)
