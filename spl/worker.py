@@ -1,7 +1,7 @@
 import argparse
 import json
 import logging
-import requests
+import aiohttp
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -19,8 +19,8 @@ import time
 import os
 from tqdm import tqdm
 import asyncio
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+from concurrent.futures import ThreadPoolExecutor
+from aiohttp import MultipartWriter
 import threading
 import torch._dynamo
 
@@ -33,7 +33,7 @@ class SuppressTracebackFilter(logging.Filter):
 # Set up logging with timestamps
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname=s) - %(message)s'
 )
 logger = logging.getLogger()
 logger.addFilter(SuppressTracebackFilter())
@@ -134,26 +134,30 @@ class TaskQueue:
 
 task_queue = TaskQueue()
 
-def download_file(url):
-    response = requests.get(url)
-    return torch.load(BytesIO(response.content))
+async def download_file(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            content = await response.read()
+            return torch.load(BytesIO(content))
 
-def download_json(url):
+async def download_json(url):
     try:
-        response = requests.get(url)
-        response.raise_for_status()  # Raise an error for bad status codes
-        data = response.json()  # Parse and return the JSON content
-        return torch.tensor(data, dtype=torch.long).to(device)  # Convert to tensor
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                response.raise_for_status()  # Raise an error for bad status codes
+                data = await response.json()  # Parse and return the JSON content
+                return torch.tensor(data, dtype=torch.long).to(device)  # Convert to tensor
+    except aiohttp.ClientError as e:
         logging.error(f"Failed to download JSON from {url}: {e}")
         raise
 
-def get_json(url, params=None):
+async def get_json(url, params=None):
     try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()  # Raise an error for bad status codes
-        return response.json()  # Parse and return the JSON content
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as response:
+                response.raise_for_status()  # Raise an error for bad status codes
+                return await response.json()  # Parse and return the JSON content
+    except aiohttp.ClientError as e:
         logging.error(f"Failed to download JSON from {url}: {e}")
         raise
 
@@ -163,38 +167,52 @@ def create_callback(encoder, pbar):
     return callback
 
 async def upload_tensor(tensor, tensor_name):
+    # Convert the tensor to bytes
     tensor_bytes = BytesIO()
     torch.save(tensor, tensor_bytes)
     tensor_bytes.seek(0)
 
-    encoder = MultipartEncoder(
-        fields={
-            'tensor': (tensor_name, tensor_bytes, 'application/octet-stream'),
-            'label': tensor_name
-        }
-    )
+    # Get the total size of the tensor in bytes for the progress bar
+    total_size = tensor_bytes.getbuffer().nbytes
 
-    pbar = tqdm(total=encoder.len, unit='B', unit_scale=True, desc='Uploading')
-    monitor = MultipartEncoderMonitor(encoder, create_callback(encoder, pbar))
+    # Initialize the progress bar
+    pbar = tqdm(total=total_size, unit='B', unit_scale=True, desc='Uploading')
 
-    headers = {'Content-Type': monitor.content_type}
-    logging.debug("Starting tensor upload...")
+    async with aiohttp.ClientSession() as session:
+        # Create a MultipartWriter for sending the tensor file and label
+        with aiohttp.MultipartWriter() as mpwriter:
+            # Add the tensor file part
+            part = mpwriter.append(tensor_bytes, {'Content-Type': 'application/octet-stream'})
+            part.set_content_disposition('form-data', name='tensor', filename=tensor_name)
 
-    loop = asyncio.get_event_loop()
+            # Add the label part
+            mpwriter.append_form({'label': tensor_name})
 
-    try:
-        response = await loop.run_in_executor(None, lambda: requests.post(f'{args.sot_url}/upload_tensor', data=monitor, headers=headers, timeout=300))
-        pbar.close()
-        logging.debug("Upload completed.")
-    except requests.exceptions.Timeout:
-        logging.error("Upload request timed out.")
-        pbar.close()
-        raise RuntimeError("Failed to upload tensor: request timed out")
+            headers = {'Content-Type': mpwriter.headers['Content-Type']}
+            logging.debug("Starting tensor upload...")
 
-    if response.status_code == 200:
-        return response.json().get('tensor_url')
-    else:
-        raise RuntimeError(f"Failed to upload tensor: {response.text}")
+            try:
+                # Send the POST request
+                async with session.post(f'{args.sot_url}/upload_tensor', data=mpwriter, headers=headers, timeout=300) as response:
+                    # Read the response and update the progress bar
+                    pbar.update(total_size)
+
+                    # Check the response status
+                    if response.status == 200:
+                        response_json = await response.json()
+                        tensor_url = response_json.get('tensor_url')
+                        logging.debug("Upload completed successfully.")
+                        return tensor_url
+                    else:
+                        logging.error(f"Failed to upload tensor: {response.status} {await response.text()}")
+                        raise RuntimeError(f"Failed to upload tensor: {response.status} {await response.text()}")
+
+            except asyncio.TimeoutError:
+                logging.error("Upload request timed out.")
+                raise RuntimeError("Failed to upload tensor: request timed out")
+            finally:
+                # Close the progress bar
+                pbar.close()
 
 async def deposit_stake():
     # Do not deposit stakes if queued tasks exceed the limit
@@ -276,7 +294,7 @@ async def process_tasks():
         task_type = args.task_types[contract_index]
         tensor_name = get_relevant_tensor_for_task(task_type)
         version_num_url = f'{args.sot_url}/tensor_block_timestamp'
-        version_number = get_json(
+        version_number = await get_json(
             version_num_url,
             params={'tensor_name': tensor_name}
         )['version_number']
@@ -295,14 +313,14 @@ async def process_tasks():
         # Process the task...
         logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
         download_start_time = time.time()
-        batch = download_file(task_params['batch_url'])
+        batch = await download_file(task_params['batch_url'])
         download_end_time = time.time()
         logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
 
 
         logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
         download_start_time = time.time()
-        targets = download_file(task_params['targets_url'])
+        targets = await download_file(task_params['targets_url'])
         download_end_time = time.time()
         logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
 
@@ -392,11 +410,12 @@ async def upload_results(version_number, updates, loss):
     }
 
 async def report_sync_status():
-    
     try:
         url = f"{args.sync_url}/report_sync"
-        response = requests.post(url)
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url) as response:
+                await response.text()
+    except aiohttp.ClientError as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
 async def initialize_tensor(tensor_name, sync_version_number=None):
@@ -406,28 +425,29 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
     try:
         url = f"{args.sot_url}/latest_state"
         logging.info(f"Loading tensor {tensor_name} from {url}")
-        response = requests.get(url, params={'tensor_name': tensor_name, 'version_number': sync_version_number})
-        response.raise_for_status()  # Raise an error for bad status codes
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params={'tensor_name': tensor_name, 'version_number': sync_version_number}) as response:
+                response.raise_for_status()  # Raise an error for bad status codes
 
-        tensor = torch.load(BytesIO(response.content))
-        logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}")
+                tensor = torch.load(BytesIO(await response.read()))
+                logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}")
 
-        logging.info(f"Successfully initialized tensor: {tensor_name}")
+                logging.info(f"Successfully initialized tensor: {tensor_name}")
 
-        first_initialization = latest_model is None
+                first_initialization = latest_model is None
 
-        model = model_adapter.tensor_to_model(tensor.detach(), latest_model)
-        model.train()
-        if args.torch_compile and first_initialization:
-            # Compile the model after loading state_dict
-            model = model_adapter.compile_model(model)
-            logging.info("Model model compiled and warmed up")
-        if latest_block_timestamps[tensor_name] == 0 or sync_version_number is None or latest_block_timestamps[tensor_name] < sync_version_number:
-            latest_model = model
-            latest_block_timestamps[tensor_name] = sync_version_number
-        return model
+                model = model_adapter.tensor_to_model(tensor.detach(), latest_model)
+                model.train()
+                if args.torch_compile and first_initialization:
+                    # Compile the model after loading state_dict
+                    model = model_adapter.compile_model(model)
+                    logging.info("Model model compiled and warmed up")
+                if latest_block_timestamps[tensor_name] == 0 or sync_version_number is None or latest_block_timestamps[tensor_name] < sync_version_number:
+                    latest_model = model
+                    latest_block_timestamps[tensor_name] = sync_version_number
+                return model
 
-    except requests.exceptions.RequestException as e:
+    except aiohttp.ClientError as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
         raise
     except Exception as e:
