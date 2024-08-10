@@ -26,7 +26,7 @@ class ModelAdapter(ABC):
         pass
     
     @abstractmethod
-    def tensor_to_model(self, tensor: torch.Tensor) -> torch.nn.Module:
+    def tensor_to_model(self, tensor: torch.Tensor, existing_model=None) -> torch.nn.Module:
         pass
     
     @abstractmethod
@@ -137,8 +137,11 @@ class StandardModelAdapter(ModelAdapter):
         params = list(model.parameters())
         return torch.cat([p.view(-1) for p in params])
 
-    def tensor_to_model(self, tensor: torch.Tensor) -> torch.nn.Module:
-        model = self.model_config.model_class(self.model_config.model_args).to(device)
+    def tensor_to_model(self, tensor: torch.Tensor, existing_model=None) -> torch.nn.Module:
+        if existing_model is not None:
+            model = existing_model
+        else:
+            model = self.model_config.model_class(self.model_config.model_args).to(device)
         pointer = 0
         total_params = sum(p.numel() for p in model.parameters())
 

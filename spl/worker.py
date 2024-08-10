@@ -101,13 +101,10 @@ pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
 
 model_initialized = False
 embedding_initialized = False
-tensors = defaultdict(lambda: None)
 latest_block_timestamps = defaultdict(lambda: 0)  # To store the latest block timestamp processed for each tensor
 processed_tasks = set()
 
-model = None
-
-tensors_lock = threading.Lock()  # Lock for tensors
+last_model = None
 
 class TaskQueue:
     def __init__(self):
@@ -257,61 +254,62 @@ def tensor_memory_size(tensor):
     return size_in_mb
 
 async def process_tasks():
-    global task_queue, concurrent_tasks_counter, model
+    global task_queue, concurrent_tasks_counter
     try:
         # Ensure only one task is processed at a time
-        with task_processing_lock:
-            start_time = time.time()
+        start_time = time.time()
 
+        with concurrent_tasks_counter_lock:
+            # Increase the counter when a new task is started
+            concurrent_tasks_counter += 1
+        logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
+
+        next_task = task_queue.get_next_task()
+        if not next_task:
+            logging.debug("No tasks in the queue to process.")
             with concurrent_tasks_counter_lock:
-                # Increase the counter when a new task is started
-                concurrent_tasks_counter += 1
-            logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
+                concurrent_tasks_counter -= 1
+            return
+        task_id = next_task['task_id']
+        task_params = next_task['task_params']
+        contract_index = next_task['contract_index']
+        task_type = args.task_types[contract_index]
+        tensor_name = get_relevant_tensor_for_task(task_type)
+        version_num_url = f'{args.sot_url}/tensor_block_timestamp'
+        version_number = get_json(
+            version_num_url,
+            params={'tensor_name': tensor_name}
+        )['version_number']
+        if (task_queue.current_version is None
+            or version_number != task_queue.current_version):
 
-            next_task = task_queue.get_next_task()
-            if not next_task:
-                logging.debug("No tasks in the queue to process.")
-                with concurrent_tasks_counter_lock:
-                    concurrent_tasks_counter -= 1
-                return
-            task_id = next_task['task_id']
-            task_params = next_task['task_params']
-            contract_index = next_task['contract_index']
-            task_type = args.task_types[contract_index]
-            tensor_name = get_relevant_tensor_for_task(task_type)
-            version_num_url = f'{args.sot_url}/tensor_block_timestamp'
-            version_number = get_json(
-                version_num_url,
-                params={'tensor_name': tensor_name}
-            )['version_number']
-            if (task_queue.current_version is None
-                or version_number != task_queue.current_version):
-                logging.debug(f"Syncing tensors for version number: {version_number}")
-                sync_start_time = time.time()
-                await sync_tensors(version_number, next_task['contract_index'])
-                sync_end_time = time.time()
-                logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
-                task_queue.current_version = version_number
+            logging.debug(f"Syncing tensors for version number: {version_number}")
+            sync_start_time = time.time()
+            model = await sync_tensors(version_number, next_task['contract_index'])
+            sync_end_time = time.time()
+            logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
+            task_queue.current_version = version_number
 
-            logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
+        logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
 
-            # Process the task...
-            logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
-            download_start_time = time.time()
-            batch = download_file(task_params['batch_url'])
-            download_end_time = time.time()
-            logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
+        # Process the task...
+        logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
+        download_start_time = time.time()
+        batch = download_file(task_params['batch_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
 
 
-            logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
-            download_start_time = time.time()
-            targets = download_file(task_params['targets_url'])
-            download_end_time = time.time()
-            logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
+        logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
+        download_start_time = time.time()
+        targets = download_file(task_params['targets_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
 
-            result = {}
-            accumulation_steps = task_params['accumulation_steps']
-            
+        result = {}
+        accumulation_steps = task_params['accumulation_steps']
+        
+        with task_processing_lock:
             logging.debug("Executing training task")
             task_start_time = time.time()
             updates, loss = model_adapter.train_task(model, batch, targets, accumulation_steps)
@@ -374,7 +372,7 @@ async def reclaim_stakes():
 
 async def sync_tensors(sync_version_number, contract_index):
     relevant_tensor = get_relevant_tensor_for_task(args.task_types[contract_index])
-    await initialize_tensor(relevant_tensor, sync_version_number)
+    return await initialize_tensor(relevant_tensor, sync_version_number)
 
 async def submit_solution(task_id, result, contract_index):
     try:
@@ -402,8 +400,9 @@ async def report_sync_status():
         logging.error(f"Exception while reporting sync status: {e}")
 
 async def initialize_tensor(tensor_name, sync_version_number=None):
-    global model
-
+    global latest_model
+    if latest_block_timestamps[tensor_name] == sync_version_number:
+        return latest_model
     try:
         url = f"{args.sot_url}/latest_state"
         logging.info(f"Loading tensor {tensor_name} from {url}")
@@ -413,17 +412,20 @@ async def initialize_tensor(tensor_name, sync_version_number=None):
         tensor = torch.load(BytesIO(response.content))
         logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}")
 
-        tensors[tensor_name] = tensor
-
-        latest_block_timestamps[tensor_name] = sync_version_number
         logging.info(f"Successfully initialized tensor: {tensor_name}")
 
-        model = model_adapter.tensor_to_model(tensor.detach())
+        first_initialization = latest_model is None
+
+        model = model_adapter.tensor_to_model(tensor.detach(), latest_model)
         model.train()
-        if args.torch_compile:
+        if args.torch_compile and first_initialization:
             # Compile the model after loading state_dict
             model = model_adapter.compile_model(model)
             logging.info("Model model compiled and warmed up")
+        if latest_block_timestamps[tensor_name] == 0 or sync_version_number is None or latest_block_timestamps[tensor_name] < sync_version_number:
+            latest_model = model
+            latest_block_timestamps[tensor_name] = sync_version_number
+        return model
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
