@@ -1,7 +1,7 @@
 import argparse
 import json
 import logging
-import requests
+import aiohttp
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -19,10 +19,11 @@ import time
 import os
 from tqdm import tqdm
 import asyncio
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import torch._dynamo
+import requests
+from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):
@@ -101,13 +102,10 @@ pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
 
 model_initialized = False
 embedding_initialized = False
-tensors = defaultdict(lambda: None)
 latest_block_timestamps = defaultdict(lambda: 0)  # To store the latest block timestamp processed for each tensor
 processed_tasks = set()
 
-model = None
-
-tensors_lock = threading.Lock()  # Lock for tensors
+latest_model = None
 
 class TaskQueue:
     def __init__(self):
@@ -137,26 +135,30 @@ class TaskQueue:
 
 task_queue = TaskQueue()
 
-def download_file(url):
-    response = requests.get(url)
-    return torch.load(BytesIO(response.content))
+async def download_file(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            content = await response.read()
+            return torch.load(BytesIO(content))
 
-def download_json(url):
+async def download_json(url):
     try:
-        response = requests.get(url)
-        response.raise_for_status()  # Raise an error for bad status codes
-        data = response.json()  # Parse and return the JSON content
-        return torch.tensor(data, dtype=torch.long).to(device)  # Convert to tensor
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                response.raise_for_status()  # Raise an error for bad status codes
+                data = await response.json()  # Parse and return the JSON content
+                return torch.tensor(data, dtype=torch.long).to(device)  # Convert to tensor
+    except aiohttp.ClientError as e:
         logging.error(f"Failed to download JSON from {url}: {e}")
         raise
 
-def get_json(url, params=None):
+async def get_json(url, params=None):
     try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()  # Raise an error for bad status codes
-        return response.json()  # Parse and return the JSON content
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as response:
+                response.raise_for_status()  # Raise an error for bad status codes
+                return await response.json()  # Parse and return the JSON content
+    except aiohttp.ClientError as e:
         logging.error(f"Failed to download JSON from {url}: {e}")
         raise
 
@@ -198,6 +200,7 @@ async def upload_tensor(tensor, tensor_name):
         return response.json().get('tensor_url')
     else:
         raise RuntimeError(f"Failed to upload tensor: {response.text}")
+
 
 async def deposit_stake():
     # Do not deposit stakes if queued tasks exceed the limit
@@ -257,61 +260,62 @@ def tensor_memory_size(tensor):
     return size_in_mb
 
 async def process_tasks():
-    global task_queue, concurrent_tasks_counter, model
+    global task_queue, concurrent_tasks_counter
     try:
         # Ensure only one task is processed at a time
-        with task_processing_lock:
-            start_time = time.time()
+        start_time = time.time()
 
+        with concurrent_tasks_counter_lock:
+            # Increase the counter when a new task is started
+            concurrent_tasks_counter += 1
+        logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
+
+        next_task = task_queue.get_next_task()
+        if not next_task:
+            logging.debug("No tasks in the queue to process.")
             with concurrent_tasks_counter_lock:
-                # Increase the counter when a new task is started
-                concurrent_tasks_counter += 1
-            logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
+                concurrent_tasks_counter -= 1
+            return
+        task_id = next_task['task_id']
+        task_params = next_task['task_params']
+        contract_index = next_task['contract_index']
+        task_type = args.task_types[contract_index]
+        tensor_name = get_relevant_tensor_for_task(task_type)
+        version_num_url = f'{args.sot_url}/tensor_block_timestamp'
+        version_number = (await get_json(
+            version_num_url,
+            params={'tensor_name': tensor_name}
+        ))['version_number']
+        if (task_queue.current_version is None
+            or version_number != task_queue.current_version):
 
-            next_task = task_queue.get_next_task()
-            if not next_task:
-                logging.debug("No tasks in the queue to process.")
-                with concurrent_tasks_counter_lock:
-                    concurrent_tasks_counter -= 1
-                return
-            task_id = next_task['task_id']
-            task_params = next_task['task_params']
-            contract_index = next_task['contract_index']
-            task_type = args.task_types[contract_index]
-            tensor_name = get_relevant_tensor_for_task(task_type)
-            version_num_url = f'{args.sot_url}/tensor_block_timestamp'
-            version_number = get_json(
-                version_num_url,
-                params={'tensor_name': tensor_name}
-            )['version_number']
-            if (task_queue.current_version is None
-                or version_number != task_queue.current_version):
-                logging.debug(f"Syncing tensors for version number: {version_number}")
-                sync_start_time = time.time()
-                await sync_tensors(version_number, next_task['contract_index'])
-                sync_end_time = time.time()
-                logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
-                task_queue.current_version = version_number
+            logging.debug(f"Syncing tensors for version number: {version_number}")
+            sync_start_time = time.time()
+            model = await sync_tensors(version_number, next_task['contract_index'])
+            sync_end_time = time.time()
+            logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
+            task_queue.current_version = version_number
 
-            logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
+        logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
 
-            # Process the task...
-            logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
-            download_start_time = time.time()
-            batch = download_file(task_params['batch_url'])
-            download_end_time = time.time()
-            logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
+        # Process the task...
+        logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
+        download_start_time = time.time()
+        batch = await download_file(task_params['batch_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading batch took {download_end_time - download_start_time:.2f} seconds")
 
 
-            logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
-            download_start_time = time.time()
-            targets = download_file(task_params['targets_url'])
-            download_end_time = time.time()
-            logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
+        logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
+        download_start_time = time.time()
+        targets = await download_file(task_params['targets_url'])
+        download_end_time = time.time()
+        logging.debug(f"Downloading targets took {download_end_time - download_start_time:.2f} seconds")
 
-            result = {}
-            accumulation_steps = task_params['accumulation_steps']
-            
+        result = {}
+        accumulation_steps = task_params['accumulation_steps']
+        
+        with task_processing_lock:
             logging.debug("Executing training task")
             task_start_time = time.time()
             updates, loss = model_adapter.train_task(model, batch, targets, accumulation_steps)
@@ -374,7 +378,7 @@ async def reclaim_stakes():
 
 async def sync_tensors(sync_version_number, contract_index):
     relevant_tensor = get_relevant_tensor_for_task(args.task_types[contract_index])
-    await initialize_tensor(relevant_tensor, sync_version_number)
+    return await initialize_tensor(relevant_tensor, sync_version_number)
 
 async def submit_solution(task_id, result, contract_index):
     try:
@@ -394,42 +398,45 @@ async def upload_results(version_number, updates, loss):
     }
 
 async def report_sync_status():
-    
     try:
         url = f"{args.sync_url}/report_sync"
-        response = requests.post(url)
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url) as response:
+                await response.text()
+    except aiohttp.ClientError as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-async def initialize_tensor(tensor_name, sync_version_number=None):
-    global model
-
+async def initialize_tensor(tensor_name, sync_version_number):
+    global latest_model
+    if latest_block_timestamps[tensor_name] == sync_version_number:
+        return latest_model
     try:
         url = f"{args.sot_url}/latest_state"
         logging.info(f"Loading tensor {tensor_name} from {url}")
-        response = requests.get(url, params={'tensor_name': tensor_name, 'version_number': sync_version_number})
-        response.raise_for_status()  # Raise an error for bad status codes
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params={'tensor_name': tensor_name, 'version_number': sync_version_number}) as response:
+                response.raise_for_status()  # Raise an error for bad status codes
 
-        tensor = torch.load(BytesIO(response.content))
-        logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}")
+                tensor = torch.load(BytesIO(await response.read()))
+                logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}")
 
-        tensors[tensor_name] = tensor
+                logging.info(f"Successfully initialized tensor: {tensor_name}")
 
-        latest_block_timestamps[tensor_name] = sync_version_number
-        logging.info(f"Successfully initialized tensor: {tensor_name}")
+                first_initialization = latest_model is None
 
-        model = model_adapter.tensor_to_model(tensor.detach())
-        model.train()
-        if args.torch_compile:
-            # Compile the model after loading state_dict
-            model = model_adapter.compile_model(model)
-            logging.info("Model model compiled and warmed up")
+                model = model_adapter.tensor_to_model(tensor.detach(), latest_model)
+                model.train()
+                if args.torch_compile and first_initialization:
+                    # Compile the model after loading state_dict
+                    model = model_adapter.compile_model(model)
+                    logging.info("Model model compiled and warmed up")
+                if latest_block_timestamps[tensor_name] == 0 or latest_block_timestamps[tensor_name] < sync_version_number:
+                    latest_model = model
+                    latest_block_timestamps[tensor_name] = sync_version_number
+                return model
 
-    except requests.exceptions.RequestException as e:
+    except aiohttp.ClientError as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
-        raise
-    except Exception as e:
-        logging.error(f"Failed to initialize tensor {tensor_name} due to error: {e}")
         raise
 
 def get_relevant_tensor_for_task(task_type):
@@ -517,12 +524,6 @@ async def main():
             await deposit_stake()
             
             if not reported:
-                duplicate_relevant_tensors = []
-                for contract_index, task_type in enumerate(args.task_types):
-                    relevant_tensor = get_relevant_tensor_for_task(task_type)
-                    duplicate_relevant_tensors.append((contract_index, relevant_tensor))
-                for contract_index, tensor_name in duplicate_relevant_tensors:
-                    await initialize_tensor(tensor_name)
                 await report_sync_status()
                 reported = True
 
