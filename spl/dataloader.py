@@ -28,6 +28,35 @@ class LanguageDataLoader(IterableDataset):
             tokens = tokens[:max_seq_len]
         return tokens
 
+    def tokenize_and_split(self, text, max_seq_len):
+        tokens = self.model_config.tokenizer.encode(
+            text,
+            bos=False,
+            eos=False,
+            allowed_special=set(),
+            disallowed_special=(),
+        )
+
+        start_pos = 0
+        token_pairs = []
+        while start_pos < len(tokens):
+            seq_len = random.randint(1, min(max_seq_len, len(tokens) - start_pos))
+            substr = tokens[start_pos:start_pos + seq_len]
+            inputs = self.truncate_tokens(substr[:-1], max_seq_len, self.model_config.tokenizer.pad_id)
+            targets = self.truncate_tokens(substr[1:], max_seq_len, self.model_config.tokenizer.pad_id)
+            token_pairs.append((inputs, targets))
+            start_pos += seq_len
+        return token_pairs
+
+    def fill_buffer_with_token_pairs(self, text_generator, max_seq_len):
+        buffer = []
+        while len(buffer) < self.buffer_size:
+            text = next(text_generator)
+            buffer.extend(self.tokenize_and_split(text, max_seq_len))
+        random.shuffle(buffer)
+        return buffer
+
+
 class WikipediaDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size):
         super().__init__(model_config, buffer_size)
@@ -36,31 +65,20 @@ class WikipediaDataLoader(LanguageDataLoader):
 
     def __iter__(self):
         max_seq_len = self.model_config.model_args.max_seq_len
-        buffer = []
 
         try:
             while True:
-                while len(buffer) < self.buffer_size:
-                    example = next(self.dataset_iter)
-                    tokens = self.model_config.tokenizer.encode(
-                        example['text'],
-                        bos=False,
-                        eos=False,
-                        allowed_special=set(),
-                        disallowed_special=(),
-                    )
-
-                    for seq_len in range(1, min(len(tokens), max_seq_len) + 1):
-                        inputs = self.truncate_tokens(tokens[:seq_len], max_seq_len, self.model_config.tokenizer.pad_id)
-                        targets = self.truncate_tokens(tokens[1:seq_len + 1], max_seq_len, self.model_config.tokenizer.pad_id)
-                        buffer.append((inputs, targets))
-
-                random.shuffle(buffer)
+                buffer = self.fill_buffer_with_token_pairs(self._text_generator(), max_seq_len)
                 while buffer:
                     yield buffer.pop()
         except StopIteration:
             while buffer:
                 yield buffer.pop()
+
+    def _text_generator(self):
+        for example in self.dataset_iter:
+            yield example['text']
+
 
 class ShakespeareDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size, file_path=os.path.join('datasets', 'shakespeare.txt')):
@@ -74,31 +92,19 @@ class ShakespeareDataLoader(LanguageDataLoader):
 
     def __iter__(self):
         max_seq_len = self.model_config.model_args.max_seq_len
-        buffer = []
 
         try:
             while True:
-                while len(buffer) < self.buffer_size:
-                    line = random.choice(self.lines).strip()
-                    tokens = self.model_config.tokenizer.encode(
-                        line,
-                        bos=False,
-                        eos=False,
-                        allowed_special=set(),
-                        disallowed_special=(),
-                    )
-
-                    for seq_len in range(1, min(len(tokens), max_seq_len) + 1):
-                        inputs = self.truncate_tokens(tokens[:seq_len], max_seq_len, self.model_config.tokenizer.pad_id)
-                        targets = self.truncate_tokens(tokens[1:seq_len + 1], max_seq_len, self.model_config.tokenizer.pad_id)
-                        buffer.append((inputs, targets))
-
-                random.shuffle(buffer)
+                buffer = self.fill_buffer_with_token_pairs(self._text_generator(), max_seq_len)
                 while buffer:
                     yield buffer.pop()
         except StopIteration:
             while buffer:
                 yield buffer.pop()
+
+    def _text_generator(self):
+        while True:
+            yield random.choice(self.lines).strip()
 
 
 class LowercaseAlphabetDataLoader(LanguageDataLoader):
@@ -108,31 +114,18 @@ class LowercaseAlphabetDataLoader(LanguageDataLoader):
 
     def __iter__(self):
         max_seq_len = self.model_config.model_args.max_seq_len
-        buffer = []
 
         try:
             while True:
-                while len(buffer) < self.buffer_size:
-                    start_index = random.randint(0, len(self.alphabet) - 1)
-                    end_index = random.randint(start_index, len(self.alphabet))
-                    sequence = ''.join(self.alphabet[start_index:end_index])
-
-                    tokens = self.model_config.tokenizer.encode(
-                        sequence,
-                        bos=False,
-                        eos=False,
-                        allowed_special=set(),
-                        disallowed_special=(),
-                    )
-
-                    for seq_len in range(1, min(len(tokens), max_seq_len) + 1):
-                        inputs = self.truncate_tokens(tokens[:seq_len], max_seq_len, self.model_config.tokenizer.pad_id)
-                        targets = self.truncate_tokens(tokens[1:seq_len + 1], max_seq_len, self.model_config.tokenizer.pad_id)
-                        buffer.append((inputs, targets))
-
-                random.shuffle(buffer)
+                buffer = self.fill_buffer_with_token_pairs(self._text_generator(), max_seq_len)
                 while buffer:
                     yield buffer.pop()
         except StopIteration:
             while buffer:
                 yield buffer.pop()
+
+    def _text_generator(self):
+        while True:
+            start_index = random.randint(0, len(self.alphabet) - 1)
+            end_index = random.randint(start_index, len(self.alphabet))
+            yield ''.join(self.alphabet[start_index:end_index])
