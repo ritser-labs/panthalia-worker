@@ -105,3 +105,13 @@ class LowercaseAlphabetDataLoader(LanguageDataLoader):
             start_index = random.randint(0, len(self.alphabet) - 1)
             end_index = random.randint(start_index, len(self.alphabet))
             yield ''.join(self.alphabet[start_index:end_index])
+
+class FineWebDataLoader(LanguageDataLoader):
+    def __init__(self, model_config: TransformerModelConfig, buffer_size):
+        super().__init__(model_config, buffer_size)
+        self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True)
+        self.dataset_iter = iter(self.dataset)
+
+    def _text_generator(self):
+        for example in self.dataset_iter:
+            yield example['text']
