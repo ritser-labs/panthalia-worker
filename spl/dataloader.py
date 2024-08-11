@@ -10,9 +10,17 @@ class LanguageDataLoader(IterableDataset):
         self.model_config = model_config
         self.buffer_size = buffer_size
         self.buffer = []
-    
+
     def __iter__(self):
-        raise NotImplementedError("This method needs to be implemented by subclasses")
+        max_seq_len = self.model_config.model_args.max_seq_len
+        try:
+            while True:
+                self.buffer = self.fill_buffer_with_token_pairs(self._text_generator(), max_seq_len)
+                while self.buffer:
+                    yield self.buffer.pop()
+        except StopIteration:
+            while self.buffer:
+                yield self.buffer.pop()
 
     def __next__(self):
         if not self.buffer:
@@ -56,24 +64,16 @@ class LanguageDataLoader(IterableDataset):
         random.shuffle(buffer)
         return buffer
 
+    def _text_generator(self):
+        """Abstract method, should be implemented by subclasses"""
+        raise NotImplementedError("Subclasses must implement this method")
+
 
 class WikipediaDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size):
         super().__init__(model_config, buffer_size)
         self.dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
         self.dataset_iter = iter(self.dataset)
-
-    def __iter__(self):
-        max_seq_len = self.model_config.model_args.max_seq_len
-
-        try:
-            while True:
-                buffer = self.fill_buffer_with_token_pairs(self._text_generator(), max_seq_len)
-                while buffer:
-                    yield buffer.pop()
-        except StopIteration:
-            while buffer:
-                yield buffer.pop()
 
     def _text_generator(self):
         for example in self.dataset_iter:
@@ -90,18 +90,6 @@ class ShakespeareDataLoader(LanguageDataLoader):
         with open(self.file_path, 'r') as f:
             return f.readlines()
 
-    def __iter__(self):
-        max_seq_len = self.model_config.model_args.max_seq_len
-
-        try:
-            while True:
-                buffer = self.fill_buffer_with_token_pairs(self._text_generator(), max_seq_len)
-                while buffer:
-                    yield buffer.pop()
-        except StopIteration:
-            while buffer:
-                yield buffer.pop()
-
     def _text_generator(self):
         while True:
             yield random.choice(self.lines).strip()
@@ -111,18 +99,6 @@ class LowercaseAlphabetDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size: int):
         super().__init__(model_config, buffer_size)
         self.alphabet = list('abcdefghijklmnopqrstuvwxyz')
-
-    def __iter__(self):
-        max_seq_len = self.model_config.model_args.max_seq_len
-
-        try:
-            while True:
-                buffer = self.fill_buffer_with_token_pairs(self._text_generator(), max_seq_len)
-                while buffer:
-                    yield buffer.pop()
-        except StopIteration:
-            while buffer:
-                yield buffer.pop()
 
     def _text_generator(self):
         while True:
