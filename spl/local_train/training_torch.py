@@ -4,8 +4,8 @@ import os
 import torch
 import time
 import requests
-from model import ModelArgs, Transformer
-from common import Model, wait_for_sot, tensor_to_model, model_adapter, model_args, tokenizer
+from spl.adapters.llama3 import ModelArgs, Transformer
+from common import Model, wait_for_sot, tensor_to_model, model_args, tokenizer, model_adapter
 from device import device
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -13,11 +13,6 @@ from web3 import Web3
 from io import BytesIO
 import torch.nn as nn
 import torch.nn.functional as F
-import logging
-
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
-    logging.StreamHandler()
-])
 
 # Constants
 SOT_URL = 'http://localhost:5001'
@@ -90,71 +85,35 @@ def get_batch(wallet):
         print(f"Failed to retrieve batch: {response.text}")
         return None, None
 
-def stable_adamw_update(params, grads, m, v, lr=0.01, weight_decay=0.01, beta1=0.9, beta2=0.999, eps=1e-8, step=1):
-    grads = torch.clamp(grads, -1.0, 1.0)  # Clip gradients
-
-    m = beta1 * m + (1 - beta1) * grads
-    v = beta2 * v + (1 - beta2) * grads * grads
-
-    m_hat = m / (1 - beta1 ** step)
-    v_hat = v / (1 - beta2 ** step)
-
-    param_update = m_hat / (torch.sqrt(v_hat) + eps)
-    param_update += weight_decay * params
-
-    params = params - lr * param_update
-
-    return params, m, v
-def apply_adamw(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, step=1):
-    # Clip gradients
-    grads = torch.nn.utils.clip_grad_norm_(grads, 1.0).to(device)
-
-    if torch.isnan(grads).any() or torch.isinf(grads).any():
-        logging.error(f"NaNs or Infs detected in gradients before AdamW update")
-        raise ValueError(f"NaNs or Infs detected in gradients")
-
-    params, m, v = stable_adamw_update(
-        params,
-        grads,
-        m,
-        v,
-        lr,
-        weight_decay,
-        beta1,
-        beta2,
-        eps,
-        step=step
-    )
-
-    return params, m, v
-
 # Function to train the model on the retrieved batch
-def train_model(model, batch, targets, params, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, accumulation_steps=4):
+def train_model(model, optimizer, batch, targets, accumulation_steps):
     model.train()
 
     microbatch_size = batch_size // accumulation_steps
 
     total_loss = 0.0
-    step = 1
-    grads_accumulated = torch.zeros(sum(p.numel() for p in model.parameters()), device=device)
-
     for i in range(accumulation_steps):
         inputs = batch[i * microbatch_size:(i + 1) * microbatch_size].to(device)
         target = targets[i * microbatch_size:(i + 1) * microbatch_size].to(device)
 
-        # Forward pass
-        outputs = model(inputs, start_pos=0)
-        loss = F.cross_entropy(outputs.view(-1, model_args.vocab_size), target.view(-1), ignore_index=tokenizer.pad_id)
+        optimizer.zero_grad()
+        print(f'Inputs: {inputs}')
+        print(f'Targets: {target}')
 
+        outputs = model(inputs, start_pos=0)
+        print(f'Outputs: {outputs}')
+
+        # Ensure the shapes are correct for cross-entropy loss
+        assert outputs.shape[-1] == model_args.vocab_size, f"Expected outputs last dimension to be {model_args.vocab_size}, got {outputs.shape[-1]}"
+        assert outputs.shape[:-1] == target.shape, f"Expected outputs shape {outputs.shape[:-1]} to match targets shape {target.shape}"
+
+        loss = torch.nn.functional.cross_entropy(outputs.view(-1, model_args.vocab_size), target.view(-1), ignore_index=tokenizer.pad_id)
+        print(f'Loss: {loss.item()}')
+
+        loss.backward()
         total_loss += loss.item()
 
-        # Backward pass and accumulate gradients
-        model.zero_grad()
-        loss.backward()
-
-        # Flatten and collect gradients
-        grads = torch.cat([param.grad.view(-1) for param in model.parameters() if param.grad is not None])
-        grads_accumulated += grads
+        optimizer.step()
 
         # Detach cache tensors
         if hasattr(model, 'layers'):
@@ -163,21 +122,9 @@ def train_model(model, batch, targets, params, m, v, lr=0.002, weight_decay=0.2,
                     layer.attention.cache_k = layer.attention.cache_k.detach()
                     layer.attention.cache_v = layer.attention.cache_v.detach()
 
-        logging.info(f"Accumulation step {i+1}/{accumulation_steps} - Loss: {loss.item()}")
+        print(f"Accumulation step {i+1}/{accumulation_steps} - Loss: {loss.item()}")
 
-    # Apply AdamW after all accumulation steps
-    grads_accumulated /= accumulation_steps
-    params, m, v = apply_adamw(params, grads_accumulated, m, v, lr, weight_decay, beta1, beta2, eps, step)
-
-    # Update model parameters
-    idx = 0
-    for param in model.parameters():
-        if param.requires_grad:
-            param_size = param.numel()
-            param.data = params[idx:idx + param_size].view_as(param).data
-            idx += param_size
-
-    logging.info(f"Training completed for the batch. Total loss: {total_loss / accumulation_steps}")
+    print(f"Training completed for the batch. Total loss: {total_loss / accumulation_steps}")
 
 # Adjust main() to initialize optimizer outside the train_model() function call
 def main():
@@ -207,10 +154,8 @@ def main():
         sot_process.terminate()
         return
 
-    # Initialize parameter groups for AdamW
-    params = torch.cat([param.view(-1) for param in model.parameters() if param.requires_grad])
-    m = torch.zeros_like(params, device=device)
-    v = torch.zeros_like(params, device=device)
+    # Initialize optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
 
     # Train indefinitely
     try:
@@ -219,7 +164,7 @@ def main():
             batch, targets = get_batch(wallet)
             if batch is not None and targets is not None:
                 print("Batch retrieved. Starting training...")
-                train_model(model, batch, targets, params, m, v, lr=0.001, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, accumulation_steps=4)
+                train_model(model, optimizer, batch, targets, accumulation_steps=4)
             else:
                 print("Failed to retrieve a valid batch, skipping this round.")
             time.sleep(1)  # Optional: Add a short delay to avoid hammering the SOT service

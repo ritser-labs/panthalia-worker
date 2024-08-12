@@ -8,7 +8,7 @@ from common import initialize_distributed_environment, model_args
 import os
 
 # Assuming we have the following classes and functions already defined
-from model import Transformer, precompute_freqs_cis, RMSNorm
+from spl.adapters.llama3 import Transformer, precompute_freqs_cis, RMSNorm
 from device import device
 
 args = model_args

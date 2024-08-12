@@ -1,7 +1,7 @@
 import torch
 import os
 from tokenizer import Tokenizer
-from model import ModelArgs, Transformer
+from spl.adapters.llama3 import ModelArgs, Transformer
 import json
 import logging
 import time
@@ -18,9 +18,9 @@ import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
-from dataloader import WikipediaDataLoader, ShakespeareDataLoader, LowercaseAlphabetDataLoader
-from model_config import TransformerModelConfig
-from model_adapter import LlamaModelAdapter
+from adapters.dataloader import WikipediaDataLoader, ShakespeareDataLoader, LowercaseAlphabetDataLoader
+from adapters.model_config import TransformerModelConfig
+from adapters.model_adapter import LlamaModelAdapter
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
