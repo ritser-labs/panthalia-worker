@@ -6,22 +6,17 @@ import argparse
 import requests
 import threading
 import curses
-from ..common import model_args, load_abi, async_transact_with_contract_function, wait_for_sot, SOT_PRIVATE_PORT
+from flask import Flask, jsonify, send_from_directory
+from ..common import model_args, load_abi, async_transact_with_contract_function, wait_for_sot
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
-from .cloud_adapters.runpod import launch_instance_and_record_logs, terminate_all_pods, get_public_ip_and_port, INPUT_JSON_PATH
 import glob
-from .cloud_adapters.runpod_config import BASE_TEMPLATE_ID
 import shutil
 import asyncio
 import logging
-import traceback
-import socket
-import shlex
-import signal
-from .util import is_port_open  # Importing the is_port_open function
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
+
 parent_dir = os.path.dirname(script_dir)
 
 # Go one level above the parent directory to get the package's root directory
@@ -30,6 +25,8 @@ package_root_dir = os.path.dirname(parent_dir)
 DATA_DIR = os.path.join(parent_dir, 'data')
 STATE_DIR = os.path.join(DATA_DIR, 'state')
 TEMP_DIR = os.path.join(STATE_DIR, 'temp')
+MASTER_WALLETS_FILE = os.path.join(DATA_DIR, 'master_wallets.json')
+MASTER_PUBLIC_KEYS_FILE = os.path.join(DATA_DIR, 'master_public_keys.json')
 DEPLOY_SCRIPT = os.path.join(parent_dir, 'script', 'Deploy.s.sol')
 LOG_DIR = os.path.join(parent_dir, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
@@ -37,13 +34,7 @@ ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
-DOCKER_IMAGE = 'runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04'
-GPU_TYPE = 'NVIDIA GeForce RTX 4090'
-with open(os.path.join(script_dir, 'env_setup.sh'), 'r') as f:
-    DOCKER_CMD = f.read()
-
-with open(os.path.join(script_dir, 'anvil_setup.sh'), 'r') as f:
-    ANVIL_CMD = f.read()
+DOCKER_IMAGE = 'zerogoliath/magnum:latest'
 
 # Configure logging to file and stdout
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -58,6 +49,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to the subnet addresses JSON file")
     parser.add_argument('--deployment_config', type=str, required=True, help="Path to the deployment configuration JSON file")
+    parser.add_argument('--rpc_url', type=str, default='http://localhost:8545', help="URL of the Ethereum RPC node")
+    parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the deployer's Ethereum account")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
@@ -70,25 +63,25 @@ def parse_args():
 
 args = parse_args()
 
+synced_workers = 0
 sync_status = {}
+# Define a global cache for the latest loss and last fetch time
 latest_loss_cache = {
     'value': None,
     'last_fetched': 0
 }
 
-sot_url = None
-rpc_url = None
-
+# Define the interval (in seconds) to refresh the latest loss value
 LOSS_REFRESH_INTERVAL = 60  # For example, update every 60 seconds
+app = Flask(__name__)
 
-def get_public_ip():
-    # Function to retrieve the public IP address of the machine
-    try:
-        public_ip = requests.get('https://api.ipify.org').text
-        return public_ip
-    except requests.RequestException as e:
-        logging.error(f"Unable to retrieve public IP: {e}")
-        return None
+base_url = None  # Global variable for the base URL
+
+@app.route('/report_sync', methods=['POST'])
+def report_sync():
+    global synced_workers
+    synced_workers += 1
+    return jsonify({'status': 'ok'})
 
 async def wait_for_workers_to_sync(worker_count, sot_url, timeout=600):
     start_time = time.time()
@@ -140,52 +133,31 @@ def delete_directory_contents(directory):
         except Exception as e:
             logging.debug(f"Error deleting directory {directory}: {e}")
 
-async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token, distributor_contract_address):
-    logging.info('Funding wallets')
+async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token):
+    for wallet in wallets:
+        tx = {
+            'to': wallet['address'],
+            'value': web3.to_wei(amount_eth, 'ether'),
+            'gas': 21000,
+            'gasPrice': await web3.eth.gas_price,
+            'nonce': await web3.eth.get_transaction_count(deployer_address)
+        }
+        signed_tx = web3.eth.account.sign_transaction(tx, args.private_key)
+        await web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        await web3.eth.wait_for_transaction_receipt(signed_tx.hash)
 
-    distributor_contract = web3.eth.contract(address=distributor_contract_address, abi=load_abi('Distributor'))
+        await async_transact_with_contract_function(
+            web3, token_contract, 'transfer', args.private_key, wallet['address'], amount_token
+        )
 
-    # Distribute Ether
-    recipients = [wallet['address'] for wallet in wallets]
-    eth_amounts = [web3.to_wei(amount_eth, 'ether')] * len(wallets)
-
-    distribute_eth_tx = await distributor_contract.functions.distributeEther(recipients, eth_amounts).build_transaction({
-        'from': deployer_address,
-        'nonce': await web3.eth.get_transaction_count(deployer_address),
-        'gas': 3000000,  # Adjust as needed
-        'gasPrice': await web3.eth.gas_price,
-        'value': sum(eth_amounts)
-    })
-    signed_eth_tx = web3.eth.account.sign_transaction(distribute_eth_tx, args.private_key)
-    eth_tx_hash = await web3.eth.send_raw_transaction(signed_eth_tx.rawTransaction)
-    await web3.eth.wait_for_transaction_receipt(eth_tx_hash)
-    logging.info('Ether distribution completed')
-
-    # Distribute Tokens
-    token_amounts = [amount_token] * len(wallets)
-
-    distribute_token_tx = await distributor_contract.functions.distributeTokens(token_contract.address, recipients, token_amounts).build_transaction({
-        'from': deployer_address,
-        'nonce': await web3.eth.get_transaction_count(deployer_address),
-        'gas': 3000000,  # Adjust as needed
-        'gasPrice': await web3.eth.gas_price
-    })
-    signed_token_tx = web3.eth.account.sign_transaction(distribute_token_tx, args.private_key)
-    token_tx_hash = await web3.eth.send_raw_transaction(signed_token_tx.rawTransaction)
-    await web3.eth.wait_for_transaction_receipt(token_tx_hash)
-    logging.info('Token distribution completed')
-
-
-def terminate_processes():
-    terminate_all_pods()
-
-def signal_handler(signal, frame):
-    logging.info("SIGINT received, shutting down...")
-    terminate_processes()
-    os._exit(0)  # Force exit the program
-
-# Register the signal handler for SIGINT
-signal.signal(signal.SIGINT, signal_handler)
+def terminate_processes(processes):
+    for process in processes:
+        process.terminate()
+    for process in processes:
+        try:
+            process.wait(timeout=5)  # Wait up to 5 seconds for each process to terminate
+        except subprocess.TimeoutExpired:
+            process.kill()  # Forcefully kill the process if it doesn't terminate in time
 
 def reset_logs(log_dir):
     if os.path.exists(log_dir):
@@ -217,6 +189,7 @@ def fetch_latest_loss(sot_url):
             # In case of an error, do not update the last fetched time to retry on next fetch
 
     return latest_loss_cache['value']
+
 
 def monitor_processes(stdscr, processes, task_counts):
     global args
@@ -306,7 +279,7 @@ def monitor_processes(stdscr, processes, task_counts):
         elif key == curses.KEY_RESIZE:
             last_resize = time.time()
         elif key == ord('q'):
-            terminate_processes()
+            terminate_processes(list(processes.values()))
             break
 
         if last_resize and time.time() - last_resize > 0.1:
@@ -319,6 +292,7 @@ def monitor_processes(stdscr, processes, task_counts):
     stdscr.keypad(False)
     curses.endwin()
     os._exit(0)  # Force exit the program
+
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
     contracts = {}
@@ -372,42 +346,21 @@ async def set_interval_mining(web3, interval):
     await web3.provider.make_request('evm_setIntervalMining', [interval])
 
 async def main():
-    global sot_url, rpc_url
+    global base_url
     processes = {}
     task_counts = {}  # Dictionary to store task counts
-    pod_helpers = {}
-
-    # Retrieve the public IP address of the machine
-    public_ip = get_public_ip()
-    if not public_ip:
-        logging.error("Could not retrieve public IP address.")
-        exit(1)
+    
+    base_url = f"http://localhost:5002"  # Set base URL for Flask server
 
     # Reset logs
     reset_logs(LOG_DIR)
 
-    # Start Anvil on a remote instance
-    logging.info("Starting Anvil instance...")
-    anvil_instance, anvil_helpers = launch_instance_and_record_logs(
-        name="anvil_instance",
-        gpu_count=0,
-        ports='8545/tcp',
-        log_file=ANVIL_LOG_FILE,
-        cmd=ANVIL_CMD,
-        template_id=BASE_TEMPLATE_ID
-    )
-    pod_helpers['anvil'] = anvil_helpers
-    anvil_ip, anvil_port = get_public_ip_and_port(anvil_instance['id'], private_port=8545)
-    rpc_url = f"http://{anvil_ip}:{anvil_port}"
-    processes['anvil'] = anvil_instance
-    logging.info(f"Anvil started on {rpc_url}")
-
-    # Wait until the Anvil port is open
-    logging.info(f"Waiting for Anvil to open port {anvil_port}...")
-    while not is_port_open(anvil_ip, anvil_port):
-        logging.info("Anvil port not open yet. Retrying in 1 second...")
-        time.sleep(1)
-    logging.info("Anvil port is now open.")
+    # Start anvil process
+    logging.info("Starting anvil...")
+    anvil_log = open(ANVIL_LOG_FILE, 'w')
+    anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log, cwd=package_root_dir)
+    processes['anvil'] = anvil_process
+    logging.info(f"Anvil started with PID {anvil_process.pid}")
 
     try:
         # Delete all .pt files in the state directory except for the latest version for each tensor
@@ -416,6 +369,10 @@ async def main():
         # Delete the temp directory
         delete_directory_contents(TEMP_DIR)
 
+        # Start Flask server in a separate thread
+        flask_thread = threading.Thread(target=lambda: app.run(port=5002))
+        flask_thread.start()
+
         # Print initial stage
         logging.info("Starting deployment...")
 
@@ -423,19 +380,20 @@ async def main():
         os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
         os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
         os.environ['LAYERS'] = str(model_args.n_layers)
+        os.environ['SOT_URL'] = args.sot_url
 
         # Run Deploy.s.sol script from the correct path
         deploy_command = [
             'forge', 'script', os.path.basename(args.forge_script),
-            '--broadcast', '--rpc-url', rpc_url,
+            '--broadcast', '--rpc-url', args.rpc_url,
             '--private-key', args.private_key, '-vv'
         ]
         subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
 
-        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
 
         # Print deployment stage completion
-        logging.info("Deployment completed successfully, loading JSON files...")
+        logging.info("Deployment completed successfully.")
 
         # Load subnet addresses and deployment config
         with open(args.subnet_addresses, 'r') as file:
@@ -443,68 +401,52 @@ async def main():
 
         with open(args.deployment_config, 'r') as file:
             deployment_config = json.load(file)
-        
-        logging.info('JSONs loaded, parsing deployment config...')
 
-        distributor_contract_address = deployment_config['distributor']
         pool_address = deployment_config['pool']
 
-        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
         deployer_account = web3.eth.account.from_key(args.private_key)
         deployer_address = deployer_account.address
         pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
         token_address = await pool_contract.functions.token().call()
         token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
 
-        logging.info('Generating wallets')
+        # Initialize sync_status with all subnet addresses
+        sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
 
         # Generate wallets for the master and fund them
         master_wallets = generate_wallets(args.num_master_wallets)
-        await fund_wallets(web3, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
+        await fund_wallets(web3, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+
+        with open(MASTER_WALLETS_FILE, 'w') as f:
+            json.dump(master_wallets, f)
 
         # Save the public keys of the master wallets
         master_public_keys = [wallet['address'] for wallet in master_wallets]
+        with open(MASTER_PUBLIC_KEYS_FILE, 'w') as f:
+            json.dump(master_public_keys, f)
 
         # Generate wallets for workers and fund them
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
-        await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
+        await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
         await set_interval_mining(web3, 1)
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
-        
-        env = {
-            'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
-            'SERVICE_TYPE': 'sot',
-            'RANK': '0',
-            'WORLD_SIZE': '1',
-            'PUBLIC_KEYS': INPUT_JSON_PATH,
-        }
 
-        logging.info(f'Environment variables: {env}')
+        # Print SOT service initialization stage
+        logging.info("Starting SOT service...")
 
-        # Start the SOT service on a remote instance
-        logging.info("Starting SOT instance...")
-        sot_instance, sot_helpers = launch_instance_and_record_logs(
-            name="sot_instance",
-            gpu_count=0,
-            ports=f'{SOT_PRIVATE_PORT}/tcp',
-            log_file=SOT_LOG_FILE,
-            template_id=BASE_TEMPLATE_ID,
-            cmd=DOCKER_CMD,
-            env=env,
-            input_json=master_public_keys
-        )
-        pod_helpers['sot'] = sot_helpers
-        sot_ip, sot_port = get_public_ip_and_port(sot_instance['id'], private_port=SOT_PRIVATE_PORT)
-        sot_url = f"http://{sot_ip}:{sot_port}"
-        processes['sot'] = sot_instance
-        logging.info(f"SOT service started on {sot_url}")
+        # Start the SOT service
+        sot_log = open(SOT_LOG_FILE, 'w')
+        sot_process = subprocess.Popen(['python', '-m', 'spl.sot', '--public_keys_file', MASTER_PUBLIC_KEYS_FILE], stdout=sot_log, stderr=sot_log, cwd=package_root_dir)
+        processes['sot'] = sot_process
+        logging.info(f"SOT service started with PID {sot_process.pid}")
 
         # Wait for the SOT service to be available
-        if not wait_for_sot(sot_url):
+        if not wait_for_sot(args.sot_url):
             logging.error("Error: SOT service did not become available within the timeout period.")
-            sot_instance.terminate()
+            sot_process.terminate()
             exit(1)
 
         # Print worker initialization stage
@@ -512,72 +454,51 @@ async def main():
 
         for worker_idx in range(args.worker_count):
             this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
-
-            env = {
-                'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
-                'SERVICE_TYPE': 'worker',
-                'RANK': '0',
-                'WORLD_SIZE': '1',
-                'TASK_TYPES': '+'.join(list(subnet_addresses.keys())),
-                'SUBNET_ADDRESSES': '+'.join(list(subnet_addresses.values())),
-                'PRIVATE_KEYS': '+'.join([x['private_key'] for x in this_worker_wallets]),
-                'RPC_URL': rpc_url,
-                'SOT_URL': sot_url,
-                'POOL_ADDRESS': pool_address,
-                'GROUP': str(args.group),
-                'LOCAL_STORAGE_DIR': args.local_storage_dir,
-                'BACKEND': args.backend
-            }
+            command = [
+                'python', '-m', 'spl.worker',
+                '--task_types', '+'.join(list(subnet_addresses.keys())),
+                '--subnet_addresses', '+'.join(list(subnet_addresses.values())),
+                '--private_keys', '+'.join([x['private_key'] for x in this_worker_wallets]),
+                '--rpc_url', args.rpc_url,
+                '--sot_url', args.sot_url,
+                '--pool_address', pool_address,
+                '--group', str(args.group),
+                '--backend', args.backend,
+            ]
             worker_name = f'worker_{worker_idx}'
-            worker_instance, worker_helpers = launch_instance_and_record_logs(
-                name=worker_name,
-                gpu_type=GPU_TYPE,
-                gpu_count=1,
-                ports='',
-                log_file=os.path.join(LOG_DIR, f"{worker_name}.log"),
-                env=env,
-                template_id=BASE_TEMPLATE_ID,
-                cmd=DOCKER_CMD
-            )
-            pod_helpers[f'{worker_name}'] = worker_helpers
-            processes[worker_name] = worker_instance
-            logging.info(f"Started worker process {worker_idx} for tasks on instance {worker_instance['id']}")
+            log_file_path = os.path.join(LOG_DIR, f"{worker_name}.log")
+            log_file = open(log_file_path, 'w')
+            worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file, cwd=package_root_dir)
+            processes[worker_name] = worker_process
+            logging.info(f"Started worker process {worker_idx} for tasks with command: {' '.join(command)}")
 
         try:
             # Wait for all workers to sync
-            if not wait_for_workers_to_sync(args.worker_count, sot_url):
+            if not wait_for_workers_to_sync(args.worker_count, args.sot_url):
                 logging.error("Error: Not all workers synced within the timeout period.")
-                terminate_processes()
+                terminate_processes(processes.values())
                 exit(1)
 
             # Print master initialization stage
             logging.info("Starting master process...")
 
-            env = {
-                'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
-                'SERVICE_TYPE': 'master',
-                'RANK': '0',
-                'WORLD_SIZE': '1',
-                'RPC_URL': rpc_url,
-                'WALLETS': INPUT_JSON_PATH,
-                'SOT_URL': sot_url,
-                'SUBNET_ADDRESSES': args.subnet_addresses,
-            }
+            # Start master.py
+            master_log = open(os.path.join(LOG_DIR, 'master.log'), 'w')
+            master_command = [
+                'python', '-m', 'spl.master',
+                '--rpc_url', args.rpc_url,
+                '--wallets', MASTER_WALLETS_FILE,
+                '--sot_url', args.sot_url,
+                '--subnet_addresses', args.subnet_addresses,
+            ]
+            if args.detailed_logs:
+                master_command.append('--detailed_logs')
+            master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log, cwd=package_root_dir)
+            processes['master'] = master_process
+            logging.info(f"Started master process with command: {' '.join(master_command)}")
 
-            # Start master.py on a remote instance
-            master_instance, master_helpers = launch_instance_and_record_logs(
-                name="master_instance",
-                gpu_count=0,
-                ports='',
-                log_file=os.path.join(LOG_DIR, 'master.log'),
-                env=env,
-                template_id=BASE_TEMPLATE_ID,
-                cmd=DOCKER_CMD,
-                input_json=master_wallets
-            )
-            pod_helpers['master'] = master_helpers
-            processes['master'] = master_instance
-            logging.info(f"Master process started on instance {master_instance['id']}")
+            # Print master started stage
+            logging.info("Master process started.")
 
             # Start the curses interface in a new thread
             curses_thread = threading.Thread(target=curses.wrapper, args=(monitor_processes, processes, task_counts))
@@ -587,12 +508,14 @@ async def main():
             await track_tasks(web3, subnet_addresses, pool_contract, task_counts)
 
         except Exception as e:
-            terminate_processes()
-            raise e
+            logging.error(f"Error: {e}")
+            terminate_processes(list(processes.values()))
+            exit(1)
 
     except Exception as e:
-        terminate_processes()
-        raise e
+        logging.error(f"Error: {e}")
+        terminate_processes(list(processes.values()))
+        exit(1)
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -5,7 +5,7 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from .common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset
+from .common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset, SOT_PRIVATE_PORT
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from .device import device
@@ -22,7 +22,7 @@ import functools
 
 app = Flask(__name__)
 sync_status = {}
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
     logging.StreamHandler()
 ])
 script_dir = os.path.dirname(__file__)
@@ -71,9 +71,6 @@ with last_future_version_lock:
 # Dictionary to store gradient updates
 executor = ThreadPoolExecutor(max_workers=10)
 
-# Replace hardcoded URL with a variable
-BASE_URL = 'http://localhost:5001'
-
 # Global variable to store master's public keys
 master_public_keys = []
 
@@ -82,6 +79,8 @@ used_nonces = {}
 
 latest_loss = {'value': None}
 latest_loss_lock = threading.Lock()
+
+synced_workers = 0
 
 def initialize_tensor(name, sync_version_number=None, zero_init=False):
     if sync_version_number is None:
@@ -223,25 +222,16 @@ def requires_authentication(f):
         return f(*args, **kwargs)
     return decorated_function
 
-@app.route('/latest_model_params', methods=['GET'])
-def get_latest_model_params():
-    logging.info("Accessing /latest_model_params endpoint")
-    try:
-        model_params = {
-            "vocab_size": model_config.model_args.vocab_size,
-            "dim": model_config.model_args.dim,
-            "n_layers": model_config.model_args.n_layers,
-            "n_heads": model_config.model_args.n_heads,
-            "multiple_of": model_config.model_args.multiple_of,
-            "norm_eps": model_config.model_args.norm_eps,
-            "rope_theta": model_config.model_args.rope_theta,
-            "max_batch_size": model_config.model_args.max_batch_size,
-            "max_seq_len": model_config.model_args.max_seq_len
-        }
-        return jsonify(model_params)
-    except Exception as e:
-        logging.error(f"Error accessing /latest_model_params: {e}", exc_info=True)
-        return jsonify({'error': 'Could not load model parameters'}), 500
+@app.route('/report_sync', methods=['POST'])
+def report_sync():
+    global synced_workers
+    synced_workers += 1
+    return jsonify({'status': 'ok'})
+
+@app.route('/get_num_synced', methods=['GET'])
+def get_num_synced():
+    global synced_workers
+    return jsonify(synced_workers)
 
 @app.route('/get_batch', methods=['POST'])
 @requires_authentication
@@ -261,8 +251,8 @@ def get_batch():
 
     try:
         return jsonify({
-            'batch_url': f'{BASE_URL}/data/state/temp/{batch_filename}',
-            'targets_url': f'{BASE_URL}/data/state/temp/{targets_filename}'
+            'batch_url': f'/data/state/temp/{batch_filename}',
+            'targets_url': f'/data/state/temp/{targets_filename}'
         })
     except Exception as e:
         logging.error(f"Error in /get_batch: {e}", exc_info=True)
@@ -575,7 +565,7 @@ def upload_tensor():
 
     logging.debug(f"Tensor {tensor_name} uploaded and saved with version_number {update_version_number}")
 
-    return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'{BASE_URL}/data/state/temp/{filename}'}), 200
+    return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'/data/state/temp/{filename}'}), 200
 
 @app.route('/update_loss', methods=['POST'])
 def update_loss():
@@ -604,6 +594,7 @@ def get_loss():
         return jsonify({'error': 'Loss value not set'}), 404
     return jsonify({'loss': loss}), 200
 
+
 if __name__ == "__main__":
     import argparse
 
@@ -617,4 +608,4 @@ if __name__ == "__main__":
 
     logging.info("Starting SOT service...")
     initialize_service()
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    app.run(host='0.0.0.0', port=SOT_PRIVATE_PORT, debug=True)

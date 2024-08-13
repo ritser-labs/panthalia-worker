@@ -22,6 +22,8 @@ from .adapters.dataloader import WikipediaDataLoader, ShakespeareDataLoader, Low
 from .adapters.model_config import TransformerModelConfig
 from .adapters.model_adapter import LlamaModelAdapter
 
+SOT_PRIVATE_PORT = 5001
+
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
 # IMPORTANT: if you change tokenizer, dont forget to comment out the code in tokenizer.py

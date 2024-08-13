@@ -5,6 +5,8 @@ fair
 blobfile
 eth-abi
 web3
-quart
 datasets
 psutil
+paramiko
+runpod
+flask

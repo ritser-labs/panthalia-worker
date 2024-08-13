@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import math
 import aiohttp
 import queue
+import requests
 from web3 import AsyncWeb3
 from web3.middleware import async_geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
@@ -22,7 +23,7 @@ import uuid
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class Master:
-    def __init__(self, rpc_url, wallets_file, sot_url, subnet_addresses, max_concurrent_iterations=2, detailed_logs=False):
+    def __init__(self, rpc_url, wallets, sot_url, subnet_addresses, max_concurrent_iterations=2, detailed_logs=False):
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
         self.sot_url = sot_url
@@ -31,7 +32,7 @@ class Master:
         self.iteration = 1  # Track the number of iterations
         self.perplexities = []  # Initialize perplexity list
         self.perplexity_queue = queue.Queue()
-        self.load_wallets(wallets_file)
+        self.load_wallets(wallets)
         self.current_wallet_index = 0
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -52,9 +53,9 @@ class Master:
         self.tasks = []  # Track running tasks
         asyncio.run(self.run_main())
 
-    def load_wallets(self, wallets_file):
-        with open(wallets_file, 'r') as f:
-            self.wallets = json.load(f)
+    def load_wallets(self, wallets_string):
+        with open(wallets_string, 'r') as file:
+            self.wallets = json.load(file)
 
     def get_next_wallet(self):
         wallet = self.wallets[self.current_wallet_index]
@@ -283,14 +284,14 @@ class Master:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers) as response:
                 response_json = await response.json()
-                return response_json['batch_url'], response_json['targets_url']
+                return self.sot_url + response_json['batch_url'], self.sot_url + response_json['targets_url']
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Master process for task submission")
     parser.add_argument('--rpc_url', type=str, required=True, help="RPC URL for Ethereum node")
-    parser.add_argument('--wallets_file', type=str, required=True, help="Path to wallets JSON file")
+    parser.add_argument('--wallets', type=str, required=True, help="URL to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
     parser.add_argument('--max_concurrent_iterations', type=int, default=4, help="Maximum number of concurrent iterations")
@@ -298,8 +299,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    with open(args.subnet_addresses, 'r') as file, open(args.wallets_file, 'r') as wallets_file:
+    with open(args.subnet_addresses, 'r') as file:
         subnet_addresses = json.load(file)
-        wallets = json.load(wallets_file)
 
-    master = Master(args.rpc_url, args.wallets_file, args.sot_url, subnet_addresses, max_concurrent_iterations=args.max_concurrent_iterations, detailed_logs=args.detailed_logs)
+    master = Master(args.rpc_url, args.wallets, args.sot_url, subnet_addresses, max_concurrent_iterations=args.max_concurrent_iterations, detailed_logs=args.detailed_logs)

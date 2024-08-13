@@ -63,10 +63,8 @@ def parse_args():
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--pool_address', type=str, required=True, help="Pool contract address")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
-    parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
-    parser.add_argument('--sync_url', type=str, required=False, help="URL for reporting sync status", default='http://localhost:5002')
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
     parser.add_argument('--max_stakes', type=int, default=4, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
@@ -85,8 +83,6 @@ args.subnet_addresses = subnet_addresses
 
 private_keys = args.private_keys.split('+')
 args.private_keys = private_keys
-
-os.makedirs(args.local_storage_dir, exist_ok=True)
 
 web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
 web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
@@ -197,7 +193,7 @@ async def upload_tensor(tensor, tensor_name):
         raise RuntimeError("Failed to upload tensor: request timed out")
 
     if response.status_code == 200:
-        return response.json().get('tensor_url')
+        return args.sot_url + response.json().get('tensor_url')
     else:
         raise RuntimeError(f"Failed to upload tensor: {response.text}")
 
@@ -396,8 +392,9 @@ async def upload_results(version_number, updates, loss):
     }
 
 async def report_sync_status():
+    logging.info(f'Reporting sync status to {args.sot_url}')
     try:
-        url = f"{args.sync_url}/report_sync"
+        url = f"{args.sot_url}/report_sync"
         async with aiohttp.ClientSession() as session:
             async with session.post(url) as response:
                 await response.text()
