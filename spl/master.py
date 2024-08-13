@@ -95,7 +95,9 @@ class Master:
         self.line.set_ydata(self.perplexities)
         self.ax.relim()
         self.ax.autoscale_view()
-        self.fig.savefig('perplexity_plot.png')  # Save the figure after each update
+        script_dir = os.path.dirname(__file__)
+        file_path = os.path.join(script_dir, 'perplexity_plot.png')
+        self.fig.savefig(file_path)  # Save the figure after each update
 
     async def submit_task(self, task_type, params, iteration_number):
         max_duration = datetime.timedelta(seconds=MAX_SUBMIT_TASK_RETRY_DURATION)
