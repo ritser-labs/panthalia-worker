@@ -2,9 +2,9 @@ from abc import ABC, abstractmethod
 import logging
 import torch
 import time
-from device import device
+from ..device import device
 import torch.nn.functional as F
-from model_config import BaseModelConfig, TransformerModelConfig
+from .model_config import BaseModelConfig, TransformerModelConfig
 import torch.distributed as dist
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 import os

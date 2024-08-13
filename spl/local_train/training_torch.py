@@ -4,7 +4,7 @@ import os
 import torch
 import time
 import requests
-from spl.adapters.llama3 import ModelArgs, Transformer
+from .adapters.llama3 import ModelArgs, Transformer
 from common import Model, wait_for_sot, tensor_to_model, model_args, tokenizer, model_adapter
 from device import device
 from eth_account import Account

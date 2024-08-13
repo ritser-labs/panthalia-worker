@@ -5,10 +5,10 @@ import logging
 import threading
 from flask import Flask, request, jsonify, send_file, send_from_directory
 import torch
-from common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset
+from .common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
-from device import device
+from .device import device
 import requests
 import time
 import random
@@ -25,8 +25,8 @@ sync_status = {}
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
     logging.StreamHandler()
 ])
-
-data_dir = 'data'
+script_dir = os.path.dirname(__file__)
+data_dir = os.path.join(script_dir, 'data')
 if not os.path.exists(data_dir):
     os.makedirs(data_dir)
 
@@ -533,11 +533,11 @@ def get_tensor_size():
     size = tensor.numel()
     return jsonify({'size': size})
 
-@app.route('/data/<path:filename>', methods=['GET'])
+@app.route('/data/state/<path:filename>', methods=['GET'])
 def get_data_file(filename):
     logging.info(f"Accessing file: {filename}")
     try:
-        return send_from_directory(data_dir, filename)
+        return send_from_directory(state_dir, filename)
     except Exception as e:
         logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
         return jsonify({'error': 'File not found'}), 404

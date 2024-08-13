@@ -5,15 +5,14 @@ __pycache__/
 
 pipeline/storage
 spl/data/*.pt
+spl/data/state
 spl/data/state/*
-spl/data/batch.json
-spl/data/targets.json
 spl/data/gradients/*
 spl/out.txt
 spl/abis/*
 spl/sot.log
 spl/perplexity_plot.png
-spl/master_wallets.json
-spl/master_public_keys.json
+spl/data/master_wallets.json
+spl/data/master_public_keys.json
 
 spl/logs/*

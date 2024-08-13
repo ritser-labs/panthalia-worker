@@ -3,7 +3,7 @@ import json
 import random
 from torch.utils.data import IterableDataset
 from datasets import load_dataset
-from model_config import BaseModelConfig, TransformerModelConfig
+from .model_config import BaseModelConfig, TransformerModelConfig
 
 class LanguageDataLoader(IterableDataset):
     def __init__(self, model_config: BaseModelConfig, buffer_size: int):

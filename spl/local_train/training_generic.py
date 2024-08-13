@@ -10,7 +10,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
 import subprocess
-from spl.adapters.llama3 import ModelArgs, Transformer
+from .adapters.llama3 import ModelArgs, Transformer
 from common import Model, model_adapter, model_args, tokenizer
 from device import device
 

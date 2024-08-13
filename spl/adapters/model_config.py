@@ -1,5 +1,5 @@
 from abc import ABC
-from spl.adapters.llama3 import Transformer
+from .llama3 import Transformer
 
 class BaseModelConfig(ABC):
     pass

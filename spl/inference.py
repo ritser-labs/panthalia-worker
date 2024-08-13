@@ -3,7 +3,7 @@ import requests
 import os
 import time
 import torch
-from spl.adapters.llama3 import ModelArgs, Transformer
+from .adapters.llama3 import ModelArgs, Transformer
 from common import tokenizer, wait_for_sot, model_adapter
 from device import device
 from io import BytesIO

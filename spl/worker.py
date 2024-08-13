@@ -10,8 +10,8 @@ from web3 import AsyncWeb3
 from web3.exceptions import ContractCustomError
 from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
-from device import device
-from common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
+from .device import device
+from .common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Optional, Tuple
 from io import BytesIO
@@ -286,15 +286,13 @@ async def process_tasks():
             version_num_url,
             params={'tensor_name': tensor_name}
         ))['version_number']
-        if (task_queue.current_version is None
-            or version_number != task_queue.current_version):
 
-            logging.debug(f"Syncing tensors for version number: {version_number}")
-            sync_start_time = time.time()
-            model = await sync_tensors(version_number, next_task['contract_index'])
-            sync_end_time = time.time()
-            logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
-            task_queue.current_version = version_number
+        logging.debug(f"Syncing tensors for version number: {version_number}")
+        sync_start_time = time.time()
+        model = await sync_tensors(version_number, next_task['contract_index'])
+        sync_end_time = time.time()
+        logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
+        task_queue.current_version = version_number
 
         logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
 

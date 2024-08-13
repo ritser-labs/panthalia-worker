@@ -7,7 +7,7 @@ import requests
 import threading
 import curses
 from flask import Flask, request, jsonify
-from common import model_args, load_abi, async_transact_with_contract_function, wait_for_sot
+from ..common import model_args, load_abi, async_transact_with_contract_function, wait_for_sot
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
@@ -16,13 +16,20 @@ import asyncio
 import logging
 import traceback
 
-# Define file paths and other configurations
-LOG_DIR = 'logs'
-STATE_DIR = os.path.join('data', 'state')
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+parent_dir = os.path.dirname(script_dir)
+
+# Go one level above the parent directory to get the package's root directory
+package_root_dir = os.path.dirname(parent_dir)
+
+DATA_DIR = os.path.join(parent_dir, 'data')
+STATE_DIR = os.path.join(DATA_DIR, 'state')
 TEMP_DIR = os.path.join(STATE_DIR, 'temp')
-MASTER_WALLETS_FILE = 'master_wallets.json'
-MASTER_PUBLIC_KEYS_FILE = 'master_public_keys.json'
-DEPLOY_SCRIPT = 'script/Deploy.s.sol'
+MASTER_WALLETS_FILE = os.path.join(DATA_DIR, 'master_wallets.json')
+MASTER_PUBLIC_KEYS_FILE = os.path.join(DATA_DIR, 'master_public_keys.json')
+DEPLOY_SCRIPT = os.path.join(parent_dir, 'script', 'Deploy.s.sol')
+LOG_DIR = os.path.join(parent_dir, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
 ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
@@ -218,7 +225,7 @@ def monitor_processes(stdscr, processes, task_counts):
 
         # Display logs on the left side
         process_name = ordered_process_names[selected_process]
-        log_file = os.path.join('logs', f"{process_name}.log")
+        log_file = os.path.join(LOG_DIR, f"{process_name}.log")
         log_lines = []
 
         if os.path.exists(log_file):
@@ -345,7 +352,7 @@ async def main():
     # Start anvil process
     logging.info("Starting anvil...")
     anvil_log = open(ANVIL_LOG_FILE, 'w')
-    anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log)
+    anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log, cwd=package_root_dir)
     processes['anvil'] = anvil_process
     logging.info(f"Anvil started with PID {anvil_process.pid}")
 
@@ -426,7 +433,7 @@ async def main():
 
         # Start the SOT service
         sot_log = open(SOT_LOG_FILE, 'w')
-        sot_process = subprocess.Popen(['python', 'sot.py', '--public_keys_file', MASTER_PUBLIC_KEYS_FILE], stdout=sot_log, stderr=sot_log)
+        sot_process = subprocess.Popen(['python', '-m', 'spl.sot', '--public_keys_file', MASTER_PUBLIC_KEYS_FILE], stdout=sot_log, stderr=sot_log, cwd=package_root_dir)
         processes['sot'] = sot_process
         logging.info(f"SOT service started with PID {sot_process.pid}")
 
@@ -439,11 +446,10 @@ async def main():
         # Print worker initialization stage
         logging.info("Starting worker processes...")
 
-
         for worker_idx in range(args.worker_count):
             this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
             command = [
-                'python', 'worker.py',
+                'python', '-m', 'spl.worker',
                 '--task_types', '+'.join(list(subnet_addresses.keys())),
                 '--subnet_addresses', '+'.join(list(subnet_addresses.values())),
                 '--private_keys', '+'.join([x['private_key'] for x in this_worker_wallets]),
@@ -457,7 +463,7 @@ async def main():
             worker_name = f'worker_{worker_idx}'
             log_file_path = os.path.join(LOG_DIR, f"{worker_name}.log")
             log_file = open(log_file_path, 'w')
-            worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file)
+            worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file, cwd=package_root_dir)
             processes[worker_name] = worker_process
             logging.info(f"Started worker process {worker_idx} for tasks with command: {' '.join(command)}")
 
@@ -474,7 +480,7 @@ async def main():
             # Start master.py
             master_log = open(os.path.join(LOG_DIR, 'master.log'), 'w')
             master_command = [
-                'python', 'master.py',
+                'python', '-m', 'spl.master',
                 '--rpc_url', args.rpc_url,
                 '--wallets_file', MASTER_WALLETS_FILE,
                 '--sot_url', args.sot_url,
@@ -482,7 +488,7 @@ async def main():
             ]
             if args.detailed_logs:
                 master_command.append('--detailed_logs')
-            master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log)
+            master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log, cwd=package_root_dir)
             processes['master'] = master_process
             logging.info(f"Started master process with command: {' '.join(master_command)}")
 

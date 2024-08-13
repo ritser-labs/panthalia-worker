@@ -1,7 +1,7 @@
 import torch
 import os
-from tokenizer import Tokenizer
-from spl.adapters.llama3 import ModelArgs, Transformer
+from .tokenizer import Tokenizer
+from .adapters.llama3 import ModelArgs, Transformer
 import json
 import logging
 import time
@@ -13,14 +13,14 @@ import web3 as Web3Module
 from collections import namedtuple
 from web3.datastructures import AttributeDict
 from web3.exceptions import ContractLogicError
-from device import device
+from .device import device
 import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
-from adapters.dataloader import WikipediaDataLoader, ShakespeareDataLoader, LowercaseAlphabetDataLoader
-from adapters.model_config import TransformerModelConfig
-from adapters.model_adapter import LlamaModelAdapter
+from .adapters.dataloader import WikipediaDataLoader, ShakespeareDataLoader, LowercaseAlphabetDataLoader
+from .adapters.model_config import TransformerModelConfig
+from .adapters.model_adapter import LlamaModelAdapter
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +68,9 @@ model_config = TransformerModelConfig(tokenizer, model_args)
 dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE)
 
 model_adapter = LlamaModelAdapter(model_config)
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+abi_dir = os.path.join(current_dir, 'abis')
 
 def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
     """Wait for the SOT service to be available."""
@@ -147,7 +150,7 @@ def extract_error_selectors(abi, web3, error_selectors):
             error_selectors[selector] = item
             logging.debug(f"Extracted error selector {selector} for {name}")
 
-def load_error_selectors(web3, abi_dir='abis'):
+def load_error_selectors(web3):
     error_selectors = {}
     for root, dirs, files in os.walk(abi_dir):
         for file in files:
@@ -159,7 +162,6 @@ def load_error_selectors(web3, abi_dir='abis'):
     return error_selectors
 
 def load_contracts(web3, subnet_addresses):
-    abi_dir = 'abis'
     abis = load_all_abis(abi_dir)
     contracts = {}
 
@@ -172,7 +174,7 @@ def load_contracts(web3, subnet_addresses):
         else:
             logging.error(f"Contract ABI not found for {contract_name}")
 
-    error_selectors = load_error_selectors(web3, abi_dir)
+    error_selectors = load_error_selectors(web3)
 
     return abis, contracts, error_selectors
 
@@ -188,7 +190,6 @@ def load_all_abis(abi_dir):
     return abis
 
 def load_abi(name):
-    abi_dir = 'abis'
     contract_path = os.path.join(abi_dir, f'{name}.sol', f'{name}.json')
     with open(contract_path, 'r') as abi_file:
         return json.load(abi_file).get('abi', [])
