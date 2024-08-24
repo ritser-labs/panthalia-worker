@@ -4,7 +4,7 @@ tiktoken==0.4.0
 fair
 blobfile
 eth-abi
-web3
+web3>=6.0.0,<7.0.0
 datasets
 psutil
 paramiko
