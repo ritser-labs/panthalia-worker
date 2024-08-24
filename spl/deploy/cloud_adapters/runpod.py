@@ -177,6 +177,7 @@ def terminate_all_pods():
     for pod in pods:
         pod_id = pod['id']
         runpod.terminate_pod(pod_id)
+    logging.info("All pods have been terminated.")
 
 def stream_handler(stream, log_file):
     """
