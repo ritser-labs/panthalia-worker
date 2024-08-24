@@ -107,7 +107,10 @@ def create_new_pod(
     if gpu_type is None or gpu_count == 0:
         new_pod = create_cpu_pod(name, image, instance_id='cpu3c-2-4', **kwargs)
     else:
+        if image is None:
+            raise ValueError("Image must be provided for GPU instances.")
         kwargs['gpu_type_id'] = gpu_type
+        kwargs['gpu_count'] = gpu_count
         new_pod = runpod.create_pod(name, image, **kwargs)
     return new_pod, private_key_path
 

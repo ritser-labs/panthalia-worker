@@ -532,6 +532,7 @@ async def main():
             worker_instance, worker_helpers = launch_instance_and_record_logs(
                 name=worker_name,
                 gpu_type=GPU_TYPE,
+                image=DOCKER_IMAGE,
                 gpu_count=1,
                 ports='',
                 log_file=os.path.join(LOG_DIR, f"{worker_name}.log"),
