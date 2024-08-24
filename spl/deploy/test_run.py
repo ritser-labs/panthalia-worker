@@ -158,21 +158,32 @@ async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_e
     })
     signed_eth_tx = web3.eth.account.sign_transaction(distribute_eth_tx, args.private_key)
     eth_tx_hash = await web3.eth.send_raw_transaction(signed_eth_tx.rawTransaction)
-    await web3.eth.wait_for_transaction_receipt(eth_tx_hash)
+    receipt = await web3.eth.wait_for_transaction_receipt(eth_tx_hash)
+    if receipt['status'] != 1:
+        raise Exception(f"Error distributing Ether: {receipt}")
     logging.info('Ether distribution completed')
-
-    # Distribute Tokens
-    token_amounts = [amount_token] * len(wallets)
-
-    distribute_token_tx = await distributor_contract.functions.distributeTokens(token_contract.address, recipients, token_amounts).build_transaction({
-        'from': deployer_address,
-        'nonce': await web3.eth.get_transaction_count(deployer_address),
-        'gas': 3000000,  # Adjust as needed
-        'gasPrice': await web3.eth.gas_price
-    })
-    signed_token_tx = web3.eth.account.sign_transaction(distribute_token_tx, args.private_key)
-    token_tx_hash = await web3.eth.send_raw_transaction(signed_token_tx.rawTransaction)
-    await web3.eth.wait_for_transaction_receipt(token_tx_hash)
+    
+    if not hasattr(fund_wallets, 'approval_submitted') or not fund_wallets.approval_submitted:
+        # Approve the distributor contract to spend the token
+        max_tokens = 1000000000000000000000000000000  # 1e27
+        await async_transact_with_contract_function(
+            web3,
+            token_contract,
+            'approve',
+            args.private_key,
+            *[distributor_contract_address, max_tokens],
+        )
+        logging.info('Token approval completed')
+        fund_wallets.approval_submitted = True
+    
+    
+    await async_transact_with_contract_function(
+        web3,
+        distributor_contract,
+        'distributeTokens',
+        args.private_key,
+        *[token_contract.address, recipients, [amount_token] * len(wallets)],
+    )
     logging.info('Token distribution completed')
 
 
@@ -511,7 +522,9 @@ async def main():
 
         for worker_idx in range(args.worker_count):
             this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
-
+            balance = await asyncio.gather(*[token_contract.functions.balanceOf(wallet['address']).call() for wallet in this_worker_wallets])
+            for wallet in this_worker_wallets:
+                logging.info(f"Worker wallet address: {wallet['address']} - Balance: {balance.pop(0)}")
             env = {
                 'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
                 'SERVICE_TYPE': 'worker',
@@ -541,7 +554,7 @@ async def main():
             )
             pod_helpers[f'{worker_name}'] = worker_helpers
             processes[worker_name] = worker_instance
-            logging.info(f"Started worker process {worker_idx} for tasks on instance {worker_instance['id']}")
+            logging.info(f"Started worker process {worker_idx} for tasks on instance {worker_instance['id']} and env {env}")
 
         try:
             # Wait for all workers to sync
