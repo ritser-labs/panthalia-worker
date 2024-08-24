@@ -90,7 +90,8 @@ def get_public_ip():
         logging.error(f"Unable to retrieve public IP: {e}")
         return None
 
-async def wait_for_workers_to_sync(worker_count, sot_url, timeout=600):
+async def wait_for_workers_to_sync(worker_count, timeout=600):
+    global sot_url
     start_time = time.time()
     get_num_workers_url = os.path.join(sot_url, 'get_num_synced')
     while time.time() - start_time < timeout:
@@ -209,8 +210,8 @@ def reset_logs(log_dir):
             except Exception as e:
                 logging.debug(f"Error erasing log file {file_path}: {e}")
 
-def fetch_latest_loss(sot_url):
-    global latest_loss_cache
+def fetch_latest_loss():
+    global latest_loss_cache, sot_url
     current_time = time.time()
 
     # Check if the cache is expired
@@ -282,14 +283,14 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
 
         for i, name in enumerate(ordered_process_names):
             is_selected = (i == selected_process)
-            status = pod_helpers[name].is_ssh_session_alive()
+            status = pod_helpers[name]['is_ssh_session_alive']()
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
 
             stdscr.addstr(i, split_point, f"{indicator} {name}", color)
 
         # Fetch and display the latest loss
-        latest_loss = fetch_latest_loss(args.sot_url)
+        latest_loss = fetch_latest_loss()
         loss_display = f"Latest Loss: {latest_loss:.3f}" if latest_loss is not None else "Latest Loss: N/A"
         loss_y = height - len(task_counts) - 5
         stdscr.addstr(loss_y, split_point, loss_display, curses.color_pair(4))
@@ -380,6 +381,43 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
 async def set_interval_mining(web3, interval):
     """Set the mining interval on the Ethereum node."""
     await web3.provider.make_request('evm_setIntervalMining', [interval])
+
+async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_contract, pool_address):
+    global sot_url, rpc_url
+    # Define environment variables for the worker
+    this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
+
+    env = {
+        'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
+        'SERVICE_TYPE': 'worker',
+        'RANK': '0',
+        'WORLD_SIZE': '1',
+        'TASK_TYPES': '+'.join(list(subnet_addresses.keys())),
+        'SUBNET_ADDRESSES': '+'.join(list(subnet_addresses.values())),
+        'PRIVATE_KEYS': '+'.join([x['private_key'] for x in this_worker_wallets]),
+        'RPC_URL': rpc_url,
+        'SOT_URL': sot_url,
+        'POOL_ADDRESS': pool_address,
+        'GROUP': str(args.group),
+        'LOCAL_STORAGE_DIR': args.local_storage_dir,
+        'BACKEND': args.backend
+    }
+
+    worker_name = f'worker_{worker_idx}'
+    worker_instance, worker_helpers = launch_instance_and_record_logs(
+        name=worker_name,
+        gpu_type=GPU_TYPE,
+        image=DOCKER_IMAGE,
+        gpu_count=1,
+        ports='',
+        log_file=os.path.join(LOG_DIR, f"{worker_name}.log"),
+        env=env,
+        template_id=BASE_TEMPLATE_ID,
+        cmd=DOCKER_CMD
+    )
+    logging.info(f"Started worker process {worker_idx} for tasks on instance {worker_instance['id']} with env {env}")
+
+    return worker_name, worker_instance, worker_helpers
 
 async def main():
     global sot_url, rpc_url
@@ -520,45 +558,27 @@ async def main():
         # Print worker initialization stage
         logging.info("Starting worker processes...")
 
-        for worker_idx in range(args.worker_count):
-            this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
-            balance = await asyncio.gather(*[token_contract.functions.balanceOf(wallet['address']).call() for wallet in this_worker_wallets])
-            for wallet in this_worker_wallets:
-                logging.info(f"Worker wallet address: {wallet['address']} - Balance: {balance.pop(0)}")
-            env = {
-                'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
-                'SERVICE_TYPE': 'worker',
-                'RANK': '0',
-                'WORLD_SIZE': '1',
-                'TASK_TYPES': '+'.join(list(subnet_addresses.keys())),
-                'SUBNET_ADDRESSES': '+'.join(list(subnet_addresses.values())),
-                'PRIVATE_KEYS': '+'.join([x['private_key'] for x in this_worker_wallets]),
-                'RPC_URL': rpc_url,
-                'SOT_URL': sot_url,
-                'POOL_ADDRESS': pool_address,
-                'GROUP': str(args.group),
-                'LOCAL_STORAGE_DIR': args.local_storage_dir,
-                'BACKEND': args.backend
-            }
-            worker_name = f'worker_{worker_idx}'
-            worker_instance, worker_helpers = launch_instance_and_record_logs(
-                name=worker_name,
-                gpu_type=GPU_TYPE,
-                image=DOCKER_IMAGE,
-                gpu_count=1,
-                ports='',
-                log_file=os.path.join(LOG_DIR, f"{worker_name}.log"),
-                env=env,
-                template_id=BASE_TEMPLATE_ID,
-                cmd=DOCKER_CMD
+        # Use asyncio.gather() to launch all workers concurrently
+        worker_tasks = [
+            launch_worker(
+                worker_idx,
+                subnet_addresses,
+                worker_wallets,
+                token_contract,
+                pool_address
             )
-            pod_helpers[f'{worker_name}'] = worker_helpers
+            for worker_idx in range(args.worker_count)
+        ]
+        worker_results = await asyncio.gather(*worker_tasks)
+
+        # Unpack worker results
+        for worker_name, worker_instance, worker_helpers in worker_results:
+            pod_helpers[worker_name] = worker_helpers
             processes[worker_name] = worker_instance
-            logging.info(f"Started worker process {worker_idx} for tasks on instance {worker_instance['id']} and env {env}")
 
         try:
             # Wait for all workers to sync
-            if not await wait_for_workers_to_sync(args.worker_count, sot_url):
+            if not await wait_for_workers_to_sync(args.worker_count):
                 logging.error("Error: Not all workers synced within the timeout period.")
                 terminate_processes()
                 exit(1)
