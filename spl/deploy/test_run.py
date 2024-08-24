@@ -218,7 +218,7 @@ def fetch_latest_loss(sot_url):
 
     return latest_loss_cache['value']
 
-def monitor_processes(stdscr, processes, task_counts):
+def monitor_processes(stdscr, processes, pod_helpers, task_counts):
     global args
     logger = logging.getLogger()
     logger.removeHandler(stream_handler)
@@ -270,9 +270,8 @@ def monitor_processes(stdscr, processes, task_counts):
             stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
 
         for i, name in enumerate(ordered_process_names):
-            process = processes[name]
             is_selected = (i == selected_process)
-            status = process.poll() is None
+            status = pod_helpers[name].is_ssh_session_alive()
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
 
@@ -581,7 +580,7 @@ async def main():
             logging.info(f"Master process started on instance {master_instance['id']}")
 
             # Start the curses interface in a new thread
-            curses_thread = threading.Thread(target=curses.wrapper, args=(monitor_processes, processes, task_counts))
+            curses_thread = threading.Thread(target=curses.wrapper, args=(monitor_processes, processes, pod_helpers, task_counts))
             curses_thread.start()
 
             # Run the task tracking in an asyncio loop

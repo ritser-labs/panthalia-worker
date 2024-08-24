@@ -276,6 +276,20 @@ def launch_instance_and_record_logs(
         pod_helpers['stdout_thread'] = threading.Thread(target=stream_handler, args=(stdout, pod_helpers['log']))
         pod_helpers['stderr_thread'] = threading.Thread(target=stream_handler, args=(stderr, pod_helpers['log']))
         
+        # Function to check if SSH session is still alive
+        def is_ssh_session_alive():
+            """
+            Checks if the SSH session is still alive.
+
+            Returns:
+                bool: True if the session is alive, False otherwise.
+            """
+            transport = ssh.get_transport()  # Get the transport associated with this session
+            return transport is not None and transport.is_active()
+
+        # Add the is_ssh_session_alive function to pod_helpers
+        pod_helpers['is_ssh_session_alive'] = is_ssh_session_alive
+
         # Start both threads
         pod_helpers['stdout_thread'].start()
         pod_helpers['stderr_thread'].start()
