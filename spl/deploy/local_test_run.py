@@ -474,7 +474,7 @@ async def main():
 
         try:
             # Wait for all workers to sync
-            if not wait_for_workers_to_sync(args.worker_count, args.sot_url):
+            if not await wait_for_workers_to_sync(args.worker_count, args.sot_url):
                 logging.error("Error: Not all workers synced within the timeout period.")
                 terminate_processes(processes.values())
                 exit(1)
