@@ -9,7 +9,6 @@ spl/data/state
 spl/data/state/*
 spl/data/gradients/*
 spl/out.txt
-spl/abis/*
 spl/sot.log
 spl/perplexity_plot.png
 spl/data/master_wallets.json
