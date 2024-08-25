@@ -218,7 +218,7 @@ def fetch_latest_loss():
     if current_time - latest_loss_cache['last_fetched'] > LOSS_REFRESH_INTERVAL:
         try:
             response = requests.get(f"{sot_url}/get_loss")
-            if response.status_code == 200:
+            if response.status_code == 200 or response.status_code == 204:
                 data = response.json()
                 latest_loss_cache['value'] = data.get('loss', None)
                 latest_loss_cache['last_fetched'] = current_time
@@ -595,7 +595,7 @@ async def main():
                 'RPC_URL': rpc_url,
                 'WALLETS': INPUT_JSON_PATH + '_0',
                 'SOT_URL': sot_url,
-                'SUBNET_ADDRESSES': args.subnet_addresses,
+                'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
             }
 
             # Start master.py on a remote instance
