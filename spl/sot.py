@@ -519,7 +519,7 @@ def get_tensor_size():
     if not os.path.exists(state_file_path):
         return jsonify({'error': 'Tensor not found'}), 404
 
-    tensor = torch.load(state_file_path)
+    tensor = torch.load(state_file_path, map_location=device)
     size = tensor.numel()
     return jsonify({'size': size})
 
@@ -560,7 +560,7 @@ def upload_tensor():
     tensor_name = filename.split('.')[0]
 
     # Save the tensor state
-    tensor_state = torch.load(local_file_path)
+    tensor_state = torch.load(local_file_path, map_location=device)
     torch.save(tensor_state, os.path.join(temp_dir, filename))  # Use filename directly
 
     logging.debug(f"Tensor {tensor_name} uploaded and saved with version_number {update_version_number}")
