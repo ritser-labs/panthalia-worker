@@ -63,7 +63,6 @@ def parse_args():
 
 args = parse_args()
 
-synced_workers = 0
 sync_status = {}
 # Define a global cache for the latest loss and last fetch time
 latest_loss_cache = {
@@ -77,19 +76,13 @@ app = Flask(__name__)
 
 base_url = None  # Global variable for the base URL
 
-@app.route('/report_sync', methods=['POST'])
-def report_sync():
-    global synced_workers
-    synced_workers += 1
-    return jsonify({'status': 'ok'})
-
 async def wait_for_workers_to_sync(worker_count, sot_url, timeout=600):
     start_time = time.time()
     get_num_workers_url = os.path.join(sot_url, 'get_num_synced')
     while time.time() - start_time < timeout:
-        logging.debug(f"Synced {synced_workers}/{worker_count} workers.")
         response = requests.get(get_num_workers_url)
         synced_workers = response.json()
+        logging.debug(f"Synced {synced_workers}/{worker_count} workers.")
         if synced_workers >= worker_count:
             logging.debug("All workers have synced.")
             return True
