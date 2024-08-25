@@ -526,7 +526,8 @@ async def main():
             'SERVICE_TYPE': 'sot',
             'RANK': '0',
             'WORLD_SIZE': '1',
-            'PUBLIC_KEYS': INPUT_JSON_PATH,
+            'PUBLIC_KEYS': INPUT_JSON_PATH + '_0',
+            'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
         }
 
         logging.info(f'Environment variables: {env}')
@@ -541,7 +542,7 @@ async def main():
             template_id=BASE_TEMPLATE_ID,
             cmd=DOCKER_CMD,
             env=env,
-            input_json=master_public_keys
+            input_jsons=[master_public_keys, subnet_addresses]
         )
         pod_helpers['sot'] = sot_helpers
         sot_ip, sot_port = get_public_ip_and_port(sot_instance['id'], private_port=SOT_PRIVATE_PORT)
@@ -592,7 +593,7 @@ async def main():
                 'RANK': '0',
                 'WORLD_SIZE': '1',
                 'RPC_URL': rpc_url,
-                'WALLETS': INPUT_JSON_PATH,
+                'WALLETS': INPUT_JSON_PATH + '_0',
                 'SOT_URL': sot_url,
                 'SUBNET_ADDRESSES': args.subnet_addresses,
             }
@@ -606,7 +607,7 @@ async def main():
                 env=env,
                 template_id=BASE_TEMPLATE_ID,
                 cmd=DOCKER_CMD,
-                input_json=master_wallets
+                input_jsons=[master_wallets]
             )
             pod_helpers['master'] = master_helpers
             processes['master'] = master_instance

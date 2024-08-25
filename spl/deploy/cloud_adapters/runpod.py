@@ -203,7 +203,7 @@ def launch_instance_and_record_logs(
     cmd='tail -f /var/log/syslog',
     template_id=None,
     container_disk_in_gb=10,
-    input_json=None
+    input_jsons=[]
 ):
     """
     Launches a new instance, waits for it to be ready, SSH into it, and records the logs.
@@ -259,8 +259,8 @@ def launch_instance_and_record_logs(
 
         # Create a temporary file on the remote host
         sftp = ssh.open_sftp()
-        if input_json is not None:
-            with sftp.file(INPUT_JSON_PATH, 'w') as remote_file:
+        for i, input_json in enumerate(input_jsons):
+            with sftp.file(INPUT_JSON_PATH + f'_{i}', 'w') as remote_file:
                 json.dump(input_json, remote_file)
         remote_path = '/tmp/temp_script.sh'
         with sftp.file(remote_path, 'w') as remote_file:
