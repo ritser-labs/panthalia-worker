@@ -607,7 +607,7 @@ async def main():
                 env=env,
                 template_id=BASE_TEMPLATE_ID,
                 cmd=DOCKER_CMD,
-                input_jsons=[master_wallets]
+                input_jsons=[master_wallets, subnet_addresses]
             )
             pod_helpers['master'] = master_helpers
             processes['master'] = master_instance
