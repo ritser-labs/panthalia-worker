@@ -591,7 +591,7 @@ def get_loss():
     with latest_loss_lock:
         loss = latest_loss['value']
     if loss is None:
-        return jsonify({'error': 'Loss value not set'}), 404
+        return jsonify({'error': 'Loss value not set'}), 204
     return jsonify({'loss': loss}), 200
 
 
