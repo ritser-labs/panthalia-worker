@@ -39,11 +39,12 @@ DOCKER_IMAGE = 'zerogoliath/magnum:latest'
 # Configure logging to file and stdout
 os.makedirs(LOG_DIR, exist_ok=True)
 file_handler = logging.FileHandler(LOG_FILE)
-stream_handler = logging.StreamHandler()
-logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
+logging.basicConfig(level=logging.INFO)
+logging.getLogger().addHandler(file_handler)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 for handler in logging.getLogger().handlers:
     handler.setFormatter(formatter)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -184,10 +185,12 @@ def fetch_latest_loss(sot_url):
     return latest_loss_cache['value']
 
 
-def monitor_processes(stdscr, processes, task_counts):
+def monitor_processes(stdscr, processes, pod_helpers, task_counts):
     global args
     logger = logging.getLogger()
-    logger.removeHandler(stream_handler)
+    for handler in logger.handlers:
+        if not isinstance(handler, logging.FileHandler):
+            logger.removeHandler(handler)
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
