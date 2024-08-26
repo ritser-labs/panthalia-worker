@@ -606,4 +606,9 @@ if __name__ == "__main__":
 
     logging.info("Starting SOT service...")
     initialize_service()
-    app.run(host='0.0.0.0', port=SOT_PRIVATE_PORT, debug=True)
+
+    # Check if the script is run directly or if it's managed by a WSGI server like Gunicorn
+    if 'gunicorn' not in os.environ.get('SERVER_SOFTWARE', ''):
+        # If not running under Gunicorn, use Flask's built-in server
+        logging.info("Running in development mode with Flask's built-in server...")
+        app.run(host='0.0.0.0', port=SOT_PRIVATE_PORT, debug=True)
