@@ -598,6 +598,7 @@ async def main():
                 'WALLETS': INPUT_JSON_PATH + '_0',
                 'SOT_URL': sot_url,
                 'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
+                'MAX_CONCURRENT_ITERATIONS': '32',
             }
 
             # Start master.py on a remote instance

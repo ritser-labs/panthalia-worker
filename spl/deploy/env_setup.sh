@@ -39,7 +39,7 @@ case $SERVICE_TYPE in
         python -m spl.worker --task_types ${TASK_TYPES} --subnet_addresses ${SUBNET_ADDRESSES} --private_keys ${PRIVATE_KEYS} --rpc_url ${RPC_URL} --sot_url ${SOT_URL} --pool_address ${POOL_ADDRESS} --group ${GROUP} --backend ${BACKEND}
         ;;
     master)
-        python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES}
+        python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES} --max_concurrent_iterations ${MAX_CONCURRENT_ITERATIONS}
         ;;
     sot)
         python -m spl.sot --public_keys ${PUBLIC_KEYS}
