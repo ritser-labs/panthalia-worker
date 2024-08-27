@@ -19,26 +19,21 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
 import functools
+from filelock import FileLock  # Import for file locking
 
-# Initialize locks for these dicts
-block_timestamps_lock = threading.Lock()
-num_updates_lock = threading.Lock()
-last_future_version_lock = threading.Lock()
+# File locks to prevent race conditions when reading/writing files
+block_timestamps_file_lock = FileLock("block_timestamps.json.lock")
+num_updates_file_lock = FileLock("num_updates.json.lock")
+last_future_version_file_lock = FileLock("last_future_version_number.json.lock")
 
-# Dictionary to store gradient updates
-executor = ThreadPoolExecutor(max_workers=10)
-
-# Dictionary to store used nonces
-used_nonces = {}
-
-latest_loss = {'value': None}
+# Initialize locks for thread safety
 latest_loss_lock = threading.Lock()
-
-synced_workers = 0
+preloaded_batch_lock = threading.Lock()
+preloaded_batch_condition = threading.Condition(lock=preloaded_batch_lock)
 
 # Global variables to store state
 master_public_keys = []
-sync_status = {}
+synced_workers = 0
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
@@ -69,31 +64,28 @@ def create_app(public_keys_file):
     num_updates_file = os.path.join(state_dir, 'num_updates.json')
     last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
 
-    def save_json(file_path, data):
-        with open(file_path, 'w') as f:
-            json.dump(data, f)
+    def save_json(file_path, data, file_lock):
+        with file_lock:
+            with open(file_path, 'w') as f:
+                json.dump(data, f)
 
-    def load_json(file_path, default):
-        if os.path.exists(file_path):
-            with open(file_path, 'r') as f:
-                return json.load(f)
-        else:
-            save_json(file_path, default)
-            return default
-
-    # Load existing block timestamps, num_updates, and last_future_version_number on startup
-    with block_timestamps_lock:
-        block_timestamps = load_json(block_timestamps_file, {})
-    with num_updates_lock:
-        num_updates = load_json(num_updates_file, {})
-    with last_future_version_lock:
-        last_future_version_number = load_json(last_future_version_file, {})
+    def load_json(file_path, default, file_lock):
+        with file_lock:
+            if os.path.exists(file_path):
+                with open(file_path, 'r') as f:
+                    return json.load(f)
+            else:
+                save_json(file_path, default, file_lock)
+                return default
 
     # Load master's public keys
     with open(public_keys_file, 'r') as f:
         master_public_keys = json.load(f)
 
     def initialize_tensor(name, sync_version_number=None, zero_init=False):
+        block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
+        last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
+        
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
                 0, int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL)
@@ -108,12 +100,10 @@ def create_app(public_keys_file):
         tensor = model_adapter.init_tensor(zero_init)
 
         torch.save(tensor, file_path)
-        with block_timestamps_lock:
-            block_timestamps[name] = sync_version_number
-        save_json(block_timestamps_file, block_timestamps)
-        with last_future_version_lock:
-            last_future_version_number[name] = sync_version_number
-        save_json(last_future_version_file, last_future_version_number)
+        block_timestamps[name] = sync_version_number
+        save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+        last_future_version_number[name] = sync_version_number
+        save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
 
     def initialize_all_tensors():
         initialize_tensor(TENSOR_NAME, zero_init=False)
@@ -121,8 +111,6 @@ def create_app(public_keys_file):
         initialize_tensor(f'{TENSOR_NAME}_adam_v', zero_init=True)
 
     preloaded_batch = None
-    preloaded_batch_lock = threading.Lock()
-    preloaded_batch_condition = threading.Condition(lock=preloaded_batch_lock)
 
     def preload_batch():
         global preloaded_batch
@@ -215,6 +203,9 @@ def create_app(public_keys_file):
                 logging.error("Invalid message format")
                 return jsonify({'error': 'Invalid message format'}), 401
 
+            # Load the used nonces from file
+            used_nonces = load_json(os.path.join(state_dir, 'used_nonces.json'), {}, block_timestamps_file_lock)
+
             # Check if the nonce has been used before
             if nonce in used_nonces:
                 logging.error("Nonce already used")
@@ -228,6 +219,7 @@ def create_app(public_keys_file):
 
             # Store the nonce to prevent reuse
             used_nonces[nonce] = True
+            save_json(os.path.join(state_dir, 'used_nonces.json'), used_nonces, block_timestamps_file_lock)
 
             return f(*args, **kwargs)
         return decorated_function
@@ -376,16 +368,21 @@ def create_app(public_keys_file):
             logging.error("Missing tensor_name or result_url in /update_state request")
             return jsonify({'error': 'Missing tensor_name or result_url'}), 400
 
+        # Load state from files
+        block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
+        num_updates = load_json(num_updates_file, {}, num_updates_file_lock)
+        last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
+
         future_version_number = (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
 
         if last_future_version_number.get(tensor_name, 0) < future_version_number:
             if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
-                with block_timestamps_lock:
-                    block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
-                save_json(block_timestamps_file, block_timestamps)
-        with num_updates_lock:
-            num_updates[tensor_name] = 0
-            save_json(num_updates_file, num_updates)
+                block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
+                save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+        
+        num_updates[tensor_name] = 0
+        save_json(num_updates_file, num_updates, num_updates_file_lock)
+        
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
         try:
@@ -415,10 +412,9 @@ def create_app(public_keys_file):
             current_version_number = block_timestamps.get(tensor_name, 0)
             logging.info(f'Updating state for {tensor_name}, future version number: {future_version_number}, current version number: {current_version_number}')
 
-            with num_updates_lock:
-                num_of_updates = num_updates[tensor_name] + 1
-                num_updates[tensor_name] = num_of_updates
-                save_json(num_updates_file, num_updates)
+            num_of_updates = num_updates[tensor_name] + 1
+            num_updates[tensor_name] = num_of_updates
+            save_json(num_updates_file, num_updates, num_updates_file_lock)
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
             future_tensor, m_update, v_update = apply_adamw(
@@ -439,9 +435,8 @@ def create_app(public_keys_file):
             torch.save(v_update, future_tensor_adam_v_path)
 
             if last_future_version_number.get(tensor_name, 0) < future_version_number:
-                with last_future_version_lock:
-                    last_future_version_number[tensor_name] = future_version_number
-                    save_json(last_future_version_file, last_future_version_number)
+                last_future_version_number[tensor_name] = future_version_number
+                save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
 
             # Cleanup old accumulated grads tensors
             for filename in os.listdir(state_dir):
@@ -463,10 +458,12 @@ def create_app(public_keys_file):
         if not tensor_name:
             return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
+        # Load state from file
+        block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
+
         latest_version_number = request.args.get('version_number')
         if latest_version_number is None:
-            with block_timestamps_lock:
-                latest_version_number = block_timestamps.get(tensor_name, 0)
+            latest_version_number = block_timestamps.get(tensor_name, 0)
         else:
             latest_version_number = int(latest_version_number)
 
@@ -511,8 +508,8 @@ def create_app(public_keys_file):
         if not tensor_name:
             return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-        with block_timestamps_lock:
-            latest_version_number = block_timestamps.get(tensor_name, 0)
+        block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
+        latest_version_number = block_timestamps.get(tensor_name, 0)
         return jsonify({'version_number': latest_version_number})
 
     @app.route('/tensor_size', methods=['GET'])
@@ -587,16 +584,17 @@ def create_app(public_keys_file):
 
         # Update the loss value with thread-safety
         with latest_loss_lock:
+            latest_loss = load_json(os.path.join(state_dir, 'latest_loss.json'), {'value': None}, block_timestamps_file_lock)
             latest_loss['value'] = loss
+            save_json(os.path.join(state_dir, 'latest_loss.json'), latest_loss, block_timestamps_file_lock)
 
         logging.info(f"Updated latest loss: {loss}")
         return jsonify({'status': 'success'}), 200
 
     @app.route('/get_loss', methods=['GET'])
     def get_loss():
-        global latest_loss
-        with latest_loss_lock:
-            loss = latest_loss['value']
+        latest_loss = load_json(os.path.join(state_dir, 'latest_loss.json'), {'value': None}, block_timestamps_file_lock)
+        loss = latest_loss.get('value')
         return jsonify({'loss': loss}), 200
 
     initialize_service()
