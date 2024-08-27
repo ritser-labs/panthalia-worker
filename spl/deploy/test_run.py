@@ -48,7 +48,8 @@ with open(os.path.join(script_dir, 'anvil_setup.sh'), 'r') as f:
 # Configure logging to file and stdout
 os.makedirs(LOG_DIR, exist_ok=True)
 file_handler = logging.FileHandler(LOG_FILE)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger().setLevel(logging.DEBUG)
 logging.getLogger().addHandler(file_handler)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 for handler in logging.getLogger().handlers:
@@ -213,6 +214,8 @@ def reset_logs(log_dir):
 def fetch_latest_loss():
     global latest_loss_cache, sot_url
     current_time = time.time()
+    
+    logging.debug(10)
 
     # Check if the cache is expired
     if current_time - latest_loss_cache['last_fetched'] > LOSS_REFRESH_INTERVAL:
@@ -254,6 +257,7 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
     right_col_width = max_name_length + 2
 
     def draw_screen():
+        logging.debug(1)
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         split_point = width - right_col_width
@@ -266,6 +270,7 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
             not name.startswith('worker'),
             name
         ))
+        logging.debug(2)
 
         # Display logs on the left side
         process_name = ordered_process_names[selected_process]
@@ -282,6 +287,8 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
         # Draw the separator line
         for y in range(height):
             stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
+        
+        logging.debug(3)
 
         for i, name in enumerate(ordered_process_names):
             is_selected = (i == selected_process)
@@ -290,12 +297,15 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
             indicator = '*' if is_selected else ' '
 
             stdscr.addstr(i, split_point, f"{indicator} {name}", color)
+        logging.debug(4)
 
         # Fetch and display the latest loss
         latest_loss = fetch_latest_loss()
         loss_display = f"Latest Loss: {latest_loss:.3f}" if latest_loss is not None else "Latest Loss: N/A"
         loss_y = height - len(task_counts) - 5
         stdscr.addstr(loss_y, split_point, loss_display, curses.color_pair(4))
+        
+        logging.debug(5)
 
         # Draw task counts below the latest loss
         task_start = height - 3 - len(task_counts)
@@ -305,6 +315,7 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
         stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
         stdscr.refresh()
+        logging.debug(6)
 
     draw_screen()  # Initial draw
 
@@ -326,6 +337,7 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
             draw_screen()
             last_resize = None
 
+        logging.debug("Drawing screen...")
         draw_screen()
         time.sleep(0.05)
 

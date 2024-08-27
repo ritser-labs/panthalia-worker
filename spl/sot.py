@@ -1,30 +1,29 @@
+import asyncio
 from collections import defaultdict
 import os
 import json
 import logging
-import threading
-from flask import Flask, request, jsonify, send_file, send_from_directory
+from quart import Quart, request, jsonify, send_file, send_from_directory
 import torch
-from .common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset, SOT_PRIVATE_PORT
 from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor
-from .device import device
-import requests
+import aiohttp
 import time
 import random
 from werkzeug.utils import secure_filename
 from tqdm import tqdm
-from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from web3 import Web3
 import functools
-from filelock import FileLock  # Import for file locking
-import psutil  # Import psutil for memory usage logging
-import tracemalloc  # Import for tracing memory allocations
+from filelock import FileLock
+import psutil
+import tracemalloc
+
+# Import your custom modules
+from .common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset, SOT_PRIVATE_PORT
+from .device import device
 
 # File locks to prevent race conditions when reading/writing files
-
 script_dir = os.path.dirname(__file__)
 data_dir = os.path.join(script_dir, 'data')
 block_timestamps_file_lock = FileLock(os.path.join(data_dir, 'state', 'block_timestamps.json.lock'))
@@ -32,13 +31,11 @@ num_updates_file_lock = FileLock(os.path.join(data_dir, 'state', 'num_updates.js
 last_future_version_file_lock = FileLock(os.path.join(data_dir, 'state', 'last_future_version_number.json.lock'))
 
 # Initialize locks for thread safety
-latest_loss_lock = threading.Lock()
-preloaded_batch_lock = threading.Lock()
-preloaded_batch_condition = threading.Condition(lock=preloaded_batch_lock)
+latest_loss_lock = asyncio.Lock()
+preloaded_batch_lock = asyncio.Lock()
+preloaded_batch_condition = asyncio.Condition(preloaded_batch_lock)
 
-# Global variables to store state
-master_public_keys = []
-synced_workers = 0
+SOT_FETCH_TIMEOUT = 300  # Timeout for fetching data from the SOT service
 
 # Initialize logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
@@ -62,11 +59,11 @@ def log_memory_diff(snapshot1, snapshot2, note=''):
     for stat in top_stats[:10]:  # Log top 10 memory differences
         logging.debug(stat)
 
-def create_app(public_keys_file):
+async def create_app(public_keys_file):
     """Create and configure the app."""
-    global master_public_keys
-
-    app = Flask(__name__)
+    app = Quart(__name__)
+    
+    app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 * 1024  # 100 GB
     
     log_memory_usage('Before initializing or loading initial state')
 
@@ -104,7 +101,7 @@ def create_app(public_keys_file):
     with open(public_keys_file, 'r') as f:
         master_public_keys = json.load(f)
 
-    def initialize_tensor(name, sync_version_number=None, zero_init=False):
+    async def initialize_tensor(name, sync_version_number=None, zero_init=False):
         log_memory_usage('Before initializing tensor')
         
         snapshot_before = tracemalloc.take_snapshot()  # Take snapshot before the operation
@@ -137,15 +134,15 @@ def create_app(public_keys_file):
 
         log_memory_usage('After initializing tensor')
 
-    def initialize_all_tensors():
-        initialize_tensor(TENSOR_NAME, zero_init=False)
-        initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
-        initialize_tensor(f'{TENSOR_NAME}_adam_v', zero_init=True)
+    async def initialize_all_tensors():
+        await initialize_tensor(TENSOR_NAME, zero_init=False)
+        await initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
+        await initialize_tensor(f'{TENSOR_NAME}_adam_v', zero_init=True)
 
     preloaded_batch = None
 
-    def preload_batch():
-        global preloaded_batch
+    async def preload_batch():
+        nonlocal preloaded_batch
         log_memory_usage('Before preloading batch')
         
         snapshot_before = tracemalloc.take_snapshot()  # Snapshot before loading batch
@@ -175,7 +172,7 @@ def create_app(public_keys_file):
             torch.save(batch_tensor, os.path.join(temp_dir, batch_filename))
             torch.save(targets_tensor, os.path.join(temp_dir, targets_filename))
 
-            with preloaded_batch_lock:
+            async with preloaded_batch_condition:
                 preloaded_batch = (batch_filename, targets_filename)
                 preloaded_batch_condition.notify_all()
 
@@ -186,31 +183,32 @@ def create_app(public_keys_file):
         log_memory_usage('After preloading batch')
         return batch_filename, targets_filename
 
-    def initialize_service():
+    async def initialize_service():
         logging.info("Initializing distributed environment and tensors")
         model_adapter.initialize_environment('gloo')
-        initialize_all_tensors()
-        preload_batch()
+        await initialize_all_tensors()
+        await preload_batch()
         log_memory_usage('After initializing service')
 
     @app.route('/health', methods=['GET'])
-    def health_check():
+    async def health_check():
         log_memory_usage('Health check endpoint')
         return jsonify({'status': 'healthy'}), 200
 
-    def fetch(session, url):
+    async def fetch(session, url):
         log_memory_usage('Before fetching URL')
         try:
-            with session.get(url, timeout=10) as response:
+            async with session.get(url, timeout=SOT_FETCH_TIMEOUT) as response:
                 response.raise_for_status()
-                return response.content
-        except requests.RequestException as e:
+                return await response.read()
+        except aiohttp.ClientError as e:
             logging.error(f"Error fetching {url}: {e}")
             raise
         finally:
             log_memory_usage('After fetching URL')
 
     def verify_signature(message, signature):
+        nonlocal master_public_keys
         snapshot_before = tracemalloc.take_snapshot()  # Take snapshot before the operation
         
         message = encode_defunct(text=message)
@@ -222,10 +220,9 @@ def create_app(public_keys_file):
         logging.debug(f"Recovered address: {recovered_address}, Expected addresses: {master_public_keys}")
         return recovered_address.lower() in [key.lower() for key in master_public_keys]
 
-
     def requires_authentication(f):
         @functools.wraps(f)
-        def decorated_function(*args, **kwargs):
+        async def decorated_function(*args, **kwargs):
             auth_header = request.headers.get('Authorization')
             logging.debug(f"Authorization header: {auth_header}")
             if not auth_header:
@@ -270,35 +267,37 @@ def create_app(public_keys_file):
             used_nonces[nonce] = True
             save_json(os.path.join(state_dir, 'used_nonces.json'), used_nonces, block_timestamps_file_lock)
 
-            return f(*args, **kwargs)
+            return await f(*args, **kwargs)
         return decorated_function
 
+    synced_workers = 0
+
     @app.route('/report_sync', methods=['POST'])
-    def report_sync():
-        global synced_workers
+    async def report_sync():
+        nonlocal synced_workers
         synced_workers += 1
         return jsonify({'status': 'ok'})
 
     @app.route('/get_num_synced', methods=['GET'])
-    def get_num_synced():
-        global synced_workers
+    async def get_num_synced():
+        nonlocal synced_workers
         return jsonify(synced_workers)
 
     @app.route('/get_batch', methods=['POST'])
     @requires_authentication
-    def get_batch():
+    async def get_batch():
         logging.info("Accessing /get_batch endpoint")
-        global preloaded_batch
+        nonlocal preloaded_batch
 
-        with preloaded_batch_condition:
+        async with preloaded_batch_condition:
             while preloaded_batch is None:
                 logging.info("Waiting for batch to be preloaded...")
-                preloaded_batch_condition.wait()
+                await preloaded_batch_condition.wait()
 
             batch_filename, targets_filename = preloaded_batch
             preloaded_batch = None
 
-        preload_batch()
+        await preload_batch()
 
         try:
             return jsonify({
@@ -405,9 +404,9 @@ def create_app(public_keys_file):
 
     @app.route('/update_state', methods=['POST'])
     @requires_authentication
-    def update_state():
+    async def update_state():
         logging.info("Accessing /update_state endpoint")
-        data = request.get_json()
+        data = await request.get_json()
         tensor_name = data.get('tensor_name')
         result_url = data.get('result_url')
 
@@ -435,8 +434,8 @@ def create_app(public_keys_file):
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
         try:
-            with requests.Session() as session:
-                tensor_data = fetch(session, result_url)
+            async with aiohttp.ClientSession() as session:
+                tensor_data = await fetch(session, result_url)
 
             tensor = torch.load(BytesIO(tensor_data), map_location=device)  # Load tensor to the correct device
 
@@ -494,14 +493,14 @@ def create_app(public_keys_file):
 
             logging.debug(f"Updated state for {tensor_name}")
             return jsonify({'status': 'success', 'version_number': future_version_number})
-        except requests.RequestException as e:
-            logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}")
+        except aiohttp.ClientError as e:
+            logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}", exc_info=True)  # Add exc_info=True
         except Exception as e:
-            logging.error(f"Failed to update tensor {tensor_name} due to error: {e}")
+            logging.error(f"Failed to update tensor {tensor_name} due to error: {e}", exc_info=True)  # Add exc_info=True
         return jsonify({'error': 'Could not update state'}), 500
 
     @app.route('/latest_state', methods=['GET'])
-    def latest_state():
+    async def latest_state():
         logging.info("Accessing /latest_state endpoint")
         tensor_name = request.args.get('tensor_name')
         if not tensor_name:
@@ -543,7 +542,7 @@ def create_app(public_keys_file):
             return jsonify({'error': 'Tensor not found'}), 404
 
         try:
-            response = send_file(state_file_path, mimetype='application/octet-stream')
+            response = await send_file(state_file_path, mimetype='application/octet-stream')
             response.headers['version_number'] = latest_available_version_number
             return response
         except Exception as e:
@@ -551,7 +550,7 @@ def create_app(public_keys_file):
             return jsonify({'error': 'Could not retrieve latest state'}), 500
 
     @app.route('/tensor_block_timestamp', methods=['GET'])
-    def tensor_block_timestamp():
+    async def tensor_block_timestamp():
         logging.info("Accessing /tensor_block_timestamp endpoint")
         tensor_name = request.args.get('tensor_name')
         if not tensor_name:
@@ -562,7 +561,7 @@ def create_app(public_keys_file):
         return jsonify({'version_number': latest_version_number})
 
     @app.route('/tensor_size', methods=['GET'])
-    def get_tensor_size():
+    async def get_tensor_size():
         logging.info("Accessing /tensor_size endpoint")
         tensor_name = request.args.get('tensor_name')
         if not tensor_name:
@@ -577,24 +576,26 @@ def create_app(public_keys_file):
         return jsonify({'size': size})
 
     @app.route('/data/state/<path:filename>', methods=['GET'])
-    def get_data_file(filename):
+    async def get_data_file(filename):
         logging.info(f"Accessing file: {filename}")
         try:
-            return send_from_directory(state_dir, filename)
+            return await send_from_directory(state_dir, filename)
         except Exception as e:
             logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
             return jsonify({'error': 'File not found'}), 404
 
     @app.route('/upload_tensor', methods=['POST'])
-    def upload_tensor():
-        if 'tensor' not in request.files:
+    async def upload_tensor():
+        request_files = await request.files
+        if 'tensor' not in request_files:
             return jsonify({'error': 'No tensor file provided'}), 400
 
-        if 'label' not in request.form:
+        request_form = await request.form
+        if 'label' not in request_form:
             return jsonify({'error': 'No label provided'}), 400
 
-        tensor_file = request.files['tensor']
-        label = request.form['label']
+        tensor_file = request_files['tensor']
+        label = request_form['label']
         update_version_number = int(time.time())
         random_suffix = random.randint(1000, 9999)
         filename = secure_filename(f'{label}_{update_version_number}_{random_suffix}.pt')
@@ -620,19 +621,20 @@ def create_app(public_keys_file):
 
         return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'/data/state/temp/{filename}'}), 200
 
+    latest_loss = None
     @app.route('/update_loss', methods=['POST'])
-    def update_loss():
-        global latest_loss
+    async def update_loss():
+        nonlocal latest_loss
 
         # Get the loss value from the request data
-        data = request.get_json()
+        data = await request.get_json()
         if not data or 'loss' not in data:
             return jsonify({'error': 'Missing loss value'}), 400
 
         loss = data['loss']
 
         # Update the loss value with thread-safety
-        with latest_loss_lock:
+        async with latest_loss_lock:
             latest_loss = load_json(os.path.join(state_dir, 'latest_loss.json'), {'value': None}, block_timestamps_file_lock)
             latest_loss['value'] = loss
             save_json(os.path.join(state_dir, 'latest_loss.json'), latest_loss, block_timestamps_file_lock)
@@ -641,26 +643,31 @@ def create_app(public_keys_file):
         return jsonify({'status': 'success'}), 200
 
     @app.route('/get_loss', methods=['GET'])
-    def get_loss():
+    async def get_loss():
         latest_loss = load_json(os.path.join(state_dir, 'latest_loss.json'), {'value': None}, block_timestamps_file_lock)
         loss = latest_loss.get('value')
         return jsonify({'loss': loss}), 200
 
-    initialize_service()
+    await initialize_service()
     return app
 
 if __name__ == "__main__":
     import argparse
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
 
-    parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
-    parser.add_argument('--public_keys_file', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
+    async def main():
+        parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
+        parser.add_argument('--public_keys_file', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
 
-    args = parser.parse_args()
+        args = parser.parse_args()
 
-    app = create_app(args.public_keys_file)
+        app = await create_app(args.public_keys_file)
 
-    logging.info("Starting SOT service...")
+        logging.info("Starting SOT service...")
 
-    if 'gunicorn' not in os.environ.get('SERVER_SOFTWARE', ''):
-        logging.info("Running in development mode with Flask's built-in server...")
-        app.run(host='0.0.0.0', port=SOT_PRIVATE_PORT, debug=True)
+        config = Config()
+        config.bind = [f'0.0.0.0:{SOT_PRIVATE_PORT}']
+        await serve(app, config)
+
+    asyncio.run(main())
