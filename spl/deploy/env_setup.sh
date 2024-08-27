@@ -42,7 +42,7 @@ case $SERVICE_TYPE in
         python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES} --max_concurrent_iterations ${MAX_CONCURRENT_ITERATIONS}
         ;;
     sot)
-        python -m spl.sot --public_keys ${PUBLIC_KEYS}
+        gunicorn -w 4 -b "0.0.0.0:${SOT_PRIVATE_PORT}" "spl.sot:create_app('${PUBLIC_KEYS}')"
         ;;
     *)
         echo "Error: Unknown service type"

@@ -20,11 +20,16 @@ from eth_account.messages import encode_defunct
 from web3 import Web3
 import functools
 from filelock import FileLock  # Import for file locking
+import psutil  # Import psutil for memory usage logging
+import tracemalloc  # Import for tracing memory allocations
 
 # File locks to prevent race conditions when reading/writing files
-block_timestamps_file_lock = FileLock("block_timestamps.json.lock")
-num_updates_file_lock = FileLock("num_updates.json.lock")
-last_future_version_file_lock = FileLock("last_future_version_number.json.lock")
+
+script_dir = os.path.dirname(__file__)
+data_dir = os.path.join(script_dir, 'data')
+block_timestamps_file_lock = FileLock(os.path.join(data_dir, 'state', 'block_timestamps.json.lock'))
+num_updates_file_lock = FileLock(os.path.join(data_dir, 'state', 'num_updates.json.lock'))
+last_future_version_file_lock = FileLock(os.path.join(data_dir, 'state', 'last_future_version_number.json.lock'))
 
 # Initialize locks for thread safety
 latest_loss_lock = threading.Lock()
@@ -40,14 +45,30 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(mess
     logging.StreamHandler()
 ])
 
+tracemalloc.start()  # Start tracing memory allocations
+
+def log_memory_usage(note=''):
+    """Log the current memory usage of the process."""
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    logging.debug(f"Memory usage ({note}): RSS={mem_info.rss / 1024 ** 2:.2f} MB, VMS={mem_info.vms / 1024 ** 2:.2f} MB")
+
+def log_memory_diff(snapshot1, snapshot2, note=''):
+    """Log the difference in memory usage between two snapshots."""
+    top_stats = snapshot2.compare_to(snapshot1, 'lineno')
+
+    logging.debug(f"Memory usage differences ({note}):")
+    for stat in top_stats[:10]:  # Log top 10 memory differences
+        logging.debug(stat)
+
 def create_app(public_keys_file):
     """Create and configure the app."""
     global master_public_keys
 
     app = Flask(__name__)
+    
+    log_memory_usage('Before initializing or loading initial state')
 
-    script_dir = os.path.dirname(__file__)
-    data_dir = os.path.join(script_dir, 'data')
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
@@ -83,6 +104,10 @@ def create_app(public_keys_file):
         master_public_keys = json.load(f)
 
     def initialize_tensor(name, sync_version_number=None, zero_init=False):
+        log_memory_usage('Before initializing tensor')
+        
+        snapshot_before = tracemalloc.take_snapshot()  # Take snapshot before the operation
+        
         block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
         last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
         
@@ -105,6 +130,12 @@ def create_app(public_keys_file):
         last_future_version_number[name] = sync_version_number
         save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
 
+        snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
+        
+        log_memory_diff(snapshot_before, snapshot_after, note='After initializing tensor')  # Log memory differences
+
+        log_memory_usage('After initializing tensor')
+
     def initialize_all_tensors():
         initialize_tensor(TENSOR_NAME, zero_init=False)
         initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
@@ -114,22 +145,24 @@ def create_app(public_keys_file):
 
     def preload_batch():
         global preloaded_batch
+        log_memory_usage('Before preloading batch')
+        
+        snapshot_before = tracemalloc.take_snapshot()  # Snapshot before loading batch
+
         batch = []
         targets = []
 
         for inputs, target_tokens in dataset:
             if len(batch) >= batch_size:
                 break
-            # Convert each list to a tensor, adding a new dimension
             if isinstance(inputs, list):
-                inputs = torch.tensor(inputs)  # Convert list to tensor
+                inputs = torch.tensor(inputs)
             if isinstance(target_tokens, list):
-                target_tokens = torch.tensor(target_tokens)  # Convert list to tensor
+                target_tokens = torch.tensor(target_tokens)
             batch.append(inputs)
             targets.append(target_tokens)
 
         if batch:
-            # Stack the tensors along a new dimension
             batch_tensor = torch.stack(batch)
             targets_tensor = torch.stack(targets)
 
@@ -138,28 +171,34 @@ def create_app(public_keys_file):
             batch_filename = f'batch_{timestamp}_{random_suffix}.pt'
             targets_filename = f'targets_{timestamp}_{random_suffix}.pt'
 
-            # Save the stacked tensors
             torch.save(batch_tensor, os.path.join(temp_dir, batch_filename))
             torch.save(targets_tensor, os.path.join(temp_dir, targets_filename))
 
-            # Set the global preloaded_batch variable here
             with preloaded_batch_lock:
                 preloaded_batch = (batch_filename, targets_filename)
                 preloaded_batch_condition.notify_all()
 
-            return batch_filename, targets_filename
+        snapshot_after = tracemalloc.take_snapshot()  # Snapshot after loading batch
+        
+        log_memory_diff(snapshot_before, snapshot_after, note='After preloading batch')  # Log memory differences
+
+        log_memory_usage('After preloading batch')
+        return batch_filename, targets_filename
 
     def initialize_service():
         logging.info("Initializing distributed environment and tensors")
         model_adapter.initialize_environment('gloo')
         initialize_all_tensors()
         preload_batch()
+        log_memory_usage('After initializing service')
 
     @app.route('/health', methods=['GET'])
     def health_check():
+        log_memory_usage('Health check endpoint')
         return jsonify({'status': 'healthy'}), 200
 
     def fetch(session, url):
+        log_memory_usage('Before fetching URL')
         try:
             with session.get(url, timeout=10) as response:
                 response.raise_for_status()
@@ -167,12 +206,21 @@ def create_app(public_keys_file):
         except requests.RequestException as e:
             logging.error(f"Error fetching {url}: {e}")
             raise
+        finally:
+            log_memory_usage('After fetching URL')
 
     def verify_signature(message, signature):
+        snapshot_before = tracemalloc.take_snapshot()  # Take snapshot before the operation
+        
         message = encode_defunct(text=message)
         recovered_address = Account.recover_message(message, signature=signature)
+        
+        snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
+        log_memory_diff(snapshot_before, snapshot_after, note='After verifying signature')  # Log memory differences
+        
         logging.debug(f"Recovered address: {recovered_address}, Expected addresses: {master_public_keys}")
         return recovered_address.lower() in [key.lower() for key in master_public_keys]
+
 
     def requires_authentication(f):
         @functools.wraps(f)
@@ -612,8 +660,6 @@ if __name__ == "__main__":
 
     logging.info("Starting SOT service...")
 
-    # Check if the script is run directly or if it's managed by a WSGI server like Gunicorn
     if 'gunicorn' not in os.environ.get('SERVER_SOFTWARE', ''):
-        # If not running under Gunicorn, use Flask's built-in server
         logging.info("Running in development mode with Flask's built-in server...")
         app.run(host='0.0.0.0', port=SOT_PRIVATE_PORT, debug=True)

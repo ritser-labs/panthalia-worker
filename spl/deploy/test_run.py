@@ -530,6 +530,7 @@ async def main():
             'WORLD_SIZE': '1',
             'PUBLIC_KEYS': INPUT_JSON_PATH + '_0',
             'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
+            'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
         }
 
         logging.info(f'Environment variables: {env}')

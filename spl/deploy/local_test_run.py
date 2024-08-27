@@ -185,7 +185,7 @@ def fetch_latest_loss(sot_url):
     return latest_loss_cache['value']
 
 
-def monitor_processes(stdscr, processes, pod_helpers, task_counts):
+def monitor_processes(stdscr, processes, task_counts):
     global args
     logger = logging.getLogger()
     for handler in logger.handlers:
