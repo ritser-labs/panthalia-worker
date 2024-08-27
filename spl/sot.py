@@ -69,6 +69,14 @@ def create_app(public_keys_file):
     num_updates_file = os.path.join(state_dir, 'num_updates.json')
     last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
 
+    def load_json(file_path, default):
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        else:
+            save_json(file_path, default)
+            return default
+
     # Load existing block timestamps, num_updates, and last_future_version_number on startup
     with block_timestamps_lock:
         block_timestamps = load_json(block_timestamps_file, {})
@@ -80,15 +88,6 @@ def create_app(public_keys_file):
     # Load master's public keys
     with open(public_keys_file, 'r') as f:
         master_public_keys = json.load(f)
-
-    def load_json(file_path, default):
-        if os.path.exists(file_path):
-            with open(file_path, 'r') as f:
-                return json.load(f)
-        else:
-            save_json(file_path, default)
-            return default
-
     def save_json(file_path, data):
         with open(file_path, 'w') as f:
             json.dump(data, f)
