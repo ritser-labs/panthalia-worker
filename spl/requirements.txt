@@ -9,6 +9,6 @@ datasets
 psutil
 paramiko
 runpod
-flask
+flask[async]
 requests-toolbelt
 gunicorn
