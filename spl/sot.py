@@ -41,9 +41,10 @@ master_public_keys = []
 synced_workers = 0
 
 # Initialize logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
     logging.StreamHandler()
 ])
+logging.getLogger().setLevel(logging.DEBUG)
 
 tracemalloc.start()  # Start tracing memory allocations
 
