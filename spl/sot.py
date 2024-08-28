@@ -3,7 +3,7 @@ from collections import defaultdict
 import os
 import json
 import logging
-from quart import Quart, request, jsonify, send_file, send_from_directory
+from quart import Quart, request, jsonify, send_file, Response
 import torch
 from io import BytesIO
 import aiohttp
@@ -18,6 +18,7 @@ import functools
 from filelock import FileLock
 import psutil
 import tracemalloc
+import aiofiles
 
 # Import your custom modules
 from .common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset, SOT_PRIVATE_PORT
@@ -578,11 +579,27 @@ def create_app(public_keys_file):
     @app.route('/data/state/<path:filename>', methods=['GET'])
     async def get_data_file(filename):
         logging.info(f"Accessing file: {filename}")
+        file_path = os.path.join(state_dir, filename)
+        
+        if not os.path.exists(file_path):
+            logging.error(f"File not found: {file_path}")
+            return jsonify({'error': 'File not found'}), 404
+
         try:
-            return await send_from_directory(state_dir, filename)
+            # Using aiofiles for async file handling
+            async with aiofiles.open(file_path, mode='rb') as f:
+                data = await f.read()
+            
+            headers = {
+                'Content-Disposition': f'attachment; filename={filename}',
+                'Content-Length': str(len(data))
+            }
+            response = Response(data, headers=headers, mimetype='application/octet-stream')
+            return response
+
         except Exception as e:
             logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
-            return jsonify({'error': 'File not found'}), 404
+            return jsonify({'error': 'File not found or could not be read'}), 404
 
     @app.route('/upload_tensor', methods=['POST'])
     async def upload_tensor():
