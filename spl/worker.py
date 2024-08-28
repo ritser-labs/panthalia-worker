@@ -403,36 +403,69 @@ async def report_sync_status():
 
 async def initialize_tensor(tensor_name, sync_version_number):
     global latest_model
+    logging.debug(f"Starting initialization for tensor: {tensor_name} with sync_version_number: {sync_version_number}")
+    
+    # Start measuring time
+    init_start_time = time.time()
+
     if latest_block_timestamps[tensor_name] == sync_version_number:
+        logging.debug(f"Tensor {tensor_name} already initialized to version {sync_version_number}. Skipping initialization.")
         return latest_model
+
     try:
         url = f"{args.sot_url}/latest_state"
-        logging.info(f"Loading tensor {tensor_name} from {url}")
+        logging.debug(f"Requesting tensor {tensor_name} from URL: {url}")
+
+        # Start measuring the time to fetch the tensor
+        fetch_start_time = time.time()
+
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params={'tensor_name': tensor_name, 'version_number': sync_version_number}) as response:
                 response.raise_for_status()  # Raise an error for bad status codes
 
+                tensor_fetch_time = time.time()
+                logging.debug(f"Fetched tensor {tensor_name} from {url}. Fetch duration: {tensor_fetch_time - fetch_start_time:.2f} seconds")
+
+                # Measure time to load tensor
+                tensor_load_start_time = time.time()
                 tensor = torch.load(BytesIO(await response.read()))
-                logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}")
+                tensor_load_end_time = time.time()
+                logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}. Load duration: {tensor_load_end_time - tensor_load_start_time:.2f} seconds")
 
                 logging.info(f"Successfully initialized tensor: {tensor_name}")
 
-                first_initialization = latest_model is None
+                # Track model initialization time
+                model_init_start_time = time.time()
 
+                first_initialization = latest_model is None
                 model = model_adapter.tensor_to_model(tensor.detach(), latest_model)
                 model.train()
+
+                model_init_end_time = time.time()
+                logging.debug(f"Model initialized for tensor: {tensor_name}. Initialization duration: {model_init_end_time - model_init_start_time:.2f} seconds")
+
+                # Track compilation time if needed
                 if args.torch_compile and first_initialization:
-                    # Compile the model after loading state_dict
+                    compile_start_time = time.time()
                     model = model_adapter.compile_model(model)
-                    logging.info("Model model compiled and warmed up")
+                    compile_end_time = time.time()
+                    logging.info(f"Model compiled and warmed up. Compilation duration: {compile_end_time - compile_start_time:.2f} seconds")
+
+                # Update the global latest model and timestamp
                 if latest_block_timestamps[tensor_name] == 0 or latest_block_timestamps[tensor_name] < sync_version_number:
                     latest_model = model
                     latest_block_timestamps[tensor_name] = sync_version_number
+                
+                # End measuring time for initialize_tensor
+                init_end_time = time.time()
+                logging.debug(f"Completed initialization for tensor: {tensor_name}. Total duration: {init_end_time - init_start_time:.2f} seconds")
+
                 return model
 
     except aiohttp.ClientError as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
         raise
+
 
 def get_relevant_tensor_for_task(task_type):
     return TENSOR_NAME
