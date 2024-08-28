@@ -44,24 +44,33 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(mes
 ])
 logging.getLogger().setLevel(logging.DEBUG)
 
-tracemalloc.start()  # Start tracing memory allocations
+# Add a global variable to control memory logging
+MEMORY_LOGGING_ENABLED = False
 
 def log_memory_usage(note=''):
-    """Log the current memory usage of the process."""
-    process = psutil.Process(os.getpid())
-    mem_info = process.memory_info()
-    logging.debug(f"Memory usage ({note}): RSS={mem_info.rss / 1024 ** 2:.2f} MB, VMS={mem_info.vms / 1024 ** 2:.2f} MB")
+    """Log the current memory usage of the process if enabled."""
+    if MEMORY_LOGGING_ENABLED:
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        logging.debug(f"Memory usage ({note}): RSS={mem_info.rss / 1024 ** 2:.2f} MB, VMS={mem_info.vms / 1024 ** 2:.2f} MB")
 
 def log_memory_diff(snapshot1, snapshot2, note=''):
-    """Log the difference in memory usage between two snapshots."""
-    top_stats = snapshot2.compare_to(snapshot1, 'lineno')
+    """Log the difference in memory usage between two snapshots if enabled."""
+    if MEMORY_LOGGING_ENABLED:
+        top_stats = snapshot2.compare_to(snapshot1, 'lineno')
 
-    logging.debug(f"Memory usage differences ({note}):")
-    for stat in top_stats[:10]:  # Log top 10 memory differences
-        logging.debug(stat)
+        logging.debug(f"Memory usage differences ({note}):")
+        for stat in top_stats[:10]:  # Log top 10 memory differences
+            logging.debug(stat)
 
-def create_app(public_keys_file):
+def create_app(public_keys_file, enable_memory_logging=False):
     """Create and configure the app."""
+    global MEMORY_LOGGING_ENABLED
+    MEMORY_LOGGING_ENABLED = enable_memory_logging
+
+    if MEMORY_LOGGING_ENABLED:
+        tracemalloc.start()  # Start tracing memory allocations
+
     app = Quart(__name__)
     
     app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 * 1024  # 100 GB
@@ -105,7 +114,7 @@ def create_app(public_keys_file):
     async def initialize_tensor(name, sync_version_number=None, zero_init=False):
         log_memory_usage('Before initializing tensor')
         
-        snapshot_before = tracemalloc.take_snapshot()  # Take snapshot before the operation
+        snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Take snapshot before the operation
         
         block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
         last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
@@ -129,9 +138,9 @@ def create_app(public_keys_file):
         last_future_version_number[name] = sync_version_number
         save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
 
-        snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
-        
-        log_memory_diff(snapshot_before, snapshot_after, note='After initializing tensor')  # Log memory differences
+        if MEMORY_LOGGING_ENABLED:
+            snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
+            log_memory_diff(snapshot_before, snapshot_after, note='After initializing tensor')  # Log memory differences
 
         log_memory_usage('After initializing tensor')
 
@@ -146,7 +155,7 @@ def create_app(public_keys_file):
         nonlocal preloaded_batch
         log_memory_usage('Before preloading batch')
         
-        snapshot_before = tracemalloc.take_snapshot()  # Snapshot before loading batch
+        snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Snapshot before loading batch
 
         batch = []
         targets = []
@@ -177,9 +186,9 @@ def create_app(public_keys_file):
                 preloaded_batch = (batch_filename, targets_filename)
                 preloaded_batch_condition.notify_all()
 
-        snapshot_after = tracemalloc.take_snapshot()  # Snapshot after loading batch
-        
-        log_memory_diff(snapshot_before, snapshot_after, note='After preloading batch')  # Log memory differences
+        if MEMORY_LOGGING_ENABLED:
+            snapshot_after = tracemalloc.take_snapshot()  # Snapshot after loading batch
+            log_memory_diff(snapshot_before, snapshot_after, note='After preloading batch')  # Log memory differences
 
         log_memory_usage('After preloading batch')
         return batch_filename, targets_filename
@@ -210,13 +219,14 @@ def create_app(public_keys_file):
 
     def verify_signature(message, signature):
         nonlocal master_public_keys
-        snapshot_before = tracemalloc.take_snapshot()  # Take snapshot before the operation
+        snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Take snapshot before the operation
         
         message = encode_defunct(text=message)
         recovered_address = Account.recover_message(message, signature=signature)
         
-        snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
-        log_memory_diff(snapshot_before, snapshot_after, note='After verifying signature')  # Log memory differences
+        if MEMORY_LOGGING_ENABLED:
+            snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
+            log_memory_diff(snapshot_before, snapshot_after, note='After verifying signature')  # Log memory differences
         
         logging.debug(f"Recovered address: {recovered_address}, Expected addresses: {master_public_keys}")
         return recovered_address.lower() in [key.lower() for key in master_public_keys]
@@ -682,11 +692,12 @@ if __name__ == "__main__":
     def main():
         parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
         parser.add_argument('--public_keys_file', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
+        parser.add_argument('--enable_memory_logging', action='store_true', help="Enable memory logging")
 
         args = parser.parse_args()
 
-        # Create the app without awaiting
-        app = create_app(args.public_keys_file)
+        # Create the app with the memory logging flag
+        app = create_app(args.public_keys_file, enable_memory_logging=args.enable_memory_logging)
 
         logging.info("Starting SOT service...")
 
