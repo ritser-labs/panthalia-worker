@@ -59,7 +59,7 @@ def log_memory_diff(snapshot1, snapshot2, note=''):
     for stat in top_stats[:10]:  # Log top 10 memory differences
         logging.debug(stat)
 
-async def create_app(public_keys_file):
+def create_app(public_keys_file):
     """Create and configure the app."""
     app = Quart(__name__)
     
@@ -648,7 +648,11 @@ async def create_app(public_keys_file):
         loss = latest_loss.get('value')
         return jsonify({'loss': loss}), 200
 
-    await initialize_service()
+    def initialize():
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(initialize_service())
+
+    initialize()
     return app
 
 if __name__ == "__main__":
@@ -656,18 +660,21 @@ if __name__ == "__main__":
     from hypercorn.asyncio import serve
     from hypercorn.config import Config
 
-    async def main():
+    def main():
         parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
         parser.add_argument('--public_keys_file', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
 
         args = parser.parse_args()
 
-        app = await create_app(args.public_keys_file)
+        # Create the app without awaiting
+        app = create_app(args.public_keys_file)
 
         logging.info("Starting SOT service...")
 
         config = Config()
         config.bind = [f'0.0.0.0:{SOT_PRIVATE_PORT}']
-        await serve(app, config)
+        
+        # Correctly pass the app callable to serve
+        asyncio.run(serve(app, config))
 
-    asyncio.run(main())
+    main()
