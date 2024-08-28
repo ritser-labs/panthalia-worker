@@ -10,7 +10,7 @@ if [ -z "$GITHUB_TOKEN" ]; then
 fi
 
 # Set the desired branch
-BRANCH_NAME="runpod"  # Replace with your branch name
+BRANCH_NAME="main"  # Replace with your branch name
 
 # Clone the repository from GitHub
 REPO_URL="https://github.com/ritser-labs/magnum.git"
