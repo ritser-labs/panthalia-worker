@@ -644,7 +644,9 @@ def create_app(public_keys_file):
 
     @app.route('/get_loss', methods=['GET'])
     async def get_loss():
+        logging.info("Accessing /get_loss endpoint")
         latest_loss = load_json(os.path.join(state_dir, 'latest_loss.json'), {'value': None}, block_timestamps_file_lock)
+        logging.info(f"Retrieved loss: {latest_loss.get('value')}")
         loss = latest_loss.get('value')
         return jsonify({'loss': loss}), 200
 
