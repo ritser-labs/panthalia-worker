@@ -5,6 +5,9 @@ from torch.utils.data import IterableDataset
 from datasets import load_dataset
 from .model_config import BaseModelConfig, TransformerModelConfig
 
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+datasets_dir = os.path.join(parent_dir, 'datasets')
+
 class LanguageDataLoader(IterableDataset):
     def __init__(self, model_config: BaseModelConfig, buffer_size: int):
         self.model_config = model_config
@@ -81,7 +84,7 @@ class WikipediaDataLoader(LanguageDataLoader):
 
 
 class ShakespeareDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size, file_path=os.path.join('datasets', 'shakespeare.txt')):
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, file_path=os.path.join(datasets_dir, 'shakespeare.txt')):
         super().__init__(model_config, buffer_size)
         self.file_path = file_path
         self.lines = self.load_lines()
