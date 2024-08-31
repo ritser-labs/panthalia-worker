@@ -1,15 +1,11 @@
 import torch
 import os
-from .tokenizer import Tokenizer
-from .adapters.llama3 import ModelArgs, Transformer
 import json
 import logging
 import time
 from io import BytesIO
 import requests
-from web3 import AsyncWeb3
 from enum import Enum
-import web3 as Web3Module
 from collections import namedtuple
 from web3.datastructures import AttributeDict
 from web3.exceptions import ContractLogicError
@@ -18,40 +14,18 @@ import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
-from .adapters.dataloader import WikipediaDataLoader, ShakespeareDataLoader, LowercaseAlphabetDataLoader
-from .adapters.model_config import TransformerModelConfig
-from .adapters.model_adapter import LlamaModelAdapter
+from .plugin import model_config, model_adapter, dataset # expose model_config, model_adapter, dataset
 
 SOT_PRIVATE_PORT = 5001
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# IMPORTANT: if you change tokenizer, dont forget to comment out the code in tokenizer.py
-# that ignores non ascii characters
-# and change pad_id
-tokenizer_path = os.path.join(current_dir, 'tokenizers', 'char.tiktoken')
-
-tokenizer = Tokenizer(tokenizer_path)
-
-model_args = ModelArgs(
-    vocab_size=tokenizer.get_vocab_size(),
-    dim=384,
-    n_layers=6,
-    n_heads=6,
-    multiple_of=256,
-    norm_eps=1e-5,
-    rope_theta=500000,
-    max_batch_size=32,
-    max_seq_len=256
-)
 
 NUM_MICROBATCHES = 32
 
 EXAMPLES_PER_MICROBATCH = 32
 
 batch_size = NUM_MICROBATCHES * EXAMPLES_PER_MICROBATCH
-
-BUFFER_SIZE = 100000  # Size of the buffer to shuffle data
 
 ACCUMULATION_STEPS = NUM_MICROBATCHES
 
@@ -64,12 +38,6 @@ MIN_REMAINING_TIME_SECONDS = 3
 SLEEP_TIME = 1
 
 TENSOR_NAME = 'model'
-
-model_config = TransformerModelConfig(tokenizer, model_args)
-
-dataset = ShakespeareDataLoader(model_config, buffer_size=BUFFER_SIZE)
-
-model_adapter = LlamaModelAdapter(model_config)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 abi_dir = os.path.join(current_dir, 'abis')

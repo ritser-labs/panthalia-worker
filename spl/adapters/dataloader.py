@@ -9,16 +9,16 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
 
 class LanguageDataLoader(IterableDataset):
-    def __init__(self, model_config: BaseModelConfig, buffer_size: int):
+    def __init__(self, model_config: BaseModelConfig, buffer_size: int, max_seq_len: int):
+        self.max_seq_len = max_seq_len
         self.model_config = model_config
         self.buffer_size = buffer_size
         self.buffer = []
 
     def __iter__(self):
-        max_seq_len = self.model_config.model_args.max_seq_len
         try:
             while True:
-                self.buffer = self.fill_buffer_with_token_pairs(self._text_generator(), max_seq_len)
+                self.buffer = self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
                 while self.buffer:
                     yield self.buffer.pop()
         except StopIteration:
@@ -73,8 +73,8 @@ class LanguageDataLoader(IterableDataset):
 
 
 class WikipediaDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size):
-        super().__init__(model_config, buffer_size)
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len):
+        super().__init__(model_config, buffer_size, max_seq_len)
         self.dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
         self.dataset_iter = iter(self.dataset)
 
@@ -84,8 +84,8 @@ class WikipediaDataLoader(LanguageDataLoader):
 
 
 class ShakespeareDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size, file_path=os.path.join(datasets_dir, 'shakespeare.txt')):
-        super().__init__(model_config, buffer_size)
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, file_path=os.path.join(datasets_dir, 'shakespeare.txt')):
+        super().__init__(model_config, buffer_size, max_seq_len)
         self.file_path = file_path
         self.lines = self.load_lines()
 
@@ -99,8 +99,8 @@ class ShakespeareDataLoader(LanguageDataLoader):
 
 
 class LowercaseAlphabetDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size: int):
-        super().__init__(model_config, buffer_size)
+    def __init__(self, model_config: TransformerModelConfig, buffer_size: int, max_seq_len: int):
+        super().__init__(model_config, buffer_size, max_seq_len)
         self.alphabet = list('abcdefghijklmnopqrstuvwxyz')
 
     def _text_generator(self):
@@ -110,8 +110,8 @@ class LowercaseAlphabetDataLoader(LanguageDataLoader):
             yield ''.join(self.alphabet[start_index:end_index])
 
 class FineWebDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size):
-        super().__init__(model_config, buffer_size)
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len):
+        super().__init__(model_config, buffer_size, max_seq_len)
         self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True)
         self.dataset_iter = iter(self.dataset)
 

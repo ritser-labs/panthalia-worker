@@ -53,6 +53,25 @@ class StandardModelAdapter(ModelAdapter):
     def postprocess_model_after_batch(self, model):
         pass
 
+    def get_forward_args(self):
+        pass
+
+    def get_forward_kwargs(self):
+        pass
+    
+    def forward_and_loss(self, model, inputs, targets):
+        forward_args = self.get_forward_args()
+        forward_kwargs = self.get_forward_kwargs()
+        if forward_args is None:
+            forward_args = []
+        if forward_kwargs is None:
+            forward_kwargs = {}
+    
+        output = model(inputs, *forward_args, **forward_kwargs)
+        reshaped_logits, reshaped_targets = self.preprocess_for_loss(output, targets)
+        loss = self.loss_fn(reshaped_logits, reshaped_targets)
+        return loss
+
     def train_task(self, model, inputs, targets, accumulation_steps):
         logging.info("Starting train_task")
 
@@ -70,6 +89,7 @@ class StandardModelAdapter(ModelAdapter):
         total_loss = 0.0
 
         logging.info(f"Accumulation steps: {accumulation_steps}, Microbatch size: {microbatch_size}")
+        
 
         for i in range(accumulation_steps):
             batch_start_time = time.time()
@@ -77,14 +97,8 @@ class StandardModelAdapter(ModelAdapter):
                 microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size].detach()
                 microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size].detach()
 
-                start_pos = 0
                 # Forward pass
-                output = model(microbatch_inputs, start_pos=start_pos)
-                
-                reshaped_logits, reshaped_targets = self.preprocess_for_loss(output, microbatch_targets)
-
-                # Compute loss
-                loss = self.loss_fn(reshaped_logits, reshaped_targets)
+                loss = self.forward_and_loss(model, microbatch_inputs, microbatch_targets)
                 total_loss += loss.item()
 
                 logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
@@ -103,7 +117,7 @@ class StandardModelAdapter(ModelAdapter):
                 self.postprocess_model_after_batch(model)
 
                 # Delete intermediate variables
-                del output, reshaped_logits, reshaped_targets, loss, microbatch_inputs, microbatch_targets
+                del loss, microbatch_inputs, microbatch_targets
                 torch.cuda.empty_cache()
 
                 logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Backward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
@@ -218,4 +232,9 @@ class TransformerModelAdapter(StandardModelAdapter):
         ).to(device), 0)
 
 class LlamaModelAdapter(TransformerModelAdapter, FairscaleModelAdapter):
-    pass
+    def get_forward_kwargs(self):
+        return {'start_pos': 0}
+
+class NanoGPTModelAdapter(TransformerModelAdapter):
+    def forward_and_loss(self, model, inputs, targets):
+        return model.forward(inputs, targets)[1]

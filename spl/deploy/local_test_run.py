@@ -7,7 +7,7 @@ import requests
 import threading
 import curses
 from flask import Flask, jsonify, send_from_directory
-from ..common import model_args, load_abi, async_transact_with_contract_function, wait_for_sot
+from ..common import load_abi, async_transact_with_contract_function, wait_for_sot
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
