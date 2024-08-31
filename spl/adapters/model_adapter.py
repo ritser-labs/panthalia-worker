@@ -37,7 +37,7 @@ class ModelAdapter(ABC):
     def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
         pass
     
-    def initialize_environment(self):
+    def initialize_environment(self, *args, **kwargs):
         pass
 
 class StandardModelAdapter(ModelAdapter):
