@@ -486,7 +486,6 @@ async def main():
         # Set environment variables for deployment
         os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
         os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
-        os.environ['LAYERS'] = str(model_args.n_layers)
 
         # Run Deploy.s.sol script from the correct path
         deploy_command = [
