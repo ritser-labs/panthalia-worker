@@ -67,12 +67,17 @@ TENSOR_NAME = 'model'
 
 model_config = TransformerModelConfig(tokenizer, model_args)
 
-dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE)
+dataset = ShakespeareDataLoader(model_config, buffer_size=BUFFER_SIZE)
 
 model_adapter = LlamaModelAdapter(model_config)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 abi_dir = os.path.join(current_dir, 'abis')
+
+# Global variables for transaction management by private key
+pending_transactions = {}
+transaction_events = {}
+
 
 def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
     """Wait for the SOT service to be available."""
@@ -235,62 +240,84 @@ async def get_debug_trace(web3, tx_hash):
         return {}
 
 async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, attempts=5):
-    account = web3.eth.account.from_key(private_key)
-    gas_price = await web3.eth.gas_price
+    global pending_transactions
+    global transaction_events
 
-    function = getattr(contract.functions, function_name)(*args)
+    # Initialize the transaction state for the given private key if not already done
+    if private_key not in pending_transactions:
+        pending_transactions[private_key] = False
+        transaction_events[private_key] = asyncio.Event()
 
-    for attempt in range(attempts):  # Retry up to 5 times
-        tx_hash = None
-        try:
-            nonce = await web3.eth.get_transaction_count(account.address)
-            # Dynamically estimate gas
-            estimated_gas = await function.estimate_gas({
-                'from': account.address,
-                'value': value
-            })
+    # Wait if there's a pending transaction for this private key
+    while pending_transactions[private_key]:
+        await transaction_events[private_key].wait()
 
-            tx_params = {
-                'chainId': await web3.eth.chain_id,
-                'gas': estimated_gas,
-                'gasPrice': gas_price,
-                'nonce': nonce,
-                'value': value
-            }
+    # Set the transaction as pending for this private key
+    pending_transactions[private_key] = True
+    transaction_events[private_key].clear()  # Clear event to wait for the next transaction completion
 
-            tx = await function.build_transaction(tx_params)
-            signed_tx = account.sign_transaction(tx)
-            tx_hash = await web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-            receipt = await web3.eth.wait_for_transaction_receipt(tx_hash)
+    try:
+        account = web3.eth.account.from_key(private_key)
+        gas_price = await web3.eth.gas_price
 
-            if receipt['status'] == 0:
-                error_message = await decode_revert_reason(web3, await web3.eth.call({
-                    'to': tx['to'],
-                    'data': tx.get('input', b'')
-                }, receipt.blockNumber))
-                logging.error(f"Transaction failed: {error_message}")
-                raise ContractLogicError(f"Transaction failed: {error_message}")
-            else:
-                return receipt
-        except ContractLogicError as cle:
-            # Extract revert reason from ContractLogicError
+        function = getattr(contract.functions, function_name)(*args)
+
+        for attempt in range(attempts):  # Retry up to 5 times
+            tx_hash = None
             try:
-                error_data = cle.args[0]  # Directly use the first argument
-                if isinstance(error_data, dict) and 'data' in error_data:
-                    error_data = error_data['data']
-                decoded_error = await decode_revert_reason(web3, error_data)
-                logging.error(f"Contract logic error on attempt {attempt + 1} - {function_name}: {decoded_error}")
-            except Exception as e:
-                logging.error(f"Failed to decode contract logic error - {function_name}: {cle}, original error: {e}")
-            if attempt == attempts - 1:
-                raise
-        except Exception as e:
-            logging.error(f"Error on attempt {attempt + 1} - {function_name}: {e}")
-            if attempt == attempts - 1:
-                raise
+                nonce = await web3.eth.get_transaction_count(account.address)
+                # Dynamically estimate gas
+                estimated_gas = await function.estimate_gas({
+                    'from': account.address,
+                    'value': value
+                })
 
-        # Wait for the next block before retrying
-        await wait_for_block(web3)
+                tx_params = {
+                    'chainId': await web3.eth.chain_id,
+                    'gas': estimated_gas,
+                    'gasPrice': gas_price,
+                    'nonce': nonce,
+                    'value': value
+                }
+
+                tx = await function.build_transaction(tx_params)
+                signed_tx = account.sign_transaction(tx)
+                tx_hash = await web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+                receipt = await web3.eth.wait_for_transaction_receipt(tx_hash)
+
+                if receipt['status'] == 0:
+                    error_message = await decode_revert_reason(web3, await web3.eth.call({
+                        'to': tx['to'],
+                        'data': tx.get('input', b'')
+                    }, receipt.blockNumber))
+                    logging.error(f"Transaction failed: {error_message}")
+                    raise ContractLogicError(f"Transaction failed: {error_message}")
+                else:
+                    return receipt
+            except ContractLogicError as cle:
+                # Extract revert reason from ContractLogicError
+                try:
+                    error_data = cle.args[0]  # Directly use the first argument
+                    if isinstance(error_data, dict) and 'data' in error_data:
+                        error_data = error_data['data']
+                    decoded_error = await decode_revert_reason(web3, error_data)
+                    logging.error(f"Contract logic error on attempt {attempt + 1} - {function_name}: {decoded_error}")
+                except Exception as e:
+                    logging.error(f"Failed to decode contract logic error - {function_name}: {cle}, original error: {e}")
+                if attempt == attempts - 1:
+                    raise
+            except Exception as e:
+                logging.error(f"Error on attempt {attempt + 1} - {function_name}: {e}")
+                if attempt == attempts - 1:
+                    raise
+
+            # Wait for the next block before retrying
+            await wait_for_block(web3)
+
+    finally:
+        # Reset the pending transaction state for this private key
+        pending_transactions[private_key] = False
+        transaction_events[private_key].set()  # Notify waiting coroutines that the transaction is done
 
 async def wait_for_block(web3):
     block_filter = await web3.eth.filter('latest')
