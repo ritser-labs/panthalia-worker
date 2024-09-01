@@ -27,7 +27,8 @@ model_args = GPTConfig(
     n_head=6,
     n_embd=384,
     dropout=0.2,
-    bias=True
+    bias=True,
+    pad_token_id=tokenizer.pad_id
 )
 
 model_config = NanoGPTConfig(tokenizer, model_args)

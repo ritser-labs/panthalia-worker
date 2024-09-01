@@ -59,15 +59,17 @@ class StandardModelAdapter(ModelAdapter):
     def get_forward_kwargs(self):
         pass
     
-    def forward_and_loss(self, model, inputs, targets):
+    def forward(self, model, inputs):
         forward_args = self.get_forward_args()
         forward_kwargs = self.get_forward_kwargs()
         if forward_args is None:
             forward_args = []
         if forward_kwargs is None:
             forward_kwargs = {}
+        return model(inputs, *forward_args, **forward_kwargs)
     
-        output = model(inputs, *forward_args, **forward_kwargs)
+    def forward_and_loss(self, model, inputs, targets):
+        output = self.forward(model, inputs)
         reshaped_logits, reshaped_targets = self.preprocess_for_loss(output, targets)
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss
@@ -230,6 +232,9 @@ class TransformerModelAdapter(StandardModelAdapter):
             self.model_config.model_args.vocab_size,
             (1, self.model_config.model_args.max_seq_len)
         ).to(device), 0)
+    
+    def get_top_token(self, logits):
+        return torch.argmax(logits, dim=-1).cpu().numpy().tolist()[0]
 
 class LlamaModelAdapter(TransformerModelAdapter, FairscaleModelAdapter):
     def get_forward_kwargs(self):
@@ -238,3 +243,6 @@ class LlamaModelAdapter(TransformerModelAdapter, FairscaleModelAdapter):
 class NanoGPTModelAdapter(TransformerModelAdapter):
     def forward_and_loss(self, model, inputs, targets):
         return model.forward(inputs, targets)[1]
+    
+    def forward(self, model, inputs):
+        return model.forward(inputs)[0]

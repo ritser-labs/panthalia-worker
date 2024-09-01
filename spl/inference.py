@@ -1,20 +1,19 @@
-import subprocess
-import requests
 import os
-import time
 import torch
 from .adapters.llama3 import ModelArgs, Transformer
-from common import tokenizer, wait_for_sot, model_adapter
-from device import device
-from io import BytesIO
+from .common import tokenizer, wait_for_sot, model_adapter
+from .device import device
 
 # The URL where the SOT service is running
 SOT_URL = 'http://localhost:5001'
 
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+print(f"Vocab size: {tokenizer.get_vocab_size()}")
 
 # Load the model from the SOT service
 def load_model():
-    flattened_params = torch.load(os.path.join('data', 'state', 'model.pt'), map_location=device)
+    flattened_params = torch.load(os.path.join(script_dir, 'data', 'state', 'model.pt'), map_location=device)
     model = model_adapter.tensor_to_model(flattened_params)
     model.train()
     return model
@@ -33,9 +32,11 @@ def make_prediction(text):
     )
     input_tensor = torch.tensor([tokens], dtype=torch.long).to(device)
     with torch.inference_mode():
-        outputs = model(input_tensor, start_pos=0)
-    predictions = torch.argmax(outputs, dim=-1).cpu().numpy().tolist()[0]
-    decoded_output = tokenizer.decode(predictions)
+        outputs = model_adapter.forward(model, input_tensor)
+    print(f'Shape of outputs: {outputs.shape}')
+    top_token = model_adapter.get_top_token(outputs)
+    print(f'Top token: {top_token}')
+    decoded_output = tokenizer.decode(top_token)
     return decoded_output
 
 def main():

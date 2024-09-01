@@ -14,7 +14,8 @@ import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
-from .plugin import model_config, model_adapter, dataset # expose model_config, model_adapter, dataset
+from .plugin import model_config, model_adapter, dataset, tokenizer # exposed
+import threading
 
 SOT_PRIVATE_PORT = 5001
 
@@ -43,9 +44,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 abi_dir = os.path.join(current_dir, 'abis')
 
 # Global variables for transaction management by private key
+transaction_conditions = {}
 pending_transactions = {}
-transaction_events = {}
-
 
 def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
     """Wait for the SOT service to be available."""
@@ -209,20 +209,22 @@ async def get_debug_trace(web3, tx_hash):
 
 async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, attempts=5):
     global pending_transactions
-    global transaction_events
+    global transaction_conditions
 
     # Initialize the transaction state for the given private key if not already done
     if private_key not in pending_transactions:
         pending_transactions[private_key] = False
-        transaction_events[private_key] = asyncio.Event()
+        transaction_conditions[private_key] = threading.Condition()
 
-    # Wait if there's a pending transaction for this private key
-    while pending_transactions[private_key]:
-        await transaction_events[private_key].wait()
+    condition = transaction_conditions[private_key]
 
-    # Set the transaction as pending for this private key
-    pending_transactions[private_key] = True
-    transaction_events[private_key].clear()  # Clear event to wait for the next transaction completion
+    # Use the condition to wait for the transaction to complete
+    with condition:
+        while pending_transactions[private_key]:
+            condition.wait()
+
+        # Set the transaction as pending for this private key
+        pending_transactions[private_key] = True
 
     try:
         account = web3.eth.account.from_key(private_key)
@@ -284,8 +286,10 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
 
     finally:
         # Reset the pending transaction state for this private key
-        pending_transactions[private_key] = False
-        transaction_events[private_key].set()  # Notify waiting coroutines that the transaction is done
+        with condition:
+            pending_transactions[private_key] = False
+            condition.notify_all()  # Notify any waiting threads that the transaction is done
+
 
 async def wait_for_block(web3):
     block_filter = await web3.eth.filter('latest')
