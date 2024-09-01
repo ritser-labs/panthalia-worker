@@ -14,21 +14,20 @@ import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
-from .plugin import model_config, model_adapter, dataset, tokenizer # exposed
+from .plugin import exported_plugin
 import threading
+
+model_config = exported_plugin.model_config
+model_adapter = exported_plugin.model_adapter
+dataset = exported_plugin.dataset
+tokenizer = exported_plugin.tokenizer
+get_learning_hyperparameters = exported_plugin.get_learning_hyperparameters
+batch_size = exported_plugin.batch_size
 
 SOT_PRIVATE_PORT = 5001
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
-NUM_MICROBATCHES = 32
-
-EXAMPLES_PER_MICROBATCH = 32
-
-batch_size = NUM_MICROBATCHES * EXAMPLES_PER_MICROBATCH
-
-ACCUMULATION_STEPS = NUM_MICROBATCHES
 
 TENSOR_VERSION_INTERVAL = 1
 
@@ -399,41 +398,6 @@ async def deposit_stake_without_approval(web3, pool_contract, private_key, subne
                 if attempt == max_retries - 1:
                     raise  # Rethrow the exception after the last attempt
                 await asyncio.sleep(SLEEP_TIME)  # Wait before retrying
-
-def get_learning_hyperparameters(current_iteration):
-    """
-    Calculate the learning rate using cosine annealing with warm restarts.
-
-    Args:
-        current_iteration (int): Current iteration number.
-
-    Returns:
-        dict: A dictionary containing the learning rate and Adam optimizer parameters.
-    """
-    T_0 = 5000 / NUM_MICROBATCHES  # Initial number of iterations for the first cycle
-    T_mult = 2  # Factor to increase the cycle length after each restart
-    eta_max = 0.001 * NUM_MICROBATCHES  # Initial learning rate (maximum)
-    eta_min = 0.00001 * NUM_MICROBATCHES  # Minimum learning rate
-
-    # Determine the current cycle length
-    cycle_length = T_0
-    t = current_iteration
-    while current_iteration >= cycle_length:
-        current_iteration -= cycle_length
-        cycle_length *= T_mult
-
-    # Calculate the learning rate using the cosine annealing formula
-    lr = eta_min + (eta_max - eta_min) * (1 + math.cos(math.pi * current_iteration / cycle_length)) / 2
-
-    return {
-        'learning_rate': lr,
-        'beta1': 0.9,
-        'beta2': 0.999,
-        'epsilon': 1e-8,
-        'weight_decay': 0.01,
-        't': t,  # Add the current iteration as 't'
-        'accumulation_steps': ACCUMULATION_STEPS
-    }
 
 # Global state tracking variable
 current_global_state = None

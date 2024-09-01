@@ -50,8 +50,9 @@ class LanguageDataLoader(IterableDataset):
 
         start_pos = 0
         token_pairs = []
-        while start_pos < len(tokens):
-            seq_len = random.randint(1, min(max_seq_len, len(tokens) - start_pos))
+        while start_pos < len(tokens) - 1:
+            upper_bound = min(len(tokens) - start_pos, max_seq_len)
+            seq_len = random.randint(2, upper_bound)
             substr = tokens[start_pos:start_pos + seq_len]
             inputs = self.truncate_tokens(substr[:-1], max_seq_len, self.model_config.tokenizer.pad_id)
             targets = self.truncate_tokens(substr[1:], max_seq_len, self.model_config.tokenizer.pad_id)
@@ -84,19 +85,38 @@ class WikipediaDataLoader(LanguageDataLoader):
 
 
 class ShakespeareDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, file_path=os.path.join(datasets_dir, 'shakespeare.txt')):
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, file_path=os.path.join(datasets_dir, 'shakespeare.txt'), block_size=124000):
         super().__init__(model_config, buffer_size, max_seq_len)
         self.file_path = file_path
         self.lines = self.load_lines()
+        self.block_size = block_size  # New variable to define block size of lines
 
     def load_lines(self):
         with open(self.file_path, 'r') as f:
             return f.readlines()
 
     def _text_generator(self):
+        num_lines = len(self.lines)
+        start_index = 0
+        
         while True:
-            yield random.choice(self.lines).strip()
+            # Calculate end index for the block
+            end_index = start_index + self.block_size
+            
+            # If the end index exceeds the total number of lines, reset to the beginning
+            if end_index > num_lines:
+                start_index = 0
+                end_index = self.block_size
+            
+            # Yield the block of lines as a single string
+            yield ''.join(self.lines[start_index:end_index]).strip()
 
+            # Move the start index forward for the next block
+            start_index = end_index
+            
+            # If we've reached the end, loop back to the beginning
+            if start_index >= num_lines:
+                start_index = 0
 
 class LowercaseAlphabetDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size: int, max_seq_len: int):

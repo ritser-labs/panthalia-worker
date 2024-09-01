@@ -43,9 +43,11 @@ def train_model(model, train_loader, optimizer, model_adapter, epochs):
             optimizer.step()
 
             total_loss += loss.item()
-            if math.isnan(loss.item()):
+            #if math.isnan(loss.item()):
+            if batch_idx % 100 == 0:
                 print(f'Input: {inputs}')
                 print(f'Target: {targets}')
+                print(f'Loss: {loss.item()}')
         avg_loss = total_loss / (batch_idx + 1)
         print(f"Epoch {epoch + 1}, Average Loss: {avg_loss:.4f}")
 
