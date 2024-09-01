@@ -1,6 +1,7 @@
 import os
 import json
 import random
+import tempfile
 from torch.utils.data import IterableDataset
 from datasets import load_dataset
 from .model_config import BaseModelConfig, TransformerModelConfig
@@ -13,24 +14,24 @@ class LanguageDataLoader(IterableDataset):
         self.max_seq_len = max_seq_len
         self.model_config = model_config
         self.buffer_size = buffer_size
-        self.buffer = []
+        self.buffer_file = tempfile.NamedTemporaryFile(delete=False, mode='w+b')  # Disk-based buffer file
+        self.buffer_file_path = self.buffer_file.name
+        self.buffer_file.close()
+        self.buffer_filled = False
 
     def __iter__(self):
-        try:
-            while True:
-                self.buffer = self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
-                while self.buffer:
-                    yield self.buffer.pop()
-        except StopIteration:
-            while self.buffer:
-                yield self.buffer.pop()
+        if not self.buffer_filled:
+            self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
+        self.buffer_pos = 0
+        self.buffer = open(self.buffer_file_path, 'rb')  # Open file for reading
+        return self
 
     def __next__(self):
-        if not self.buffer:
-            self.buffer = list(self.generate_examples())
-        if not self.buffer:
+        line = self.buffer.readline()
+        if not line:
+            self.buffer.close()
             raise StopIteration
-        return self.buffer.pop(0)
+        return json.loads(line.decode('utf-8'))
 
     def truncate_tokens(self, tokens, max_seq_len, pad_token):
         if len(tokens) < max_seq_len:
@@ -61,12 +62,20 @@ class LanguageDataLoader(IterableDataset):
         return token_pairs
 
     def fill_buffer_with_token_pairs(self, text_generator, max_seq_len):
-        buffer = []
-        while len(buffer) < self.buffer_size:
-            text = next(text_generator)
-            buffer.extend(self.tokenize_and_split(text, max_seq_len))
-        random.shuffle(buffer)
-        return buffer
+        with open(self.buffer_file_path, 'wb') as f:
+            buffer = []
+            for text in text_generator:
+                token_pairs = self.tokenize_and_split(text, max_seq_len)
+                buffer.extend(token_pairs)
+                if len(buffer) >= self.buffer_size:
+                    break
+
+            random.shuffle(buffer)
+
+            for pair in buffer:
+                f.write(json.dumps(pair).encode('utf-8') + b'\n')
+
+        self.buffer_filled = True
 
     def _text_generator(self):
         """Abstract method, should be implemented by subclasses"""
@@ -89,7 +98,7 @@ class ShakespeareDataLoader(LanguageDataLoader):
         super().__init__(model_config, buffer_size, max_seq_len)
         self.file_path = file_path
         self.lines = self.load_lines()
-        self.block_size = block_size  # New variable to define block size of lines
+        self.block_size = block_size
 
     def load_lines(self):
         with open(self.file_path, 'r') as f:
@@ -100,21 +109,14 @@ class ShakespeareDataLoader(LanguageDataLoader):
         start_index = 0
         
         while True:
-            # Calculate end index for the block
             end_index = start_index + self.block_size
-            
-            # If the end index exceeds the total number of lines, reset to the beginning
             if end_index > num_lines:
                 start_index = 0
                 end_index = self.block_size
             
-            # Yield the block of lines as a single string
             yield ''.join(self.lines[start_index:end_index]).strip()
-
-            # Move the start index forward for the next block
             start_index = end_index
             
-            # If we've reached the end, loop back to the beginning
             if start_index >= num_lines:
                 start_index = 0
 
