@@ -128,8 +128,8 @@ class ShakespeareDataLoader(LanguageDataLoader):
 
 class LowercaseAlphabetDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size: int, max_seq_len: int):
-        super().__init__(model_config, buffer_size, max_seq_len)
         self.alphabet = list('abcdefghijklmnopqrstuvwxyz')
+        super().__init__(model_config, buffer_size, max_seq_len)
 
     def _text_generator(self):
         while True:
