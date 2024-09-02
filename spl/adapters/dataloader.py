@@ -180,4 +180,4 @@ class AddNumbersDataLoader(IterableDataset):
         result = num1 + num2
 
         # Return a tuple of input tensor and output tensor
-        return torch.tensor([num1, num2], dtype=torch.float32), torch.tensor(result, dtype=torch.float32)
+        return torch.tensor([num1, num2], dtype=torch.float32), torch.tensor([result], dtype=torch.float32)
