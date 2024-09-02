@@ -18,11 +18,9 @@ class LanguageDataLoader(IterableDataset):
         self.buffer_file = tempfile.NamedTemporaryFile(delete=False, mode='w+b')  # Disk-based buffer file
         self.buffer_file_path = self.buffer_file.name
         self.buffer_file.close()
-        self.buffer_filled = False
+        self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
 
     def __iter__(self):
-        if not self.buffer_filled:
-            self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
         self.buffer_pos = 0
         self.buffer = open(self.buffer_file_path, 'rb')  # Open file for reading
         return self
@@ -30,8 +28,16 @@ class LanguageDataLoader(IterableDataset):
     def __next__(self):
         line = self.buffer.readline()
         if not line:
+            # Buffer exhausted, close and refill
             self.buffer.close()
-            raise StopIteration
+            self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
+            self.buffer = open(self.buffer_file_path, 'rb')  # Reopen the buffer file
+            line = self.buffer.readline()  # Read the next line after refilling
+
+            if not line:
+                self.buffer.close()
+                raise StopIteration
+
         return json.loads(line.decode('utf-8'))
 
     def truncate_tokens(self, tokens, max_seq_len, pad_token):
@@ -76,8 +82,6 @@ class LanguageDataLoader(IterableDataset):
 
             for pair in buffer:
                 f.write(json.dumps(pair).encode('utf-8') + b'\n')
-
-        self.buffer_filled = True
 
     def _text_generator(self):
         """Abstract method, should be implemented by subclasses"""
