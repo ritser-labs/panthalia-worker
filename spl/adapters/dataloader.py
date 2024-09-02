@@ -2,6 +2,7 @@ import os
 import json
 import random
 import tempfile
+import torch
 from torch.utils.data import IterableDataset
 from datasets import load_dataset
 from .model_config import BaseModelConfig, TransformerModelConfig
@@ -141,3 +142,38 @@ class FineWebDataLoader(LanguageDataLoader):
     def _text_generator(self):
         for example in self.dataset_iter:
             yield example['text']
+
+class AddNumbersDataLoader(IterableDataset):
+    def __init__(self, min_value: int = 0, max_value: int = 100):
+        """
+        DataLoader for generating pairs of numbers and their sum indefinitely.
+        
+        Args:
+            min_value (int): Minimum value for the random numbers.
+            max_value (int): Maximum value for the random numbers.
+        """
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def __iter__(self):
+        """
+        Create an iterator that yields pairs of numbers and their sum indefinitely.
+        """
+        return self
+
+    def __next__(self):
+        """
+        Generate the next sample indefinitely.
+        
+        Returns:
+            Tuple: A tuple containing a tensor of two input numbers and a tensor with their sum.
+        """
+        # Generate two random numbers within the specified range
+        num1 = random.randint(self.min_value, self.max_value)
+        num2 = random.randint(self.min_value, self.max_value)
+        
+        # Calculate their sum
+        result = num1 + num2
+
+        # Return a tuple of input tensor and output tensor
+        return torch.tensor([num1, num2], dtype=torch.float32), torch.tensor(result, dtype=torch.float32)

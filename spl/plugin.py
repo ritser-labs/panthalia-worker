@@ -21,7 +21,7 @@ tokenizer_path = os.path.join(current_dir, 'tokenizers', 'char.tiktoken')
 tokenizer = Tokenizer(tokenizer_path)
 
 
-model_args = GPTConfig(
+model_params = GPTConfig(
     block_size=256,
     vocab_size=tokenizer.get_vocab_size(),
     n_layer=6,
@@ -32,9 +32,9 @@ model_args = GPTConfig(
     pad_token_id=tokenizer.pad_id
 )
 
-model_config = NanoGPTConfig(tokenizer, model_args)
+model_config = NanoGPTConfig(tokenizer, model_params)
 
-dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE, max_seq_len=model_args.block_size)
+dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE, max_seq_len=model_params.block_size)
 
 model_adapter = NanoGPTModelAdapter(model_config)
 
@@ -95,5 +95,13 @@ class StandardPlugin:
 NUM_MICROBATCHES = 32
 
 EXAMPLES_PER_MICROBATCH = 32
+
+exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH)
+
+model_config = AdderModelConfig()
+
+dataset = AddNumbersDataLoader()
+
+model_adapter = AdderModelAdapter(model_config)
 
 exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH)

@@ -157,7 +157,7 @@ class StandardModelAdapter(ModelAdapter):
         if existing_model is not None:
             model = existing_model
         else:
-            model = self.model_config.model_class(self.model_config.model_args).to(device)
+            model = self.model_config.create_model().to(device)
         pointer = 0
         total_params = sum(p.numel() for p in model.parameters())
 
@@ -177,7 +177,7 @@ class StandardModelAdapter(ModelAdapter):
         return model
 
     def init_tensor(self, zero_init: bool = False) -> torch.Tensor:
-        module = self.model_config.model_class(self.model_config.model_args)
+        module = self.model_config.create_model().to(device)
         
         if not zero_init:
             # Initialize module parameters with Kaiming (He) initialization for all parameters
@@ -229,12 +229,31 @@ class TransformerModelAdapter(StandardModelAdapter):
     def get_dummy_input(self):
         return (torch.randint(
             0,
-            self.model_config.model_args.vocab_size,
-            (1, self.model_config.model_args.max_seq_len)
+            self.model_config.model_params.vocab_size,
+            (1, self.model_config.model_params.max_seq_len)
         ).to(device), 0)
     
     def get_top_token(self, logits):
         return torch.argmax(logits, dim=-1).cpu().numpy().tolist()[0]
+
+class AdderModelAdapter(StandardModelAdapter):
+    def loss_fn(self, logits, targets) -> torch.Tensor:
+        return F.mse_loss(logits, targets)
+
+    def preprocess_for_loss(self, logits, targets):
+        reshaped_logits = logits.view(-1)
+        reshaped_targets = targets.view(-1)
+        return reshaped_logits, reshaped_targets
+    
+    def postprocess_model_after_batch(self, model):
+        pass
+    
+    def get_dummy_input(self):
+        # The adder model expects input with a batch dimension.
+        # We'll create a batch of size 1 with two numbers.
+        batch_size = 1
+        input_tensor = torch.tensor([[2.0, 3.0]]).to(device)  # Batch size of 1, two numbers per input
+        return input_tensor
 
 class LlamaModelAdapter(TransformerModelAdapter, FairscaleModelAdapter):
     def get_forward_kwargs(self):

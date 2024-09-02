@@ -6,7 +6,7 @@ import argparse
 import requests
 import threading
 import curses
-from ..common import model_args, load_abi, async_transact_with_contract_function, wait_for_sot, SOT_PRIVATE_PORT
+from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, SOT_PRIVATE_PORT
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 from .cloud_adapters.runpod import launch_instance_and_record_logs, terminate_all_pods, get_public_ip_and_port, INPUT_JSON_PATH
