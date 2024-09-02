@@ -1,7 +1,6 @@
 import os
 import torch
-from .adapters.llama3 import ModelArgs, Transformer
-from .common import tokenizer, wait_for_sot, model_adapter
+from .common import tokenizer, model_adapter
 from .device import device
 
 # The URL where the SOT service is running
