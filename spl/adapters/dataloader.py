@@ -53,7 +53,8 @@ class LanguageDataLoader(IterableDataset):
         token_pairs = []
         while start_pos < len(tokens) - 1:
             upper_bound = min(len(tokens) - start_pos, max_seq_len)
-            seq_len = random.randint(2, upper_bound)
+            #seq_len = random.randint(2, upper_bound)
+            seq_len = upper_bound
             substr = tokens[start_pos:start_pos + seq_len]
             inputs = self.truncate_tokens(substr[:-1], max_seq_len, self.model_config.tokenizer.pad_id)
             targets = self.truncate_tokens(substr[1:], max_seq_len, self.model_config.tokenizer.pad_id)
