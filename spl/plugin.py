@@ -34,7 +34,7 @@ model_args = GPTConfig(
 
 model_config = NanoGPTConfig(tokenizer, model_args)
 
-dataset = ShakespeareDataLoader(model_config, buffer_size=BUFFER_SIZE, max_seq_len=model_args.block_size)
+dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE, max_seq_len=model_args.block_size)
 
 model_adapter = NanoGPTModelAdapter(model_config)
 

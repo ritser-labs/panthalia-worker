@@ -480,12 +480,12 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 current_version_number,
                 tensor_name,
                 averaged_grads,
-                data.get('learning_rate', 0.002) * num_of_updates,
-                data.get('beta1', 0.9),
-                data.get('beta2', 0.99),
-                data.get('epsilon', 1e-6),
-                data.get('weight_decay', 0.2),
-                data.get('t', 1)
+                data['learning_rate'] * num_of_updates,
+                data['beta1'],
+                data['beta2'],
+                data['epsilon'],
+                data['weight_decay'],
+                data['t']
             )
 
             torch.save(future_tensor, future_tensor_path)

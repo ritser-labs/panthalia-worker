@@ -43,7 +43,6 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 abi_dir = os.path.join(current_dir, 'abis')
 
 # Global variables for transaction management by private key
-transaction_conditions = {}
 pending_transactions = {}
 
 def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
@@ -208,22 +207,17 @@ async def get_debug_trace(web3, tx_hash):
 
 async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, attempts=5):
     global pending_transactions
-    global transaction_conditions
 
     # Initialize the transaction state for the given private key if not already done
     if private_key not in pending_transactions:
         pending_transactions[private_key] = False
-        transaction_conditions[private_key] = threading.Condition()
 
-    condition = transaction_conditions[private_key]
 
     # Use the condition to wait for the transaction to complete
-    with condition:
-        while pending_transactions[private_key]:
-            condition.wait()
-
-        # Set the transaction as pending for this private key
-        pending_transactions[private_key] = True
+    while pending_transactions[private_key]:
+        await asyncio.sleep(SLEEP_TIME)
+    # Set the transaction as pending for this private key
+    pending_transactions[private_key] = True
 
     try:
         account = web3.eth.account.from_key(private_key)
@@ -284,10 +278,7 @@ async def async_transact_with_contract_function(web3, contract, function_name, p
             await wait_for_block(web3)
 
     finally:
-        # Reset the pending transaction state for this private key
-        with condition:
-            pending_transactions[private_key] = False
-            condition.notify_all()  # Notify any waiting threads that the transaction is done
+        pending_transactions[private_key] = False
 
 
 async def wait_for_block(web3):

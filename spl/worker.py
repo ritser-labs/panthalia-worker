@@ -395,6 +395,7 @@ async def sync_tensors(sync_version_number, contract_index):
 
 async def submit_solution(task_id, result, contract_index):
     try:
+        logging.info('Submitting solution')
         receipt = await async_transact_with_contract_function(web3, contracts[contract_index], 'submitSolution', args.private_keys[contract_index], task_id, json.dumps(result).encode('utf-8'))
         logging.info(f"submitSolution transaction receipt: {receipt}")
     except Exception as e:
