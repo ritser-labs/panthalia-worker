@@ -148,7 +148,7 @@ class FineWebDataLoader(LanguageDataLoader):
             yield example['text']
 
 class AddNumbersDataLoader(IterableDataset):
-    def __init__(self, min_value: int = 0, max_value: int = 100):
+    def __init__(self, min_value: int = -100, max_value: int = 100):
         """
         DataLoader for generating pairs of numbers and their sum indefinitely.
         
