@@ -176,6 +176,12 @@ def download_file(url):
     response = requests.get(url)
     return torch.load(BytesIO(response.content))
 
+def get_future_version_number():
+    return (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
+
+def get_current_version_number():
+    return (int(time.time()) // TENSOR_VERSION_INTERVAL) * TENSOR_VERSION_INTERVAL
+
 def process_trace(trace):
     if isinstance(trace, AttributeDict):
         return {k: process_trace(v) for k, v in trace.items()}

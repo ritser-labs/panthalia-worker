@@ -21,7 +21,7 @@ import tracemalloc
 import aiofiles
 
 # Import your custom modules
-from .common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset, SOT_PRIVATE_PORT
+from .common import model_config, model_adapter, batch_size, get_current_version_number, TENSOR_NAME, dataset, SOT_PRIVATE_PORT, get_future_version_number
 from .device import device
 
 # File locks to prevent race conditions when reading/writing files
@@ -157,7 +157,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
-                0, int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL)
+                0, get_current_version_number())
 
         file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
         if os.path.exists(file_path):
@@ -436,7 +436,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         num_updates = load_json(num_updates_file, {}, num_updates_file_lock)
         last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
 
-        future_version_number = (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
+        future_version_number = get_future_version_number()
 
         if data['version_number'] < block_timestamps.get(tensor_name, 0):
             delta = block_timestamps.get(tensor_name, 0) - data['version_number']
