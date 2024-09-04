@@ -63,6 +63,42 @@ def log_memory_diff(snapshot1, snapshot2, note=''):
         for stat in top_stats[:10]:  # Log top 10 memory differences
             logging.debug(stat)
 
+
+def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
+    if step < 1:
+        raise ValueError("Step should be at least 1")
+    logging.debug(f"Params before update: {params}")
+    logging.debug(f"Grads: {grads}")
+    logging.debug(f"m before update: {m}")
+    logging.debug(f"v before update: {v}")
+
+    m = beta1 * m + (1 - beta1) * grads
+    v = beta2 * v + (1 - beta2) * grads ** 2
+
+    logging.debug(f"Updated m: {m}")
+    logging.debug(f"Updated v: {v}")
+
+    m_hat = m / (1 - beta1 ** step)
+    v_hat = v / (1 - beta2 ** step)
+
+    denominator = torch.sqrt(v_hat) + eps
+
+    rms = torch.sqrt(torch.mean(grads * grads / torch.max(v, (eps * eps) * torch.ones_like(v))))
+
+    new_lr = lr * (1. / max(1., rms / clip_thresh))
+
+    params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
+
+    logging.debug(f"m_hat: {m_hat}")
+    logging.debug(f"v_hat: {v_hat}")
+    logging.debug(f"denominator: {denominator}")
+    logging.debug(f"rms: {rms}")
+    logging.debug(f"new_lr: {new_lr}")
+    logging.debug(f"Updated params: {params}")
+
+    return params, m, v
+
+
 def create_app(public_keys_file, enable_memory_logging=False):
     """Create and configure the app."""
     global MEMORY_LOGGING_ENABLED
@@ -319,38 +355,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
             logging.error(f"Error in /get_batch: {e}", exc_info=True)
             return jsonify({'error': 'Could not get batch'}), 500
 
-    def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
-        logging.debug(f"Params before update: {params}")
-        logging.debug(f"Grads: {grads}")
-        logging.debug(f"m before update: {m}")
-        logging.debug(f"v before update: {v}")
-
-        m = beta1 * m + (1 - beta1) * grads
-        v = beta2 * v + (1 - beta2) * grads ** 2
-
-        logging.debug(f"Updated m: {m}")
-        logging.debug(f"Updated v: {v}")
-
-        m_hat = m / (1 - beta1 ** step)
-        v_hat = v / (1 - beta2 ** step)
-
-        denominator = torch.sqrt(v_hat) + eps
-
-        rms = torch.sqrt(torch.mean(grads * grads / torch.max(v, (eps * eps) * torch.ones_like(v))))
-
-        new_lr = lr * (1. / max(1., rms / clip_thresh))
-
-        params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
-
-        logging.debug(f"m_hat: {m_hat}")
-        logging.debug(f"v_hat: {v_hat}")
-        logging.debug(f"denominator: {denominator}")
-        logging.debug(f"rms: {rms}")
-        logging.debug(f"new_lr: {new_lr}")
-        logging.debug(f"Updated params: {params}")
-
-        return params, m, v
-
     def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
         tensor_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
         if not os.path.exists(tensor_path):
@@ -500,7 +504,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
             # Cleanup old accumulated grads tensors
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
-                    os.remove(os.path.join(state_dir, filename))
+                    #os.remove(os.path.join(state_dir, filename))
+                    pass
 
             logging.debug(f"Updated state for {tensor_name}")
             return jsonify({'status': 'success', 'version_number': future_version_number})

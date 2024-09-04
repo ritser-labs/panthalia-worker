@@ -173,6 +173,7 @@ class Master:
         logging.info(f"Starting iteration {iteration_number}")
 
         learning_params = get_learning_hyperparameters(iteration_number)
+        logging.info(f'Learning parameters for iteration {iteration_number}: {learning_params}')
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
         logging.info(f"Iteration {iteration_number}: Starting training task")

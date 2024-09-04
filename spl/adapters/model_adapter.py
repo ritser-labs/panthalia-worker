@@ -70,6 +70,7 @@ class StandardModelAdapter(ModelAdapter):
     
     def forward_and_loss(self, model, inputs, targets):
         output = self.forward(model, inputs)
+        logging.info(f'Output: {output}')
         reshaped_logits, reshaped_targets = self.preprocess_for_loss(output, targets)
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss
@@ -98,21 +99,28 @@ class StandardModelAdapter(ModelAdapter):
             try:
                 microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size].detach()
                 microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size].detach()
+                
+                logging.info(f'Microbatch Inputs: {microbatch_inputs}')
+                logging.info(f'Microbatch Targets: {microbatch_targets}')
 
                 # Forward pass
                 loss = self.forward_and_loss(model, microbatch_inputs, microbatch_targets)
+                logging.info(f'Loss: {loss}')
                 total_loss += loss.item()
 
                 logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
 
                 # Backward pass and accumulate gradients
                 loss.backward()
+                list_of_params = [param for param in model.parameters()]
+                logging.info(f'Params: {list_of_params}')
+                list_of_grads = [param.grad for param in model.parameters()]
+                logging.info(f'Grads: {list_of_grads}')
 
                 with torch.no_grad():
                     for j, param in enumerate(model.parameters()):
                         if param.grad is not None:
                             grads_accumulated[j] += param.grad
-
                 # Clear gradients for next accumulation step
                 model.zero_grad()
                 
@@ -132,12 +140,11 @@ class StandardModelAdapter(ModelAdapter):
         with torch.no_grad():
             for grad in grads_accumulated:
                 grad.div_(accumulation_steps)
-
         updates = torch.cat([grad.view(-1) for grad in grads_accumulated])
         loss = total_loss / accumulation_steps
 
         logging.info(f"Model task completed. Total loss: {loss:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
-
+        logging.info(f'Updates: {updates}')
         return updates, loss
     
     def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
@@ -241,17 +248,13 @@ class AdderModelAdapter(StandardModelAdapter):
         return F.mse_loss(logits, targets)
 
     def preprocess_for_loss(self, logits, targets):
-        reshaped_logits = logits.view(-1)
-        reshaped_targets = targets.view(-1)
-        return reshaped_logits, reshaped_targets
-    
+        if logits.shape != targets.shape:
+            raise ValueError(f"Logits shape {logits.shape} does not match targets shape {targets.shape}")
+        return logits, targets
     def postprocess_model_after_batch(self, model):
         pass
     
     def get_dummy_input(self):
-        # The adder model expects input with a batch dimension.
-        # We'll create a batch of size 1 with two numbers.
-        batch_size = 1
         input_tensor = torch.tensor([[2.0, 3.0]]).to(device)  # Batch size of 1, two numbers per input
         return input_tensor
 

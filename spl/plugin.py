@@ -3,7 +3,6 @@ from .adapters.dataloader import *
 from .adapters.model_config import *
 import os
 from .adapters.model_adapter import *
-from .adapters.nanogpt import GPTConfig
 from .tokenizer import Tokenizer
 import math
 
@@ -47,6 +46,8 @@ class StandardPlugin:
         tokenizer,
         num_microbatches,
         example_per_microbatch,
+        max_lr=0.01,
+        min_lr=0.001,
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
@@ -55,6 +56,8 @@ class StandardPlugin:
         self.num_microbatches = num_microbatches
         self.batch_size = num_microbatches * example_per_microbatch
         self.accumulation_steps = num_microbatches
+        self.max_lr = max_lr
+        self.min_lr = min_lr
     
     def get_learning_hyperparameters(self, current_iteration):
         """
@@ -68,8 +71,8 @@ class StandardPlugin:
         """
         T_0 = 5000 / self.num_microbatches  # Initial number of iterations for the first cycle
         T_mult = 2  # Factor to increase the cycle length after each restart
-        eta_max = 0.001 * self.num_microbatches  # Initial learning rate (maximum)
-        eta_min = 0.00001 * self.num_microbatches  # Minimum learning rate
+        eta_max = self.max_lr * self.num_microbatches  # Initial learning rate (maximum)
+        eta_min = self.min_lr * self.num_microbatches  # Minimum learning rate
 
         # Determine the current cycle length
         cycle_length = T_0
