@@ -438,6 +438,10 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         future_version_number = (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
 
+        if data['version_number'] < block_timestamps.get(tensor_name, 0):
+            delta = block_timestamps.get(tensor_name, 0) - data['version_number']
+            logging.info(f'Delta of {delta} recorded with version number {data["version_number"]}')
+
         if last_future_version_number.get(tensor_name, 0) < future_version_number:
             if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
                 block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
@@ -671,7 +675,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             latest_loss['value'] = loss
             save_json(os.path.join(state_dir, 'latest_loss.json'), latest_loss, block_timestamps_file_lock)
 
-        logging.info(f"Updated latest loss: {loss}")
+        logging.info(f"Updated latest loss for version {data['version_number']}: {loss}")
         return jsonify({'status': 'success'}), 200
 
     @app.route('/get_loss', methods=['GET'])

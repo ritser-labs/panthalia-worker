@@ -191,7 +191,7 @@ class Master:
         result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
         loss_value = result['loss']
         self.perplexity_queue.put(loss_value)
-        await self.update_latest_loss(loss_value)
+        await self.update_latest_loss(loss_value, result['version_number'])
         await self.update_sot_all(TENSOR_NAME, learning_params, TENSOR_NAME, result, iteration_number=iteration_number)
 
 
@@ -260,9 +260,9 @@ class Master:
                 else:
                     logging.info(f"Updated SOT for {tensor_name} with result: {result}")
     
-    async def update_latest_loss(self, loss_value):
+    async def update_latest_loss(self, loss_value, version_number):
         """Send the latest loss value to the SOT server."""
-        payload = {'loss': loss_value}
+        payload = {'loss': loss_value, 'version_number': version_number}
 
         url = os.path.join(self.sot_url, 'update_loss')
         async with aiohttp.ClientSession() as session:
