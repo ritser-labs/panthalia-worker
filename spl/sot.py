@@ -443,8 +443,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
                 save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
         
-        num_updates[tensor_name] = 0
-        save_json(num_updates_file, num_updates, num_updates_file_lock)
+            num_updates[tensor_name] = 0
+            save_json(num_updates_file, num_updates, num_updates_file_lock)
         
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
