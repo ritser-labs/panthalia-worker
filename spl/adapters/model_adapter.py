@@ -100,12 +100,12 @@ class StandardModelAdapter(ModelAdapter):
                 microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size].detach()
                 microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size].detach()
                 
-                logging.info(f'Microbatch Inputs: {microbatch_inputs}')
-                logging.info(f'Microbatch Targets: {microbatch_targets}')
+                #logging.info(f'Microbatch Inputs: {microbatch_inputs}')
+                #logging.info(f'Microbatch Targets: {microbatch_targets}')
 
                 # Forward pass
                 loss = self.forward_and_loss(model, microbatch_inputs, microbatch_targets)
-                logging.info(f'Loss: {loss}')
+                #logging.info(f'Loss: {loss}')
                 total_loss += loss.item()
 
                 logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
@@ -113,9 +113,9 @@ class StandardModelAdapter(ModelAdapter):
                 # Backward pass and accumulate gradients
                 loss.backward()
                 list_of_params = [param for param in model.parameters()]
-                logging.info(f'Params: {list_of_params}')
+                #logging.info(f'Params: {list_of_params}')
                 list_of_grads = [param.grad for param in model.parameters()]
-                logging.info(f'Grads: {list_of_grads}')
+                #logging.info(f'Grads: {list_of_grads}')
 
                 with torch.no_grad():
                     for j, param in enumerate(model.parameters()):
