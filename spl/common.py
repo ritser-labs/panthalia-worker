@@ -21,15 +21,17 @@ model_config = exported_plugin.model_config
 model_adapter = exported_plugin.model_adapter
 dataset = exported_plugin.dataset
 tokenizer = exported_plugin.tokenizer
-get_learning_hyperparameters = exported_plugin.get_learning_hyperparameters
+get_sot_learning_hyperparameters = exported_plugin.get_sot_learning_hyperparameters
+get_master_learning_hyperparameters = exported_plugin.get_master_learning_hyperparameters
 batch_size = exported_plugin.batch_size
+accumulation_steps = exported_plugin.accumulation_steps
 
 SOT_PRIVATE_PORT = 5001
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
-TENSOR_VERSION_INTERVAL = 22
+TENSOR_VERSION_INTERVAL = exported_plugin.tensor_version_interval
 
 MAX_SUBMIT_TASK_RETRY_DURATION = 300
 

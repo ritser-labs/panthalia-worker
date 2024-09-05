@@ -13,7 +13,7 @@ import requests
 from web3 import AsyncWeb3
 from web3.middleware import async_geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from .common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SUBMIT_TASK_RETRY_DURATION, TENSOR_NAME
+from .common import load_contracts, TaskStatus, PoolState, Task, get_master_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SUBMIT_TASK_RETRY_DURATION, TENSOR_NAME
 from io import BytesIO
 import os
 from eth_account.messages import encode_defunct
@@ -172,7 +172,7 @@ class Master:
     async def main_iteration(self, iteration_number):
         logging.info(f"Starting iteration {iteration_number}")
 
-        learning_params = get_learning_hyperparameters(iteration_number)
+        learning_params = get_master_learning_hyperparameters(iteration_number)
         logging.info(f'Learning parameters for iteration {iteration_number}: {learning_params}')
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
@@ -180,7 +180,7 @@ class Master:
         task_params = {
             'batch_url': batch_url,
             'targets_url': targets_url,
-            'accumulation_steps': learning_params['accumulation_steps']
+            **learning_params,
         }
         task_id = await self.submit_task(TENSOR_NAME, task_params, iteration_number)
         

@@ -21,7 +21,7 @@ import tracemalloc
 import aiofiles
 
 # Import your custom modules
-from .common import model_config, model_adapter, batch_size, get_current_version_number, TENSOR_NAME, dataset, SOT_PRIVATE_PORT, get_future_version_number
+from .common import get_sot_learning_hyperparameters, model_adapter, batch_size, get_current_version_number, TENSOR_NAME, dataset, SOT_PRIVATE_PORT, get_future_version_number
 from .device import device
 
 # File locks to prevent race conditions when reading/writing files
@@ -490,17 +490,17 @@ def create_app(public_keys_file, enable_memory_logging=False):
             save_json(num_updates_file, num_updates, num_updates_file_lock)
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
+            learning_params = get_sot_learning_hyperparameters(iteration_number[tensor_name])
             future_tensor, m_update, v_update = apply_adamw(
                 current_version_number,
                 tensor_name,
                 averaged_grads,
-                data['learning_rate'] * num_of_updates,
-                data['beta1'],
-                data['beta2'],
-                data['epsilon'],
-                data['weight_decay'],
-                #data['t']
-                iteration_number[tensor_name]
+                learning_params['learning_rate'] * num_of_updates,
+                learning_params['beta1'],
+                learning_params['beta2'],
+                learning_params['epsilon'],
+                learning_params['weight_decay'],
+                learning_params['t']
             )
 
             torch.save(future_tensor, future_tensor_path)
