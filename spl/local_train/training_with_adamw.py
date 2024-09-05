@@ -40,6 +40,7 @@ def train_model(model, train_loader, model_adapter, epochs):
 
         # Use tqdm for a progress bar
         for batch_idx, (inputs, targets) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")):
+            print(f'Starting batch {batch_idx}')
             # Convert to tensors and add batch dimension
             inputs = torch.tensor(inputs).unsqueeze(0).to(device)
             targets = torch.tensor(targets).unsqueeze(0).to(device)
