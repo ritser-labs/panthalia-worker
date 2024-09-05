@@ -46,9 +46,9 @@ class StandardPlugin:
         tokenizer,
         num_microbatches,
         example_per_microbatch,
-        max_lr=0.001,
-        min_lr=0.0001,
-        tensor_version_interval=100
+        max_lr=0.0003,
+        min_lr=0.0003,
+        tensor_version_interval=22
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
@@ -108,10 +108,10 @@ EXAMPLES_PER_MICROBATCH = 32
 
 exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH)
 
-#model_config = AdderModelConfig()
+model_config = AdderModelConfig()
 
-#dataset = AddNumbersDataLoader()
+dataset = AddNumbersDataLoader()
 
-#model_adapter = AdderModelAdapter(model_config)
+model_adapter = AdderModelAdapter(model_config)
 
-#exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH)
+exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH)

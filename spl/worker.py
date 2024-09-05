@@ -27,7 +27,7 @@ from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncod
 
 # Define the maximum number of retries for task processing
 MAX_WORKER_TASK_RETRIES = 3
-TIME_TO_PROCESS = 38
+TIME_TO_PROCESS = 4
 
 class SuppressTracebackFilter(logging.Filter):
     def filter(self, record):

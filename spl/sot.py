@@ -68,6 +68,7 @@ def log_memory_diff(snapshot1, snapshot2, note=''):
 def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
     if step < 1:
         raise ValueError("Step should be at least 1")
+    logging.debug(f'Using LR: {lr}, weight_decay: {weight_decay}, beta1: {beta1}, beta2: {beta2}, eps: {eps}, clip_thresh: {clip_thresh}, step: {step}')
     logging.debug(f"Params before update: {params}")
     logging.debug(f"Grads: {grads}")
     logging.debug(f"m before update: {m}")
