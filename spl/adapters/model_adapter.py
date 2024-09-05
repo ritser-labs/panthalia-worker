@@ -70,7 +70,7 @@ class StandardModelAdapter(ModelAdapter):
     
     def forward_and_loss(self, model, inputs, targets):
         output = self.forward(model, inputs)
-        logging.info(f'Output: {output}')
+        #logging.info(f'Output: {output}')
         reshaped_logits, reshaped_targets = self.preprocess_for_loss(output, targets)
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss

@@ -30,6 +30,7 @@ data_dir = os.path.join(script_dir, 'data')
 block_timestamps_file_lock = FileLock(os.path.join(data_dir, 'state', 'block_timestamps.json.lock'))
 num_updates_file_lock = FileLock(os.path.join(data_dir, 'state', 'num_updates.json.lock'))
 last_future_version_file_lock = FileLock(os.path.join(data_dir, 'state', 'last_future_version_number.json.lock'))
+iteration_number_file_lock = FileLock(os.path.join(data_dir, 'state', 'iteration_number.json.lock'))
 
 # Initialize locks for thread safety
 latest_loss_lock = asyncio.Lock()
@@ -128,6 +129,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
     block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
     num_updates_file = os.path.join(state_dir, 'num_updates.json')
     last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
+    iteration_number_file = os.path.join(state_dir, 'iteration_number.json')
 
     def save_json(file_path, data, file_lock):
         with file_lock:
@@ -435,6 +437,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
         num_updates = load_json(num_updates_file, {}, num_updates_file_lock)
         last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
+        iteration_number = load_json(iteration_number_file, {}, iteration_number_file_lock)
 
         future_version_number = get_future_version_number()
 
@@ -449,6 +452,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
         
             num_updates[tensor_name] = 0
             save_json(num_updates_file, num_updates, num_updates_file_lock)
+            
+            iteration_number[tensor_name] = iteration_number.get(tensor_name, 0) + 1
+            save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
         
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
@@ -493,7 +499,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 data['beta2'],
                 data['epsilon'],
                 data['weight_decay'],
-                data['t']
+                #data['t']
+                iteration_number[tensor_name]
             )
 
             torch.save(future_tensor, future_tensor_path)
