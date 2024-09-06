@@ -33,7 +33,7 @@ model_params = GPTConfig(
 
 model_config = NanoGPTConfig(tokenizer, model_params)
 
-dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE, max_seq_len=model_params.block_size)
+dataset = ShakespeareDataLoader(model_config, buffer_size=BUFFER_SIZE, max_seq_len=model_params.block_size)
 
 model_adapter = NanoGPTModelAdapter(model_config)
 
@@ -48,7 +48,8 @@ class StandardPlugin:
         example_per_microbatch,
         max_lr=0.0003,
         min_lr=0.0003,
-        tensor_version_interval=22
+        tensor_version_interval=32,
+        expected_worker_time=8
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
@@ -60,6 +61,7 @@ class StandardPlugin:
         self.max_lr = max_lr
         self.min_lr = min_lr
         self.tensor_version_interval = tensor_version_interval
+        self.expected_worker_time = expected_worker_time
     
     def get_master_learning_hyperparameters(self, current_master_iteration):
         return {
@@ -102,16 +104,24 @@ class StandardPlugin:
         }
 
 
-NUM_MICROBATCHES = 128
+NUM_MICROBATCHES = 32
 
 EXAMPLES_PER_MICROBATCH = 32
 
-exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH)
+exported_plugin = StandardPlugin(
+    model_adapter,
+    model_config,
+    dataset,
+    tokenizer,
+    num_microbatches=NUM_MICROBATCHES,
+    example_per_microbatch=EXAMPLES_PER_MICROBATCH,
+    expected_worker_time=6
+)
 
-model_config = AdderModelConfig()
+#model_config = AdderModelConfig()
 
-dataset = AddNumbersDataLoader()
+#dataset = AddNumbersDataLoader()
 
-model_adapter = AdderModelAdapter(model_config)
+#model_adapter = AdderModelAdapter(model_config)
 
-exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH)
+#exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH, expected_worker_time=4)
