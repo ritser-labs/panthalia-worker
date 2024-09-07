@@ -40,10 +40,10 @@ preloaded_batch_condition = asyncio.Condition(preloaded_batch_lock)
 SOT_FETCH_TIMEOUT = 300  # Timeout for fetching data from the SOT service
 
 # Initialize logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[
     logging.StreamHandler()
 ])
-logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger(__name__).setLevel(logging.INFO)
 
 # Add a global variable to control memory logging
 MEMORY_LOGGING_ENABLED = False

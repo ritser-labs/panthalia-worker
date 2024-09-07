@@ -191,6 +191,41 @@ def stream_handler(stream, log_file):
         log_file.write(line)
         log_file.flush()  # Ensure logs are written immediately
 
+def copy_file_from_remote(ssh, remote_path, local_path, interval=1):
+    """
+    Copies a file from the remote server to the local system every `interval` seconds, 
+    ensuring that the file exists and is not of zero size before copying.
+
+    Args:
+        ssh (paramiko.SSHClient): The active SSH connection.
+        remote_path (str): The path to the file on the remote server.
+        local_path (str): The path to the file on the local system.
+        interval (int): The time in seconds between each copy attempt.
+    """
+    sftp = ssh.open_sftp()
+    try:
+        while True:
+            try:
+                # Check if the file exists and is not zero size
+                file_stat = sftp.stat(remote_path)
+                if file_stat.st_size > 0:
+                    # If the file exists and has content, copy it to the local system
+                    sftp.get(remote_path, local_path)
+                    logging.info(f"Copied {remote_path} to {local_path}")
+                else:
+                    logging.info(f"File {remote_path} is zero size. Waiting for update...")
+            except FileNotFoundError:
+                # If the file doesn't exist, log the event
+                pass
+            except Exception as e:
+                logging.error(f"Error checking file: {e}")
+                
+            time.sleep(interval)
+    except Exception as e:
+        logging.error(f"Error copying file: {e}")
+    finally:
+        sftp.close()
+
 def launch_instance_and_record_logs(
     name,
     image=None,
@@ -294,6 +329,18 @@ def launch_instance_and_record_logs(
         # Start both threads
         pod_helpers['stdout_thread'].start()
         pod_helpers['stderr_thread'].start()
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        parent_dir = os.path.dirname(script_dir)
+        parent_dir = os.path.dirname(parent_dir)
+
+        # Step 6: Create a new thread to copy the file from remote to local every second
+        remote_file_path = "/app/spl/loss_plot.png"  # Path to the file on the remote system
+
+        # Define the local path relative to the script
+        local_file_path = os.path.join(parent_dir, "loss_plot.png")  # Saves in the same directory as the script
+
+        pod_helpers['sftp_thread'] = threading.Thread(target=copy_file_from_remote, args=(ssh, remote_file_path, local_file_path))
+        pod_helpers['sftp_thread'].start()
 
         return new_pod, pod_helpers
 
@@ -302,3 +349,4 @@ def launch_instance_and_record_logs(
         raise e
     finally:
         print(f"Logs have been recorded in {log_file}")
+
