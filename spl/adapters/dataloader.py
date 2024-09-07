@@ -101,10 +101,10 @@ class WikipediaDataLoader(LanguageDataLoader):
 
 class ShakespeareDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, file_path=os.path.join(datasets_dir, 'shakespeare.txt'), block_size=124000):
-        super().__init__(model_config, buffer_size, max_seq_len)
         self.file_path = file_path
         self.lines = self.load_lines()
         self.block_size = block_size
+        super().__init__(model_config, buffer_size, max_seq_len)
 
     def load_lines(self):
         with open(self.file_path, 'r') as f:

@@ -21,7 +21,7 @@ import tracemalloc
 import aiofiles
 
 # Import your custom modules
-from .common import model_config, model_adapter, batch_size, TENSOR_VERSION_INTERVAL, TENSOR_NAME, dataset, SOT_PRIVATE_PORT
+from .common import get_sot_learning_hyperparameters, model_adapter, batch_size, get_current_version_number, TENSOR_NAME, dataset, SOT_PRIVATE_PORT, get_future_version_number
 from .device import device
 
 # File locks to prevent race conditions when reading/writing files
@@ -30,6 +30,7 @@ data_dir = os.path.join(script_dir, 'data')
 block_timestamps_file_lock = FileLock(os.path.join(data_dir, 'state', 'block_timestamps.json.lock'))
 num_updates_file_lock = FileLock(os.path.join(data_dir, 'state', 'num_updates.json.lock'))
 last_future_version_file_lock = FileLock(os.path.join(data_dir, 'state', 'last_future_version_number.json.lock'))
+iteration_number_file_lock = FileLock(os.path.join(data_dir, 'state', 'iteration_number.json.lock'))
 
 # Initialize locks for thread safety
 latest_loss_lock = asyncio.Lock()
@@ -39,7 +40,7 @@ preloaded_batch_condition = asyncio.Condition(preloaded_batch_lock)
 SOT_FETCH_TIMEOUT = 300  # Timeout for fetching data from the SOT service
 
 # Initialize logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s:%(message)s', handlers=[
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[
     logging.StreamHandler()
 ])
 logging.getLogger().setLevel(logging.DEBUG)
@@ -62,6 +63,43 @@ def log_memory_diff(snapshot1, snapshot2, note=''):
         logging.debug(f"Memory usage differences ({note}):")
         for stat in top_stats[:10]:  # Log top 10 memory differences
             logging.debug(stat)
+
+
+def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
+    if step < 1:
+        raise ValueError("Step should be at least 1")
+    logging.debug(f'Using LR: {lr}, weight_decay: {weight_decay}, beta1: {beta1}, beta2: {beta2}, eps: {eps}, clip_thresh: {clip_thresh}, step: {step}')
+    logging.debug(f"Params before update: {params}")
+    logging.debug(f"Grads: {grads}")
+    logging.debug(f"m before update: {m}")
+    logging.debug(f"v before update: {v}")
+
+    m = beta1 * m + (1 - beta1) * grads
+    v = beta2 * v + (1 - beta2) * grads ** 2
+
+    logging.debug(f"Updated m: {m}")
+    logging.debug(f"Updated v: {v}")
+
+    m_hat = m / (1 - beta1 ** step)
+    v_hat = v / (1 - beta2 ** step)
+
+    denominator = torch.sqrt(v_hat) + eps
+
+    rms = torch.sqrt(torch.mean(grads * grads / torch.max(v, (eps * eps) * torch.ones_like(v))))
+
+    new_lr = lr * (1. / max(1., rms / clip_thresh))
+
+    params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
+
+    logging.debug(f"m_hat: {m_hat}")
+    logging.debug(f"v_hat: {v_hat}")
+    logging.debug(f"denominator: {denominator}")
+    logging.debug(f"rms: {rms}")
+    logging.debug(f"new_lr: {new_lr}")
+    logging.debug(f"Updated params: {params}")
+
+    return params, m, v
+
 
 def create_app(public_keys_file, enable_memory_logging=False):
     """Create and configure the app."""
@@ -92,6 +130,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
     block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
     num_updates_file = os.path.join(state_dir, 'num_updates.json')
     last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
+    iteration_number_file = os.path.join(state_dir, 'iteration_number.json')
 
     def save_json(file_path, data, file_lock):
         with file_lock:
@@ -121,7 +160,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
-                0, int(time.time()) // TENSOR_VERSION_INTERVAL * TENSOR_VERSION_INTERVAL)
+                0, get_current_version_number())
 
         file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
         if os.path.exists(file_path):
@@ -319,38 +358,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
             logging.error(f"Error in /get_batch: {e}", exc_info=True)
             return jsonify({'error': 'Could not get batch'}), 500
 
-    def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
-        logging.debug(f"Params before update: {params}")
-        logging.debug(f"Grads: {grads}")
-        logging.debug(f"m before update: {m}")
-        logging.debug(f"v before update: {v}")
-
-        m = beta1 * m + (1 - beta1) * grads
-        v = beta2 * v + (1 - beta2) * grads ** 2
-
-        logging.debug(f"Updated m: {m}")
-        logging.debug(f"Updated v: {v}")
-
-        m_hat = m / (1 - beta1 ** step)
-        v_hat = v / (1 - beta2 ** step)
-
-        denominator = torch.sqrt(v_hat) + eps
-
-        rms = torch.sqrt(torch.mean(grads * grads / torch.max(v, (eps * eps) * torch.ones_like(v))))
-
-        new_lr = lr * (1. / max(1., rms / clip_thresh))
-
-        params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
-
-        logging.debug(f"m_hat: {m_hat}")
-        logging.debug(f"v_hat: {v_hat}")
-        logging.debug(f"denominator: {denominator}")
-        logging.debug(f"rms: {rms}")
-        logging.debug(f"new_lr: {new_lr}")
-        logging.debug(f"Updated params: {params}")
-
-        return params, m, v
-
     def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
         tensor_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
         if not os.path.exists(tensor_path):
@@ -431,16 +438,24 @@ def create_app(public_keys_file, enable_memory_logging=False):
         block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
         num_updates = load_json(num_updates_file, {}, num_updates_file_lock)
         last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
+        iteration_number = load_json(iteration_number_file, {}, iteration_number_file_lock)
 
-        future_version_number = (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
+        future_version_number = get_future_version_number()
+
+        if data['version_number'] < block_timestamps.get(tensor_name, 0):
+            delta = block_timestamps.get(tensor_name, 0) - data['version_number']
+            logging.info(f'Delta of {delta} recorded with version number {data["version_number"]}')
 
         if last_future_version_number.get(tensor_name, 0) < future_version_number:
             if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
                 block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
                 save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
         
-        num_updates[tensor_name] = 0
-        save_json(num_updates_file, num_updates, num_updates_file_lock)
+            num_updates[tensor_name] = 0
+            save_json(num_updates_file, num_updates, num_updates_file_lock)
+            
+            iteration_number[tensor_name] = iteration_number.get(tensor_name, 0) + 1
+            save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
         
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
@@ -476,16 +491,17 @@ def create_app(public_keys_file, enable_memory_logging=False):
             save_json(num_updates_file, num_updates, num_updates_file_lock)
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
+            learning_params = get_sot_learning_hyperparameters(iteration_number[tensor_name])
             future_tensor, m_update, v_update = apply_adamw(
                 current_version_number,
                 tensor_name,
                 averaged_grads,
-                data['learning_rate'] * num_of_updates,
-                data['beta1'],
-                data['beta2'],
-                data['epsilon'],
-                data['weight_decay'],
-                data['t']
+                learning_params['learning_rate'],
+                learning_params['beta1'],
+                learning_params['beta2'],
+                learning_params['epsilon'],
+                learning_params['weight_decay'],
+                learning_params['t']
             )
 
             torch.save(future_tensor, future_tensor_path)
@@ -501,6 +517,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
                     os.remove(os.path.join(state_dir, filename))
+                    pass
 
             logging.debug(f"Updated state for {tensor_name}")
             return jsonify({'status': 'success', 'version_number': future_version_number})
@@ -666,7 +683,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             latest_loss['value'] = loss
             save_json(os.path.join(state_dir, 'latest_loss.json'), latest_loss, block_timestamps_file_lock)
 
-        logging.info(f"Updated latest loss: {loss}")
+        logging.info(f"Updated latest loss for version {data['version_number']}: {loss}")
         return jsonify({'status': 'success'}), 200
 
     @app.route('/get_loss', methods=['GET'])

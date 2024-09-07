@@ -13,7 +13,7 @@ import requests
 from web3 import AsyncWeb3
 from web3.middleware import async_geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from .common import load_contracts, TaskStatus, PoolState, Task, get_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SUBMIT_TASK_RETRY_DURATION, TENSOR_NAME
+from .common import load_contracts, TaskStatus, PoolState, Task, get_master_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SUBMIT_TASK_RETRY_DURATION, TENSOR_NAME
 from io import BytesIO
 import os
 from eth_account.messages import encode_defunct
@@ -30,8 +30,8 @@ class Master:
         self.subnet_addresses = subnet_addresses
         self.max_concurrent_iterations = max_concurrent_iterations
         self.iteration = 1  # Track the number of iterations
-        self.perplexities = []  # Initialize perplexity list
-        self.perplexity_queue = queue.Queue()
+        self.losses = []  # Initialize loss list
+        self.loss_queue = queue.Queue()
         self.load_wallets(wallets)
         self.current_wallet_index = 0
         if detailed_logs:
@@ -42,10 +42,10 @@ class Master:
 
         # Set up the plot
         self.fig, self.ax = plt.subplots()
-        self.line, = self.ax.plot([], [], label='Perplexity')
+        self.line, = self.ax.plot([], [], label='Loss')
         self.ax.set_xlabel('Iteration')
-        self.ax.set_ylabel('Perplexity')
-        self.ax.set_title('Perplexity over Iterations')
+        self.ax.set_ylabel('Loss')
+        self.ax.set_title('Loss over Iterations')
         self.ax.legend()
         self.ax.grid(True)
 
@@ -89,15 +89,15 @@ class Master:
             tasks = []
 
     def update_plot(self, frame=None):
-        while not self.perplexity_queue.empty():
-            perplexity = self.perplexity_queue.get()
-            self.perplexities.append(perplexity)
-        self.line.set_xdata(range(len(self.perplexities)))
-        self.line.set_ydata(self.perplexities)
+        while not self.loss_queue.empty():
+            loss = self.loss_queue.get()
+            self.losses.append(loss)
+        self.line.set_xdata(range(len(self.losses)))
+        self.line.set_ydata(self.losses)
         self.ax.relim()
         self.ax.autoscale_view()
         script_dir = os.path.dirname(__file__)
-        file_path = os.path.join(script_dir, 'perplexity_plot.png')
+        file_path = os.path.join(script_dir, 'loss_plot.png')
         self.fig.savefig(file_path)  # Save the figure after each update
 
     async def submit_task(self, task_type, params, iteration_number):
@@ -172,14 +172,15 @@ class Master:
     async def main_iteration(self, iteration_number):
         logging.info(f"Starting iteration {iteration_number}")
 
-        learning_params = get_learning_hyperparameters(iteration_number)
+        learning_params = get_master_learning_hyperparameters(iteration_number)
+        logging.info(f'Learning parameters for iteration {iteration_number}: {learning_params}')
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
         logging.info(f"Iteration {iteration_number}: Starting training task")
         task_params = {
             'batch_url': batch_url,
             'targets_url': targets_url,
-            'accumulation_steps': learning_params['accumulation_steps']
+            **learning_params,
         }
         task_id = await self.submit_task(TENSOR_NAME, task_params, iteration_number)
         
@@ -189,8 +190,8 @@ class Master:
         await self.select_solver(TENSOR_NAME, task_id, iteration_number)
         result = await self.wait_for_result(TENSOR_NAME, task_id, iteration_number)
         loss_value = result['loss']
-        self.perplexity_queue.put(loss_value)
-        await self.update_latest_loss(loss_value)
+        self.loss_queue.put(loss_value)
+        await self.update_latest_loss(loss_value, result['version_number'])
         await self.update_sot_all(TENSOR_NAME, learning_params, TENSOR_NAME, result, iteration_number=iteration_number)
 
 
@@ -259,9 +260,9 @@ class Master:
                 else:
                     logging.info(f"Updated SOT for {tensor_name} with result: {result}")
     
-    async def update_latest_loss(self, loss_value):
+    async def update_latest_loss(self, loss_value, version_number):
         """Send the latest loss value to the SOT server."""
-        payload = {'loss': loss_value}
+        payload = {'loss': loss_value, 'version_number': version_number}
 
         url = os.path.join(self.sot_url, 'update_loss')
         async with aiohttp.ClientSession() as session:
@@ -294,7 +295,7 @@ if __name__ == "__main__":
     parser.add_argument('--wallets', type=str, required=True, help="URL to wallets JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to subnet addresses JSON file")
-    parser.add_argument('--max_concurrent_iterations', type=int, default=4, help="Maximum number of concurrent iterations")
+    parser.add_argument('--max_concurrent_iterations', type=int, default=16, help="Maximum number of concurrent iterations")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs")
 
     args = parser.parse_args()

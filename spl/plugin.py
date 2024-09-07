@@ -3,7 +3,6 @@ from .adapters.dataloader import *
 from .adapters.model_config import *
 import os
 from .adapters.model_adapter import *
-from .adapters.nanogpt import GPTConfig
 from .tokenizer import Tokenizer
 import math
 
@@ -34,7 +33,7 @@ model_params = GPTConfig(
 
 model_config = NanoGPTConfig(tokenizer, model_params)
 
-dataset = LowercaseAlphabetDataLoader(model_config, buffer_size=BUFFER_SIZE, max_seq_len=model_params.block_size)
+dataset = ShakespeareDataLoader(model_config, buffer_size=BUFFER_SIZE, max_seq_len=model_params.block_size)
 
 model_adapter = NanoGPTModelAdapter(model_config)
 
@@ -47,6 +46,10 @@ class StandardPlugin:
         tokenizer,
         num_microbatches,
         example_per_microbatch,
+        max_lr=0.0005,
+        min_lr=0.0001,
+        tensor_version_interval=32,
+        expected_worker_time=8
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
@@ -55,8 +58,17 @@ class StandardPlugin:
         self.num_microbatches = num_microbatches
         self.batch_size = num_microbatches * example_per_microbatch
         self.accumulation_steps = num_microbatches
+        self.max_lr = max_lr
+        self.min_lr = min_lr
+        self.tensor_version_interval = tensor_version_interval
+        self.expected_worker_time = expected_worker_time
     
-    def get_learning_hyperparameters(self, current_iteration):
+    def get_master_learning_hyperparameters(self, current_master_iteration):
+        return {
+            'accumulation_steps': self.accumulation_steps,
+        }
+    
+    def get_sot_learning_hyperparameters(self, current_iteration):
         """
         Calculate the learning rate using cosine annealing with warm restarts.
 
@@ -66,10 +78,10 @@ class StandardPlugin:
         Returns:
             dict: A dictionary containing the learning rate and Adam optimizer parameters.
         """
-        T_0 = 5000 / self.num_microbatches  # Initial number of iterations for the first cycle
+        T_0 = 400  # Initial number of iterations for the first cycle
         T_mult = 2  # Factor to increase the cycle length after each restart
-        eta_max = 0.001 * self.num_microbatches  # Initial learning rate (maximum)
-        eta_min = 0.00001 * self.num_microbatches  # Minimum learning rate
+        eta_max = self.max_lr * self.num_microbatches  # Initial learning rate (maximum)
+        eta_min = self.min_lr * self.num_microbatches  # Minimum learning rate
 
         # Determine the current cycle length
         cycle_length = T_0
@@ -96,12 +108,20 @@ NUM_MICROBATCHES = 32
 
 EXAMPLES_PER_MICROBATCH = 32
 
-exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH)
+exported_plugin = StandardPlugin(
+    model_adapter,
+    model_config,
+    dataset,
+    tokenizer,
+    num_microbatches=NUM_MICROBATCHES,
+    example_per_microbatch=EXAMPLES_PER_MICROBATCH,
+    expected_worker_time=6
+)
 
-model_config = AdderModelConfig()
+#model_config = AdderModelConfig()
 
-dataset = AddNumbersDataLoader()
+#dataset = AddNumbersDataLoader()
 
-model_adapter = AdderModelAdapter(model_config)
+#model_adapter = AdderModelAdapter(model_config)
 
-exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH)
+#exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH, expected_worker_time=4)

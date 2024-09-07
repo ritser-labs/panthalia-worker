@@ -6,12 +6,13 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from dataclasses import dataclass
+logging.getLogger('web3').setLevel(logging.ERROR)
 from web3 import AsyncWeb3
 from web3.exceptions import ContractCustomError
 from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from .device import device
-from .common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval
+from .common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, async_transact_with_contract_function, expected_worker_time, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval, get_future_version_number, get_current_version_number
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Optional, Tuple
 from io import BytesIO
@@ -39,7 +40,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 logger.addFilter(SuppressTracebackFilter())
 
 # Global counter for concurrent tasks
@@ -69,7 +70,7 @@ def parse_args():
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
-    parser.add_argument('--max_stakes', type=int, default=4, help="Maximum number of stakes to maintain")
+    parser.add_argument('--max_stakes', type=int, default=16, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
     parser.add_argument('--max_queued_tasks', type=int, default=4, help="Maximum number of tasks allowed in the queue awaiting processing")
@@ -264,20 +265,17 @@ async def process_tasks():
     task_success = False  # Track success status
 
     while retry_attempt < MAX_WORKER_TASK_RETRIES and not task_success:
+        with concurrent_tasks_counter_lock:
+            # Increase the counter when a new task is started
+            concurrent_tasks_counter += 1
         try:
             # Ensure only one task is processed at a time
             start_time = time.time()
-
-            with concurrent_tasks_counter_lock:
-                # Increase the counter when a new task is started
-                concurrent_tasks_counter += 1
             logging.debug(f"process_tasks() started. Concurrent tasks: {concurrent_tasks_counter}")
 
             next_task = task_queue.get_next_task()
             if not next_task:
                 logging.debug("No tasks in the queue to process.")
-                with concurrent_tasks_counter_lock:
-                    concurrent_tasks_counter -= 1
                 return
 
             task_id = next_task['task_id']
@@ -285,18 +283,7 @@ async def process_tasks():
             contract_index = next_task['contract_index']
             task_type = args.task_types[contract_index]
             tensor_name = get_relevant_tensor_for_task(task_type)
-            version_num_url = f'{args.sot_url}/tensor_block_timestamp'
-            version_number = (await get_json(
-                version_num_url,
-                params={'tensor_name': tensor_name}
-            ))['version_number']
 
-            logging.debug(f"Syncing tensors for version number: {version_number}")
-            sync_start_time = time.time()
-            model = await sync_tensors(version_number, next_task['contract_index'])
-            sync_end_time = time.time()
-            logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
-            task_queue.current_version = version_number
 
             logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
 
@@ -318,6 +305,12 @@ async def process_tasks():
             accumulation_steps = task_params['accumulation_steps']
             
             with task_processing_lock:
+                logging.debug(f"Syncing tensors")
+                sync_start_time = time.time()
+                model, version_number = await sync_tensors(next_task['contract_index'])
+                sync_end_time = time.time()
+                logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
+                task_queue.current_version = version_number
                 logging.debug("Executing training task")
                 task_start_time = time.time()
                 updates, loss = model_adapter.train_task(model, batch, targets, accumulation_steps)
@@ -346,10 +339,6 @@ async def process_tasks():
 
             end_time = time.time()
             logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
-
-            with concurrent_tasks_counter_lock:
-                # Decrease the counter when a task is completed
-                concurrent_tasks_counter -= 1
 
             task_success = True  # Mark the task as successful if no exceptions occurred
 
@@ -389,9 +378,9 @@ async def reclaim_stakes():
 
         await asyncio.sleep(2)
 
-async def sync_tensors(sync_version_number, contract_index):
+async def sync_tensors(contract_index):
     relevant_tensor = get_relevant_tensor_for_task(args.task_types[contract_index])
-    return await initialize_tensor(relevant_tensor, sync_version_number)
+    return await initialize_tensor(relevant_tensor)
 
 async def submit_solution(task_id, result, contract_index):
     try:
@@ -421,16 +410,29 @@ async def report_sync_status():
     except aiohttp.ClientError as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-async def initialize_tensor(tensor_name, sync_version_number):
+def time_until_next_version():
+    return get_future_version_number() - int(time.time())
+
+async def initialize_tensor(tensor_name):
     global latest_model
-    logging.debug(f"Starting initialization for tensor: {tensor_name} with sync_version_number: {sync_version_number}")
+    logging.debug(f"Starting initialization for tensor: {tensor_name}")
     
     # Start measuring time
     init_start_time = time.time()
+    
+    time_until_next = time_until_next_version()
+    
+    logging.debug(f"Time until next version: {time_until_next} seconds")
+    
+    if time_until_next < expected_worker_time:
+        logging.debug(f'Not enough time left waiting for {time_until_next} seconds.')
+        await asyncio.sleep(time_until_next)
 
-    if latest_block_timestamps[tensor_name] == sync_version_number:
-        logging.debug(f"Tensor {tensor_name} already initialized to version {sync_version_number}. Skipping initialization.")
-        return latest_model
+    version_number = get_current_version_number()
+
+    if latest_block_timestamps[tensor_name] == version_number:
+        logging.debug(f"Tensor {tensor_name} already initialized to version {version_number}. Skipping initialization.")
+        return latest_model, version_number
 
     try:
         url = f"{args.sot_url}/latest_state"
@@ -440,7 +442,7 @@ async def initialize_tensor(tensor_name, sync_version_number):
         fetch_start_time = time.time()
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params={'tensor_name': tensor_name, 'version_number': sync_version_number}) as response:
+            async with session.get(url, params={'tensor_name': tensor_name, 'version_number': version_number}) as response:
                 response.raise_for_status()  # Raise an error for bad status codes
 
                 tensor_fetch_time = time.time()
@@ -472,15 +474,15 @@ async def initialize_tensor(tensor_name, sync_version_number):
                     logging.info(f"Model compiled and warmed up. Compilation duration: {compile_end_time - compile_start_time:.2f} seconds")
 
                 # Update the global latest model and timestamp
-                if latest_block_timestamps[tensor_name] == 0 or latest_block_timestamps[tensor_name] < sync_version_number:
+                if latest_block_timestamps[tensor_name] == 0 or latest_block_timestamps[tensor_name] < version_number:
                     latest_model = model
-                    latest_block_timestamps[tensor_name] = sync_version_number
+                    latest_block_timestamps[tensor_name] = version_number
                 
                 # End measuring time for initialize_tensor
                 init_end_time = time.time()
                 logging.debug(f"Completed initialization for tensor: {tensor_name}. Total duration: {init_end_time - init_start_time:.2f} seconds")
 
-                return model
+                return model, version_number
 
     except aiohttp.ClientError as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
@@ -580,6 +582,11 @@ async def main():
             all_task_ids.extend([(task_id, contract_index) for task_id, contract_index in pending_tasks])
             fetch_tasks = [fetch_task(task_id, contract_index) for task_id, contract_index in all_task_ids]
             fetched_tasks = await asyncio.gather(*fetch_tasks)
+            
+            if not fetched_tasks:
+                logging.debug("No tasks fetched. Sleeping...")
+            else:
+                logging.debug(f"Fetched {len(fetched_tasks)} tasks")
 
             # Clear pending tasks to update with new statuses
             pending_tasks.clear()

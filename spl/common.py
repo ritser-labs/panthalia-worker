@@ -21,15 +21,18 @@ model_config = exported_plugin.model_config
 model_adapter = exported_plugin.model_adapter
 dataset = exported_plugin.dataset
 tokenizer = exported_plugin.tokenizer
-get_learning_hyperparameters = exported_plugin.get_learning_hyperparameters
+get_sot_learning_hyperparameters = exported_plugin.get_sot_learning_hyperparameters
+get_master_learning_hyperparameters = exported_plugin.get_master_learning_hyperparameters
 batch_size = exported_plugin.batch_size
+accumulation_steps = exported_plugin.accumulation_steps
+expected_worker_time = exported_plugin.expected_worker_time
 
 SOT_PRIVATE_PORT = 5001
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
-TENSOR_VERSION_INTERVAL = 1
+TENSOR_VERSION_INTERVAL = exported_plugin.tensor_version_interval
 
 MAX_SUBMIT_TASK_RETRY_DURATION = 300
 
@@ -175,6 +178,12 @@ def upload_tensor(tensor, local_storage_dir):
 def download_file(url):
     response = requests.get(url)
     return torch.load(BytesIO(response.content))
+
+def get_future_version_number():
+    return (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
+
+def get_current_version_number():
+    return (int(time.time()) // TENSOR_VERSION_INTERVAL) * TENSOR_VERSION_INTERVAL
 
 def process_trace(trace):
     if isinstance(trace, AttributeDict):

@@ -10,7 +10,7 @@ spl/data/state/*
 spl/data/gradients/*
 spl/out.txt
 spl/sot.log
-spl/perplexity_plot.png
+spl/loss_plot.png
 spl/data/master_wallets.json
 spl/data/master_public_keys.json
 
