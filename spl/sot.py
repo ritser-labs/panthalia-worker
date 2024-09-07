@@ -496,7 +496,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 current_version_number,
                 tensor_name,
                 averaged_grads,
-                learning_params['learning_rate'] * num_of_updates,
+                learning_params['learning_rate'],
                 learning_params['beta1'],
                 learning_params['beta2'],
                 learning_params['epsilon'],
@@ -516,7 +516,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             # Cleanup old accumulated grads tensors
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
-                    #os.remove(os.path.join(state_dir, filename))
+                    os.remove(os.path.join(state_dir, filename))
                     pass
 
             logging.debug(f"Updated state for {tensor_name}")

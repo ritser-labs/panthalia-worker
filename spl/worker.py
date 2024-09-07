@@ -284,12 +284,6 @@ async def process_tasks():
             task_type = args.task_types[contract_index]
             tensor_name = get_relevant_tensor_for_task(task_type)
 
-            logging.debug(f"Syncing tensors")
-            sync_start_time = time.time()
-            model, version_number = await sync_tensors(next_task['contract_index'])
-            sync_end_time = time.time()
-            logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
-            task_queue.current_version = version_number
 
             logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
 
@@ -311,6 +305,12 @@ async def process_tasks():
             accumulation_steps = task_params['accumulation_steps']
             
             with task_processing_lock:
+                logging.debug(f"Syncing tensors")
+                sync_start_time = time.time()
+                model, version_number = await sync_tensors(next_task['contract_index'])
+                sync_end_time = time.time()
+                logging.debug(f"Sync tensors took {sync_end_time - sync_start_time:.2f} seconds")
+                task_queue.current_version = version_number
                 logging.debug("Executing training task")
                 task_start_time = time.time()
                 updates, loss = model_adapter.train_task(model, batch, targets, accumulation_steps)

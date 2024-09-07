@@ -16,10 +16,7 @@ import asyncio
 import logging
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-
 parent_dir = os.path.dirname(script_dir)
-
-# Go one level above the parent directory to get the package's root directory
 package_root_dir = os.path.dirname(parent_dir)
 
 DATA_DIR = os.path.join(parent_dir, 'data')
@@ -65,17 +62,16 @@ def parse_args():
 args = parse_args()
 
 sync_status = {}
-# Define a global cache for the latest loss and last fetch time
+
 latest_loss_cache = {
     'value': None,
     'last_fetched': 0
 }
 
-# Define the interval (in seconds) to refresh the latest loss value
-LOSS_REFRESH_INTERVAL = 60  # For example, update every 60 seconds
+LOSS_REFRESH_INTERVAL = 60
 app = Flask(__name__)
 
-base_url = None  # Global variable for the base URL
+base_url = None
 
 async def wait_for_workers_to_sync(worker_count, sot_url, timeout=600):
     start_time = time.time()
@@ -101,7 +97,6 @@ def generate_wallets(num_wallets):
 def delete_old_tensor_files(directory, timestamps_file):
     if not os.path.exists(directory):
         return
-
     if not os.path.exists(timestamps_file):
         return
 
@@ -145,13 +140,21 @@ async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_e
         )
 
 def terminate_processes(processes):
-    for process in processes:
-        process.terminate()
-    for process in processes:
+    for process_name, process in processes.items():
+        if process.poll() is None:  # If process is still running
+            logging.info(f"Terminating process {process_name} (PID {process.pid})")
+            process.terminate()
+    for process_name, process in processes.items():
         try:
             process.wait(timeout=5)  # Wait up to 5 seconds for each process to terminate
+            logging.info(f"Process {process_name} (PID {process.pid}) terminated with exit code {process.returncode}")
         except subprocess.TimeoutExpired:
+            logging.warning(f"Process {process_name} (PID {process.pid}) did not terminate in time, forcefully killing it.")
             process.kill()  # Forcefully kill the process if it doesn't terminate in time
+            process.wait()
+            logging.info(f"Process {process_name} (PID {process.pid}) was killed forcefully with exit code {process.returncode}")
+        except Exception as e:
+            logging.error(f"Error terminating process {process_name}: {e}")
 
 def reset_logs(log_dir):
     if os.path.exists(log_dir):
@@ -180,7 +183,6 @@ def fetch_latest_loss(sot_url):
                 logging.error(f"Error fetching latest loss: {response.status_code} - {response.text}")
         except requests.RequestException as e:
             logging.error(f"Error fetching latest loss: {e}")
-            # In case of an error, do not update the last fetched time to retry on next fetch
 
     return latest_loss_cache['value']
 
@@ -275,7 +277,7 @@ def monitor_processes(stdscr, processes, task_counts):
         elif key == curses.KEY_RESIZE:
             last_resize = time.time()
         elif key == ord('q'):
-            terminate_processes(list(processes.values()))
+            terminate_processes(processes)
             break
 
         if last_resize and time.time() - last_resize > 0.1:
@@ -344,11 +346,10 @@ async def set_interval_mining(web3, interval):
 async def main():
     global base_url
     processes = {}
-    task_counts = {}  # Dictionary to store task counts
-    
-    base_url = f"http://localhost:5002"  # Set base URL for Flask server
+    task_counts = {}
 
-    # Reset logs
+    base_url = f"http://localhost:5002"
+
     reset_logs(LOG_DIR)
 
     # Start anvil process
@@ -359,25 +360,19 @@ async def main():
     logging.info(f"Anvil started with PID {anvil_process.pid}")
 
     try:
-        # Delete all .pt files in the state directory except for the latest version for each tensor
         delete_old_tensor_files(STATE_DIR, BLOCK_TIMESTAMPS_FILE)
-
-        # Delete the temp directory
         delete_directory_contents(TEMP_DIR)
 
         # Start Flask server in a separate thread
         flask_thread = threading.Thread(target=lambda: app.run(port=5002))
         flask_thread.start()
 
-        # Print initial stage
         logging.info("Starting deployment...")
 
-        # Set environment variables for deployment
         os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
         os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
         os.environ['SOT_URL'] = args.sot_url
 
-        # Run Deploy.s.sol script from the correct path
         deploy_command = [
             'forge', 'script', os.path.basename(args.forge_script),
             '--broadcast', '--rpc-url', args.rpc_url,
@@ -387,7 +382,6 @@ async def main():
 
         web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
 
-        # Print deployment stage completion
         logging.info("Deployment completed successfully.")
 
         # Load subnet addresses and deployment config
@@ -406,22 +400,18 @@ async def main():
         token_address = await pool_contract.functions.token().call()
         token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
 
-        # Initialize sync_status with all subnet addresses
         sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
 
-        # Generate wallets for the master and fund them
         master_wallets = generate_wallets(args.num_master_wallets)
         await fund_wallets(web3, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
 
         with open(MASTER_WALLETS_FILE, 'w') as f:
             json.dump(master_wallets, f)
 
-        # Save the public keys of the master wallets
         master_public_keys = [wallet['address'] for wallet in master_wallets]
         with open(MASTER_PUBLIC_KEYS_FILE, 'w') as f:
             json.dump(master_public_keys, f)
 
-        # Generate wallets for workers and fund them
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
         await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
         await set_interval_mining(web3, 1)
@@ -429,22 +419,18 @@ async def main():
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
 
-        # Print SOT service initialization stage
         logging.info("Starting SOT service...")
 
-        # Start the SOT service
         sot_log = open(SOT_LOG_FILE, 'w')
         sot_process = subprocess.Popen(['python', '-m', 'spl.sot', '--public_keys_file', MASTER_PUBLIC_KEYS_FILE], stdout=sot_log, stderr=sot_log, cwd=package_root_dir)
         processes['sot'] = sot_process
         logging.info(f"SOT service started with PID {sot_process.pid}")
 
-        # Wait for the SOT service to be available
         if not wait_for_sot(args.sot_url):
             logging.error("Error: SOT service did not become available within the timeout period.")
             sot_process.terminate()
             exit(1)
 
-        # Print worker initialization stage
         logging.info("Starting worker processes...")
 
         for worker_idx in range(args.worker_count):
@@ -468,16 +454,13 @@ async def main():
             logging.info(f"Started worker process {worker_idx} for tasks with command: {' '.join(command)}")
 
         try:
-            # Wait for all workers to sync
             if not await wait_for_workers_to_sync(args.worker_count, args.sot_url):
                 logging.error("Error: Not all workers synced within the timeout period.")
-                terminate_processes(processes.values())
+                terminate_processes(processes)
                 exit(1)
 
-            # Print master initialization stage
             logging.info("Starting master process...")
 
-            # Start master.py
             master_log = open(os.path.join(LOG_DIR, 'master.log'), 'w')
             master_command = [
                 'python', '-m', 'spl.master',
@@ -492,7 +475,6 @@ async def main():
             processes['master'] = master_process
             logging.info(f"Started master process with command: {' '.join(master_command)}")
 
-            # Print master started stage
             logging.info("Master process started.")
 
             # Start the curses interface in a new thread
@@ -504,13 +486,23 @@ async def main():
 
         except Exception as e:
             logging.error(f"Error: {e}")
-            terminate_processes(list(processes.values()))
+            terminate_processes(processes)
             exit(1)
 
     except Exception as e:
         logging.error(f"Error: {e}")
-        terminate_processes(list(processes.values()))
+        terminate_processes(processes)
         exit(1)
+
+    finally:
+        # Log reasons for processes being stopped/killed
+        for process_name, process in processes.items():
+            if process.poll() is not None:  # Process has exited
+                logging.info(f"Process {process_name} terminated with exit code {process.returncode}")
+            else:
+                logging.warning(f"Process {process_name} was killed before completion.")
+
+        logging.info("All processes terminated.")
 
 if __name__ == "__main__":
     asyncio.run(main())
