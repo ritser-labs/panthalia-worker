@@ -30,6 +30,7 @@ LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
 ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
+LAST_FUTURE_VERSION_FILE = os.path.join(STATE_DIR, 'last_future_version_number.json')
 
 DOCKER_IMAGE = 'zerogoliath/magnum:latest'
 
@@ -94,7 +95,7 @@ def generate_wallets(num_wallets):
         wallets.append({'private_key': account._private_key.hex(), 'address': account.address})
     return wallets
 
-def delete_old_tensor_files(directory, timestamps_file):
+def delete_old_tensor_files(directory, timestamps_file, last_future_version_file):
     if not os.path.exists(directory):
         return
     if not os.path.exists(timestamps_file):
@@ -102,12 +103,16 @@ def delete_old_tensor_files(directory, timestamps_file):
 
     with open(timestamps_file, 'r') as f:
         block_timestamps = json.load(f)
+    
+    with open(last_future_version_file, 'r') as f:
+        last_future_version = json.load(f)
 
     tensor_files = glob.glob(os.path.join(directory, '*.pt'))
     latest_files = {f"{name}_{version}.pt" for name, version in block_timestamps.items()}
+    last_future_version_files = {f"{name}_{version}.pt" for name, version in last_future_version.items()}
 
     for tensor_file in tensor_files:
-        if os.path.basename(tensor_file) not in latest_files:
+        if os.path.basename(tensor_file) not in latest_files and os.path.basename(tensor_file) not in last_future_version_files:
             try:
                 os.remove(tensor_file)
                 logging.debug(f"Deleted old tensor file: {tensor_file}")
@@ -360,7 +365,7 @@ async def main():
     logging.info(f"Anvil started with PID {anvil_process.pid}")
 
     try:
-        delete_old_tensor_files(STATE_DIR, BLOCK_TIMESTAMPS_FILE)
+        delete_old_tensor_files(STATE_DIR, BLOCK_TIMESTAMPS_FILE, LAST_FUTURE_VERSION_FILE)
         delete_directory_contents(TEMP_DIR)
 
         # Start Flask server in a separate thread
@@ -485,12 +490,12 @@ async def main():
             await track_tasks(web3, subnet_addresses, pool_contract, task_counts)
 
         except Exception as e:
-            logging.error(f"Error: {e}")
+            logging.error(f"Error: {e}", exc_info=True)
             terminate_processes(processes)
             exit(1)
 
     except Exception as e:
-        logging.error(f"Error: {e}")
+        logging.error(f"Error: {e}", exc_info=True)
         terminate_processes(processes)
         exit(1)
 
