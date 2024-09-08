@@ -194,7 +194,8 @@ def stream_handler(stream, log_file):
 def copy_file_from_remote(ssh, remote_path, local_path, interval=1):
     """
     Copies a file from the remote server to the local system every `interval` seconds, 
-    ensuring that the file exists and is not of zero size before copying.
+    ensuring that the file exists and is not of zero size before copying. A copy of the file
+    is made on the remote server to avoid issues if the original file is modified during the transfer.
 
     Args:
         ssh (paramiko.SSHClient): The active SSH connection.
@@ -209,22 +210,31 @@ def copy_file_from_remote(ssh, remote_path, local_path, interval=1):
                 # Check if the file exists and is not zero size
                 file_stat = sftp.stat(remote_path)
                 if file_stat.st_size > 0:
-                    # If the file exists and has content, copy it to the local system
-                    sftp.get(remote_path, local_path)
-                    logging.info(f"Copied {remote_path} to {local_path}")
+                    # Create a copy of the file on the remote system
+                    temp_remote_path = remote_path + ".bak"  # Add a .bak suffix for the backup copy
+                    sftp.copy(remote_path, temp_remote_path)  # Ensure we have a temporary copy to work with
+
+                    # Copy the temporary file to the local system
+                    sftp.get(temp_remote_path, local_path)
+                    logging.info(f"Copied {temp_remote_path} to {local_path}")
+                    
+                    # Optionally remove the temporary remote copy after successful download
+                    sftp.remove(temp_remote_path)
+
                 else:
                     logging.info(f"File {remote_path} is zero size. Waiting for update...")
             except FileNotFoundError:
                 # If the file doesn't exist, log the event
-                pass
+                logging.info(f"File {remote_path} not found. Waiting for the file to be created...")
             except Exception as e:
-                logging.error(f"Error checking file: {e}")
+                logging.error(f"Error checking or copying file: {e}")
                 
             time.sleep(interval)
     except Exception as e:
         logging.error(f"Error copying file: {e}")
     finally:
         sftp.close()
+
 
 def launch_instance_and_record_logs(
     name,
