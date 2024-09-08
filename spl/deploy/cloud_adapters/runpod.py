@@ -279,8 +279,8 @@ def launch_instance_and_record_logs(
         # Step 2: Get the public IP and SSH port
         ssh_ip, ssh_port = get_pod_ssh_ip_port(pod_id, timeout=timeout)
 
-        if not is_port_open(ssh_ip, ssh_port):
-            raise TimeoutError(f"Port {ssh_port} on IP {ssh_ip} is not open.")
+        while not is_port_open(ssh_ip, ssh_port):
+            time.sleep(1)
 
         # Step 3: SSH into the pod
         ssh = paramiko.SSHClient()
