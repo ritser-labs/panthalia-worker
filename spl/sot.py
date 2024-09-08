@@ -160,7 +160,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
-                0, get_current_version_number())
+                name, get_current_version_number())
 
         file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
         if os.path.exists(file_path):
