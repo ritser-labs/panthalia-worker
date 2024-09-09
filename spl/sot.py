@@ -467,10 +467,19 @@ def create_app(public_keys_file, enable_memory_logging=False):
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
         try:
-            async with aiohttp.ClientSession() as session:
-                tensor_data = await fetch(session, result_url)
+            # Extract local file path from result_url
+            if not result_url.startswith(f"http://{request.host}/data/state/"):
+                logging.error(f"Invalid result_url: {result_url}")
+                return jsonify({'error': 'Invalid result_url'}), 400
+            file_path = result_url.replace(f"http://{request.host}/data/state/", '')
+            local_file_path = os.path.join(state_dir, file_path)
 
-            tensor = torch.load(BytesIO(tensor_data), map_location=device)  # Load tensor to the correct device
+            if not os.path.exists(local_file_path):
+                logging.error(f"File not found at {local_file_path}")
+                return jsonify({'error': 'File not found'}), 404
+
+            # Load the tensor from the local file path
+            tensor = torch.load(local_file_path, map_location=device)
 
             # Paths for accumulated grads and future tensor
             accumulated_grads_path = os.path.join(state_dir, f'accumulated_grads_{tensor_name}_{future_version_number}.pt')
@@ -529,15 +538,23 @@ def create_app(public_keys_file, enable_memory_logging=False):
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
                     os.remove(os.path.join(state_dir, filename))
-                    pass
 
             logging.debug(f"Updated state for {tensor_name}")
+
+            # Delete the file corresponding to result_url after processing
+            if os.path.exists(local_file_path):
+                os.remove(local_file_path)
+                logging.info(f"Deleted file: {local_file_path}")
+            else:
+                logging.warning(f"File not found for deletion: {local_file_path}")
+
             return jsonify({'status': 'success', 'version_number': future_version_number})
         except aiohttp.ClientError as e:
             logging.error(f"Failed to update tensor {tensor_name} due to request exception: {e}", exc_info=True)  # Add exc_info=True
         except Exception as e:
             logging.error(f"Failed to update tensor {tensor_name} due to error: {e}", exc_info=True)  # Add exc_info=True
         return jsonify({'error': 'Could not update state'}), 500
+
 
     @app.route('/latest_state', methods=['GET'])
     async def latest_state():
