@@ -145,6 +145,11 @@ def create_app(public_keys_file, enable_memory_logging=False):
             else:
                 save_json(file_path, default, file_lock)
                 return default
+    
+    def set_dict_and_adam(dict, tensor_name, value):
+        dict[tensor_name] = value
+        dict[f'{tensor_name}_adam_m'] = value
+        dict[f'{tensor_name}_adam_v'] = value
 
     # Load master's public keys
     with open(public_keys_file, 'r') as f:
@@ -160,7 +165,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
-                0, get_current_version_number())
+                name, get_current_version_number())
 
         file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
         if os.path.exists(file_path):
@@ -448,13 +453,17 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         if last_future_version_number.get(tensor_name, 0) < future_version_number:
             if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
-                block_timestamps[tensor_name] = last_future_version_number.get(tensor_name, 0)
+                set_dict_and_adam(block_timestamps, tensor_name, last_future_version_number.get(tensor_name, 0))
                 save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+                old_block_timestamp = block_timestamps.get(tensor_name, 0)
+                os.remove(os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt'))
+                os.remove(os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt'))
+                os.remove(os.path.join(state_dir, f'{tensor_name}_adam_v_{old_block_timestamp}.pt'))
         
-            num_updates[tensor_name] = 0
+            set_dict_and_adam(num_updates, tensor_name, 0)
             save_json(num_updates_file, num_updates, num_updates_file_lock)
             
-            iteration_number[tensor_name] = iteration_number.get(tensor_name, 0) + 1
+            set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
             save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
         
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
@@ -487,7 +496,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             logging.info(f'Updating state for {tensor_name}, future version number: {future_version_number}, current version number: {current_version_number}')
 
             num_of_updates = num_updates[tensor_name] + 1
-            num_updates[tensor_name] = num_of_updates
+            set_dict_and_adam(num_updates, tensor_name, num_of_updates)
             save_json(num_updates_file, num_updates, num_updates_file_lock)
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
@@ -510,7 +519,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             torch.save(v_update, future_tensor_adam_v_path)
 
             if last_future_version_number.get(tensor_name, 0) < future_version_number:
-                last_future_version_number[tensor_name] = future_version_number
+                set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
                 save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
 
             # Cleanup old accumulated grads tensors

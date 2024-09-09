@@ -47,7 +47,7 @@ class StandardPlugin:
         num_microbatches,
         example_per_microbatch,
         max_lr=0.0005,
-        min_lr=0.0001,
+        min_lr=0.00005,
         tensor_version_interval=32,
         expected_worker_time=8
     ):
@@ -78,7 +78,7 @@ class StandardPlugin:
         Returns:
             dict: A dictionary containing the learning rate and Adam optimizer parameters.
         """
-        T_0 = 400  # Initial number of iterations for the first cycle
+        T_0 = 200  # Initial number of iterations for the first cycle
         T_mult = 2  # Factor to increase the cycle length after each restart
         eta_max = self.max_lr * self.num_microbatches  # Initial learning rate (maximum)
         eta_min = self.min_lr * self.num_microbatches  # Minimum learning rate
