@@ -25,6 +25,7 @@ import threading
 import torch._dynamo
 import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+from .util.queued_lock import QueuedLock
 
 # Define the maximum number of retries for task processing
 MAX_WORKER_TASK_RETRIES = 3
@@ -56,9 +57,9 @@ last_handle_event_timestamp = None
 last_handle_event_timestamp_lock = threading.Lock()  # Lock for last_handle_event_timestamp
 
 # Lock to ensure only one task is processed at a time
-task_processing_lock = threading.Lock()
+task_processing_lock = QueuedLock()
 
-upload_lock = threading.Lock()
+upload_lock = QueuedLock()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
