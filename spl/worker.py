@@ -73,10 +73,10 @@ def parse_args():
     parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
-    parser.add_argument('--max_stakes', type=int, default=4, help="Maximum number of stakes to maintain")
+    parser.add_argument('--max_stakes', type=int, default=2, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
-    parser.add_argument('--max_queued_tasks', type=int, default=4, help="Maximum number of tasks allowed in the queue awaiting processing")
+    parser.add_argument('--max_queued_tasks', type=int, default=2, help="Maximum number of tasks allowed in the queue awaiting processing")
     return parser.parse_args()
 
 args = parse_args()
