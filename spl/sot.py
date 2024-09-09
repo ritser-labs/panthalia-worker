@@ -450,15 +450,13 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if data['version_number'] < block_timestamps.get(tensor_name, 0):
             delta = block_timestamps.get(tensor_name, 0) - data['version_number']
             logging.info(f'Delta of {delta} recorded with version number {data["version_number"]}')
+        old_block_timestamp = None
 
         if last_future_version_number.get(tensor_name, 0) < future_version_number:
             if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
                 set_dict_and_adam(block_timestamps, tensor_name, last_future_version_number.get(tensor_name, 0))
                 save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
                 old_block_timestamp = block_timestamps.get(tensor_name, 0)
-                os.remove(os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt'))
-                os.remove(os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt'))
-                os.remove(os.path.join(state_dir, f'{tensor_name}_adam_v_{old_block_timestamp}.pt'))
         
             set_dict_and_adam(num_updates, tensor_name, 0)
             save_json(num_updates_file, num_updates, num_updates_file_lock)
@@ -522,6 +520,11 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
                 save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
 
+            if old_block_timestamp is not None:
+                os.remove(os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt'))
+                os.remove(os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt'))
+                os.remove(os.path.join(state_dir, f'{tensor_name}_adam_v_{old_block_timestamp}.pt'))
+            
             # Cleanup old accumulated grads tensors
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
