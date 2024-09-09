@@ -38,7 +38,7 @@ SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
 DOCKER_IMAGE = 'runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04'
-GPU_TYPE = 'NVIDIA GeForce RTX 4090'
+GPU_TYPE = 'NVIDIA GeForce RTX 3090'
 with open(os.path.join(script_dir, 'env_setup.sh'), 'r') as f:
     DOCKER_CMD = f.read()
 
