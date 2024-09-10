@@ -12,7 +12,7 @@ from web3.exceptions import ContractCustomError
 from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from .device import device
-from .common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, async_transact_with_contract_function, expected_worker_time, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval, get_future_version_number
+from .common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, get_current_version_number, async_transact_with_contract_function, expected_worker_time, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval, get_future_version_number
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Optional, Tuple
 from io import BytesIO
@@ -405,8 +405,8 @@ async def report_sync_status():
     except aiohttp.ClientError as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-def time_until_next_version(version_number):
-    return get_future_version_number() - version_number
+def time_until_next_version():
+    return get_future_version_number() - int(time.time())
 
 async def initialize_tensor(tensor_name):
     global latest_model
@@ -420,7 +420,7 @@ async def initialize_tensor(tensor_name):
             version_number = (await response.json())['version_number']
 
 
-    time_until_next = time_until_next_version(version_number)
+    time_until_next = time_until_next_version()
     
     logging.debug(f"Time until next version: {time_until_next} seconds")
     
