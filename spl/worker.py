@@ -76,7 +76,7 @@ def parse_args():
     parser.add_argument('--max_stakes', type=int, default=2, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
-    parser.add_argument('--max_queued_tasks', type=int, default=2, help="Maximum number of tasks allowed in the queue awaiting processing")
+    parser.add_argument('--max_tasks_handling', type=int, default=2, help="Maximum number of tasks allowed in the queue awaiting processing")
     return parser.parse_args()
 
 args = parse_args()
@@ -207,9 +207,10 @@ async def upload_tensor(tensor, tensor_name):
 
 
 async def deposit_stake():
+    global concurrent_tasks_counter
     # Do not deposit stakes if queued tasks exceed the limit
-    if task_queue.queue_length() > args.max_queued_tasks:
-        logging.debug("Too many tasks in the queue. Not depositing any more stakes.")
+    if (task_queue.queue_length() + concurrent_tasks_counter) > args.max_tasks_handling:
+        logging.debug("Too many tasks being processed. Not depositing any more stakes.")
         return
 
     wallets = zip(args.private_keys, subnet_ids, stake_amounts, token_contracts, pool_contracts, worker_addresses)
