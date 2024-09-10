@@ -534,7 +534,7 @@ async def wait_for_rpc_available(web3, retry_interval=5, max_retries=60):
     logging.error(f"RPC not available after {max_retries} retries. Exiting...")
     return False
 
-async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token, distributor_contract_address):
+async def fund_wallets(web3, private_key, wallets, deployer_address, token_contract, amount_eth, amount_token, distributor_contract_address):
     logging.info('Funding wallets')
 
     distributor_contract = web3.eth.contract(address=distributor_contract_address, abi=load_abi('Distributor'))
@@ -550,7 +550,7 @@ async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_e
         'gasPrice': await web3.eth.gas_price,
         'value': sum(eth_amounts)
     })
-    signed_eth_tx = web3.eth.account.sign_transaction(distribute_eth_tx, args.private_key)
+    signed_eth_tx = web3.eth.account.sign_transaction(distribute_eth_tx, private_key)
     eth_tx_hash = await web3.eth.send_raw_transaction(signed_eth_tx.rawTransaction)
     receipt = await web3.eth.wait_for_transaction_receipt(eth_tx_hash)
     if receipt['status'] != 1:
@@ -564,7 +564,7 @@ async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_e
             web3,
             token_contract,
             'approve',
-            args.private_key,
+            private_key,
             *[distributor_contract_address, max_tokens],
         )
         logging.info('Token approval completed')
@@ -575,7 +575,7 @@ async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_e
         web3,
         distributor_contract,
         'distributeTokens',
-        args.private_key,
+        private_key,
         *[token_contract.address, recipients, [amount_token] * len(wallets)],
     )
     logging.info('Token distribution completed')

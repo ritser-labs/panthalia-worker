@@ -398,7 +398,7 @@ async def main():
         sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
 
         master_wallets = generate_wallets(args.num_master_wallets)
-        await fund_wallets(web3, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
+        await fund_wallets(web3, args.private_key, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
 
         with open(MASTER_WALLETS_FILE, 'w') as f:
             json.dump(master_wallets, f)
@@ -408,7 +408,7 @@ async def main():
             json.dump(master_public_keys, f)
 
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
-        await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
+        await fund_wallets(web3, args.private_key, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'

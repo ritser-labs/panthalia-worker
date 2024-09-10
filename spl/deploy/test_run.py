@@ -481,14 +481,14 @@ async def main():
 
         # Generate wallets for the master and fund them
         master_wallets = generate_wallets(args.num_master_wallets)
-        await fund_wallets(web3, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
+        await fund_wallets(web3, args.private_key, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
 
         # Save the public keys of the master wallets
         master_public_keys = [wallet['address'] for wallet in master_wallets]
 
         # Generate wallets for workers and fund them
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
-        await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
+        await fund_wallets(web3, args.private_key, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
 
 
         os.environ['RANK'] = '0'
