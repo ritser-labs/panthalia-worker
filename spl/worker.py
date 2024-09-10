@@ -38,7 +38,7 @@ class SuppressTracebackFilter(logging.Filter):
 
 # Set up logging with timestamps
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -121,7 +121,8 @@ class TaskQueue:
         with self.lock:  # Ensure thread-safe access to the queue
             self.queue.append(task)
             self.queue.sort(key=lambda t: t['time_status_changed'])
-            logging.debug(f"Added task: {task}. Queue size is now {len(self.queue)}")
+            how_old = int(time.time()) - task['time_status_changed']
+            logging.debug(f"Added task: {task} that is {how_old} seconds old. Queue size is now {len(self.queue)}")
 
     def get_next_task(self):
         with self.lock:  # Ensure thread-safe access to the queue
@@ -326,6 +327,8 @@ async def process_tasks():
             logging.info(f"Uploaded results for task {task_id}")
 
             submit_solution_start_time = time.time()
+            time_since_change = time.time() - next_task['time_status_changed']
+            logging.debug(f"Time since status change: {time_since_change:.2f} seconds")
             await submit_solution(task_id, result, contract_index)
             submit_solution_end_time = time.time()
             logging.debug(f"submit_solution() took {submit_solution_end_time - submit_solution_start_time:.2f} seconds")

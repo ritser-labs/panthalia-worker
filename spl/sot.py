@@ -169,6 +169,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
         if os.path.exists(file_path):
+            logging.info(f"Tensor {name} already exists at version {sync_version_number}")
             return
 
         if TENSOR_NAME not in name:

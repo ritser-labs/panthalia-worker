@@ -48,8 +48,8 @@ class StandardPlugin:
         example_per_microbatch,
         max_lr=0.003,
         min_lr=0.0003,
-        tensor_version_interval=40,
-        expected_worker_time=30
+        tensor_version_interval=50,
+        expected_worker_time=40
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
@@ -114,8 +114,7 @@ exported_plugin = StandardPlugin(
     dataset,
     tokenizer,
     num_microbatches=NUM_MICROBATCHES,
-    example_per_microbatch=EXAMPLES_PER_MICROBATCH,
-    expected_worker_time=6
+    example_per_microbatch=EXAMPLES_PER_MICROBATCH
 )
 
 #model_config = AdderModelConfig()
