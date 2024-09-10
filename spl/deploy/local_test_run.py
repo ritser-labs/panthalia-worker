@@ -7,7 +7,7 @@ import requests
 import threading
 import curses
 from flask import Flask, jsonify, send_from_directory
-from ..common import load_abi, async_transact_with_contract_function, wait_for_sot
+from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, wait_for_rpc_available, fund_wallets
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
@@ -126,23 +126,6 @@ def delete_directory_contents(directory):
             logging.debug(f"Deleted directory: {directory}")
         except Exception as e:
             logging.debug(f"Error deleting directory {directory}: {e}")
-
-async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token):
-    for wallet in wallets:
-        tx = {
-            'to': wallet['address'],
-            'value': web3.to_wei(amount_eth, 'ether'),
-            'gas': 21000,
-            'gasPrice': await web3.eth.gas_price,
-            'nonce': await web3.eth.get_transaction_count(deployer_address)
-        }
-        signed_tx = web3.eth.account.sign_transaction(tx, args.private_key)
-        await web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        await web3.eth.wait_for_transaction_receipt(signed_tx.hash)
-
-        await async_transact_with_contract_function(
-            web3, token_contract, 'transfer', args.private_key, wallet['address'], amount_token
-        )
 
 def terminate_processes(processes):
     for process_name, process in processes.items():
@@ -378,14 +361,21 @@ async def main():
         os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
         os.environ['SOT_URL'] = args.sot_url
 
+        logging.info(f'Time in string: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
+        #await set_next_block_timestamp(web3, int(time.time()))
+        
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
+        # Wait for the RPC to be available before proceeding
+        if not await wait_for_rpc_available(web3):
+            exit(1)
+        await set_interval_mining(web3, 1)
+
         deploy_command = [
             'forge', 'script', os.path.basename(args.forge_script),
             '--broadcast', '--rpc-url', args.rpc_url,
             '--private-key', args.private_key, '-vv'
         ]
         subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
-
-        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
 
         logging.info("Deployment completed successfully.")
 
@@ -397,8 +387,8 @@ async def main():
             deployment_config = json.load(file)
 
         pool_address = deployment_config['pool']
+        distributor_contract_address = deployment_config['distributor']
 
-        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
         deployer_account = web3.eth.account.from_key(args.private_key)
         deployer_address = deployer_account.address
         pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
@@ -408,7 +398,7 @@ async def main():
         sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
 
         master_wallets = generate_wallets(args.num_master_wallets)
-        await fund_wallets(web3, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
+        await fund_wallets(web3, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
 
         with open(MASTER_WALLETS_FILE, 'w') as f:
             json.dump(master_wallets, f)
@@ -418,8 +408,7 @@ async def main():
             json.dump(master_public_keys, f)
 
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
-        await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18)
-        await set_interval_mining(web3, 1)
+        await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'

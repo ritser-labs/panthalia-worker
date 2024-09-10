@@ -510,3 +510,72 @@ async def select_stakes(web3, pool, private_key):
     except Exception as e:
         logging.error(f"Error triggering remove global lock: {e}")
         raise
+
+# Add a loop to keep checking if the RPC is available
+async def wait_for_rpc_available(web3, retry_interval=5, max_retries=60):
+    """
+    Wait until the RPC connection is available.
+
+    :param web3: The web3 instance to check.
+    :param retry_interval: Time (in seconds) to wait between retries.
+    :param max_retries: Maximum number of retries before giving up.
+    """
+    retry_count = 0
+    while retry_count < max_retries:
+        try:
+            # Try to fetch the current block number as a simple check
+            await web3.eth.block_number
+            logging.info("RPC is available.")
+            return True
+        except Exception as e:
+            logging.error(f"RPC not available. Retry {retry_count + 1}/{max_retries}: {e}")
+            retry_count += 1
+            await asyncio.sleep(retry_interval)
+    logging.error(f"RPC not available after {max_retries} retries. Exiting...")
+    return False
+
+async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token, distributor_contract_address):
+    logging.info('Funding wallets')
+
+    distributor_contract = web3.eth.contract(address=distributor_contract_address, abi=load_abi('Distributor'))
+
+    # Distribute Ether
+    recipients = [wallet['address'] for wallet in wallets]
+    eth_amounts = [web3.to_wei(amount_eth, 'ether')] * len(wallets)
+
+    distribute_eth_tx = await distributor_contract.functions.distributeEther(recipients, eth_amounts).build_transaction({
+        'from': deployer_address,
+        'nonce': await web3.eth.get_transaction_count(deployer_address),
+        'gas': 3000000,  # Adjust as needed
+        'gasPrice': await web3.eth.gas_price,
+        'value': sum(eth_amounts)
+    })
+    signed_eth_tx = web3.eth.account.sign_transaction(distribute_eth_tx, args.private_key)
+    eth_tx_hash = await web3.eth.send_raw_transaction(signed_eth_tx.rawTransaction)
+    receipt = await web3.eth.wait_for_transaction_receipt(eth_tx_hash)
+    if receipt['status'] != 1:
+        raise Exception(f"Error distributing Ether: {receipt}")
+    logging.info('Ether distribution completed')
+    
+    if not hasattr(fund_wallets, 'approval_submitted') or not fund_wallets.approval_submitted:
+        # Approve the distributor contract to spend the token
+        max_tokens = 1000000000000000000000000000000  # 1e27
+        await async_transact_with_contract_function(
+            web3,
+            token_contract,
+            'approve',
+            args.private_key,
+            *[distributor_contract_address, max_tokens],
+        )
+        logging.info('Token approval completed')
+        fund_wallets.approval_submitted = True
+    
+    
+    await async_transact_with_contract_function(
+        web3,
+        distributor_contract,
+        'distributeTokens',
+        args.private_key,
+        *[token_contract.address, recipients, [amount_token] * len(wallets)],
+    )
+    logging.info('Token distribution completed')

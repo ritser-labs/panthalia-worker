@@ -6,7 +6,7 @@ import argparse
 import requests
 import threading
 import curses
-from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, SOT_PRIVATE_PORT
+from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, SOT_PRIVATE_PORT, fund_wallets
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 from .cloud_adapters.runpod import launch_instance_and_record_logs, terminate_all_pods, get_public_ip_and_port, INPUT_JSON_PATH
@@ -38,7 +38,7 @@ SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
 DOCKER_IMAGE = 'runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04'
-GPU_TYPE = 'NVIDIA GeForce RTX 3090'
+GPU_TYPE = 'NVIDIA GeForce RTX 4090'
 with open(os.path.join(script_dir, 'env_setup.sh'), 'r') as f:
     DOCKER_CMD = f.read()
 
@@ -141,53 +141,6 @@ def delete_directory_contents(directory):
             logging.debug(f"Deleted directory: {directory}")
         except Exception as e:
             logging.debug(f"Error deleting directory {directory}: {e}")
-
-async def fund_wallets(web3, wallets, deployer_address, token_contract, amount_eth, amount_token, distributor_contract_address):
-    logging.info('Funding wallets')
-
-    distributor_contract = web3.eth.contract(address=distributor_contract_address, abi=load_abi('Distributor'))
-
-    # Distribute Ether
-    recipients = [wallet['address'] for wallet in wallets]
-    eth_amounts = [web3.to_wei(amount_eth, 'ether')] * len(wallets)
-
-    distribute_eth_tx = await distributor_contract.functions.distributeEther(recipients, eth_amounts).build_transaction({
-        'from': deployer_address,
-        'nonce': await web3.eth.get_transaction_count(deployer_address),
-        'gas': 3000000,  # Adjust as needed
-        'gasPrice': await web3.eth.gas_price,
-        'value': sum(eth_amounts)
-    })
-    signed_eth_tx = web3.eth.account.sign_transaction(distribute_eth_tx, args.private_key)
-    eth_tx_hash = await web3.eth.send_raw_transaction(signed_eth_tx.rawTransaction)
-    receipt = await web3.eth.wait_for_transaction_receipt(eth_tx_hash)
-    if receipt['status'] != 1:
-        raise Exception(f"Error distributing Ether: {receipt}")
-    logging.info('Ether distribution completed')
-    
-    if not hasattr(fund_wallets, 'approval_submitted') or not fund_wallets.approval_submitted:
-        # Approve the distributor contract to spend the token
-        max_tokens = 1000000000000000000000000000000  # 1e27
-        await async_transact_with_contract_function(
-            web3,
-            token_contract,
-            'approve',
-            args.private_key,
-            *[distributor_contract_address, max_tokens],
-        )
-        logging.info('Token approval completed')
-        fund_wallets.approval_submitted = True
-    
-    
-    await async_transact_with_contract_function(
-        web3,
-        distributor_contract,
-        'distributeTokens',
-        args.private_key,
-        *[token_contract.address, recipients, [amount_token] * len(wallets)],
-    )
-    logging.info('Token distribution completed')
-
 
 def terminate_processes():
     terminate_all_pods()
@@ -487,6 +440,14 @@ async def main():
         os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
         os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
 
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
+        
+
+        # Wait for the RPC to be available before proceeding
+        if not await wait_for_rpc_available(web3):
+            exit(1)
+        await set_interval_mining(web3, 1)
+    
         # Run Deploy.s.sol script from the correct path
         deploy_command = [
             'forge', 'script', os.path.basename(args.forge_script),
@@ -494,8 +455,6 @@ async def main():
             '--private-key', args.private_key, '-vv'
         ]
         subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
-
-        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
 
         # Print deployment stage completion
         logging.info("Deployment completed successfully, loading JSON files...")
@@ -512,7 +471,6 @@ async def main():
         distributor_contract_address = deployment_config['distributor']
         pool_address = deployment_config['pool']
 
-        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         deployer_account = web3.eth.account.from_key(args.private_key)
         deployer_address = deployer_account.address
         pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
@@ -531,7 +489,7 @@ async def main():
         # Generate wallets for workers and fund them
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
         await fund_wallets(web3, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
-        await set_interval_mining(web3, 1)
+
 
         os.environ['RANK'] = '0'
         os.environ['WORLD_SIZE'] = '1'
