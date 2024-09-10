@@ -12,7 +12,7 @@ from web3.exceptions import ContractCustomError
 from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from .device import device
-from .common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, async_transact_with_contract_function, expected_worker_time, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval, get_future_version_number, get_current_version_number
+from .common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, async_transact_with_contract_function, expected_worker_time, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval, get_future_version_number
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Optional, Tuple
 from io import BytesIO
@@ -405,8 +405,8 @@ async def report_sync_status():
     except aiohttp.ClientError as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-def time_until_next_version():
-    return get_future_version_number() - int(time.time())
+def time_until_next_version(version_number):
+    return get_future_version_number() - version_number
 
 async def initialize_tensor(tensor_name):
     global latest_model
@@ -414,16 +414,19 @@ async def initialize_tensor(tensor_name):
     
     # Start measuring time
     init_start_time = time.time()
-    
-    time_until_next = time_until_next_version()
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{args.sot_url}/current_timestamp", params={'tensor_name': tensor_name}) as response:
+            version_number = (await response.json())['version_number']
+
+
+    time_until_next = time_until_next_version(version_number)
     
     logging.debug(f"Time until next version: {time_until_next} seconds")
     
     if time_until_next < expected_worker_time:
         logging.debug(f'Not enough time left waiting for {time_until_next} seconds.')
         await asyncio.sleep(time_until_next)
-
-    version_number = get_current_version_number()
 
     if latest_block_timestamps[tensor_name] == version_number:
         logging.debug(f"Tensor {tensor_name} already initialized to version {version_number}. Skipping initialization.")
@@ -437,8 +440,9 @@ async def initialize_tensor(tensor_name):
         fetch_start_time = time.time()
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params={'tensor_name': tensor_name, 'version_number': version_number}) as response:
+            async with session.get(url, params={'tensor_name': tensor_name}) as response:
                 response.raise_for_status()  # Raise an error for bad status codes
+                version_number = int(response.headers['version_number'])
 
                 tensor_fetch_time = time.time()
                 logging.debug(f"Fetched tensor {tensor_name} from {url}. Fetch duration: {tensor_fetch_time - fetch_start_time:.2f} seconds")

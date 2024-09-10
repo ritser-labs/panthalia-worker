@@ -19,6 +19,7 @@ from filelock import FileLock
 import psutil
 import tracemalloc
 import aiofiles
+import shutil
 
 # Import your custom modules
 from .common import get_sot_learning_hyperparameters, model_adapter, batch_size, get_current_version_number, TENSOR_NAME, dataset, SOT_PRIVATE_PORT, get_future_version_number
@@ -40,7 +41,7 @@ preloaded_batch_condition = asyncio.Condition(preloaded_batch_lock)
 SOT_FETCH_TIMEOUT = 300  # Timeout for fetching data from the SOT service
 
 # Initialize logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[
     logging.StreamHandler()
 ])
 logging.getLogger(__name__).setLevel(logging.INFO)
@@ -426,6 +427,55 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         return param_update.view(-1), m_update.view(-1), v_update.view(-1)
 
+    def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
+        future_version_number = get_future_version_number()
+        old_block_timestamp = None
+        
+        new_block_timestamp = last_future_version_number.get(tensor_name, 0)
+
+        if new_block_timestamp < future_version_number:
+            if new_block_timestamp > block_timestamps.get(tensor_name, 0):
+                old_block_timestamp = block_timestamps.get(tensor_name, 0)
+                set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
+                save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+                
+                for name in f'{tensor_name}', f'{tensor_name}_adam_m', f'{tensor_name}_adam_v':
+                    if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
+                        shutil.copy(os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt'))
+        
+            set_dict_and_adam(num_updates, tensor_name, 0)
+            save_json(num_updates_file, num_updates, num_updates_file_lock)
+            
+            set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
+            save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
+        return old_block_timestamp
+    
+    def cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number):
+        future_version_number = get_future_version_number()
+        if last_future_version_number.get(tensor_name, 0) < future_version_number:
+            set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
+            save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
+
+        if old_block_timestamp is not None:
+            # Define the file paths
+            file_paths = [
+                os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt'),
+                os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt'),
+                os.path.join(state_dir, f'{tensor_name}_adam_v_{old_block_timestamp}.pt')
+            ]
+            
+            # Remove each file if it exists
+            for file_path in file_paths:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                else:
+                    print(f"File not found: {file_path}")
+
+    
+    def update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
+        old_block_timestamp = update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
+        cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
+
     @app.route('/update_state', methods=['POST'])
     @requires_authentication
     async def update_state():
@@ -433,8 +483,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
         data = await request.get_json()
         tensor_name = data.get('tensor_name')
         result_url = data.get('result_url')
+        
 
-        logging.debug(f"Received tensor_name: {tensor_name}, result_url: {result_url}")
+        logging.debug(f"Received tensor_name: {tensor_name}, version: {data['version_number']}, result_url: {result_url}")
 
         if not tensor_name or not result_url:
             logging.error("Missing tensor_name or result_url in /update_state request")
@@ -448,22 +499,10 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         future_version_number = get_future_version_number()
 
-        if data['version_number'] < block_timestamps.get(tensor_name, 0):
+        if data['version_number'] != block_timestamps.get(tensor_name, 0):
             delta = block_timestamps.get(tensor_name, 0) - data['version_number']
             logging.info(f'Delta of {delta} recorded with version number {data["version_number"]}')
-        old_block_timestamp = None
-
-        if last_future_version_number.get(tensor_name, 0) < future_version_number:
-            if last_future_version_number.get(tensor_name, 0) > block_timestamps.get(tensor_name, 0):
-                old_block_timestamp = block_timestamps.get(tensor_name, 0)
-                set_dict_and_adam(block_timestamps, tensor_name, last_future_version_number.get(tensor_name, 0))
-                save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
-        
-            set_dict_and_adam(num_updates, tensor_name, 0)
-            save_json(num_updates_file, num_updates, num_updates_file_lock)
-            
-            set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
-            save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
+        old_block_timestamp = update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
         
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
@@ -526,21 +565,13 @@ def create_app(public_keys_file, enable_memory_logging=False):
             torch.save(m_update, future_tensor_adam_m_path)
             torch.save(v_update, future_tensor_adam_v_path)
 
-            if last_future_version_number.get(tensor_name, 0) < future_version_number:
-                set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
-                save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
-
-            if old_block_timestamp is not None:
-                os.remove(os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt'))
-                os.remove(os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt'))
-                os.remove(os.path.join(state_dir, f'{tensor_name}_adam_v_{old_block_timestamp}.pt'))
-            
+            cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
             # Cleanup old accumulated grads tensors
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
                     os.remove(os.path.join(state_dir, filename))
 
-            logging.debug(f"Updated state for {tensor_name}")
+            logging.debug(f"Updated state for {tensor_name} version {future_version_number} with {num_of_updates} updates")
 
             # Delete the file corresponding to result_url after processing
             if os.path.exists(local_file_path):
@@ -556,6 +587,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
             logging.error(f"Failed to update tensor {tensor_name} due to error: {e}", exc_info=True)  # Add exc_info=True
         return jsonify({'error': 'Could not update state'}), 500
 
+    def version_number_exists(version_number, tensor_name):
+        return os.path.exists(os.path.join(state_dir, f'{tensor_name}_{version_number}.pt'))
+
 
     @app.route('/latest_state', methods=['GET'])
     async def latest_state():
@@ -564,57 +598,39 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if not tensor_name:
             return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-        # Load state from file
-        block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
-
         latest_version_number = request.args.get('version_number')
-        if latest_version_number is None:
+        if latest_version_number is None or not version_number_exists(latest_version_number, tensor_name):
+            block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
             latest_version_number = block_timestamps.get(tensor_name, 0)
         else:
             latest_version_number = int(latest_version_number)
-
-        # Directory where tensor files are stored
-        tensor_files = [f for f in os.listdir(state_dir) if f.startswith(tensor_name)]
-
-        # Extract version numbers from file names
-        version_numbers = []
-        for file in tensor_files:
-            if file.startswith(tensor_name):
-                parts = file.rsplit('_', 1)
-                if len(parts) == 2 and parts[0] == tensor_name:
-                    try:
-                        version = int(parts[1].split('.')[0])
-                        if version <= latest_version_number:
-                            version_numbers.append(version)
-                    except ValueError:
-                        continue
-
-        if not version_numbers:
-            return jsonify({'error': 'Tensor not found'}), 404
-
-        # Get the latest available version number
-        latest_available_version_number = max(version_numbers)
-        state_file_path = os.path.join(state_dir, f'{tensor_name}_{latest_available_version_number}.pt')
+        
+        state_file_path = os.path.join(state_dir, f'{tensor_name}_{latest_version_number}.pt')
 
         if not os.path.exists(state_file_path):
             return jsonify({'error': 'Tensor not found'}), 404
 
         try:
             response = await send_file(state_file_path, mimetype='application/octet-stream')
-            response.headers['version_number'] = latest_available_version_number
+            response.headers['version_number'] = latest_version_number
             return response
         except Exception as e:
             logging.error(f"Error in /latest_state: {e}", exc_info=True)
             return jsonify({'error': 'Could not retrieve latest state'}), 500
 
-    @app.route('/tensor_block_timestamp', methods=['GET'])
-    async def tensor_block_timestamp():
-        logging.info("Accessing /tensor_block_timestamp endpoint")
+    @app.route('/current_timestamp', methods=['POST'])
+    async def current_timestamp():
+        logging.info("Accessing /current_timestamp endpoint")
         tensor_name = request.args.get('tensor_name')
         if not tensor_name:
             return jsonify({'error': 'Missing tensor_name parameter'}), 400
-
+        
         block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
+        num_updates = load_json(num_updates_file, {}, num_updates_file_lock)
+        iteration_number = load_json(iteration_number_file, {}, iteration_number_file_lock)
+        last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
+        update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
+
         latest_version_number = block_timestamps.get(tensor_name, 0)
         return jsonify({'version_number': latest_version_number})
 
@@ -625,7 +641,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if not tensor_name:
             return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-        state_file_path = os.path.join(data_dir, f'state/{tensor_name}.pt')
+        state_file_path = os.path.join(state_dir, f'{tensor_name}.pt')
         if not os.path.exists(state_file_path):
             return jsonify({'error': 'Tensor not found'}), 404
 
