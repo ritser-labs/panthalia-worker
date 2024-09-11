@@ -66,7 +66,7 @@ def log_memory_diff(snapshot1, snapshot2, note=''):
             logging.debug(stat)
 
 
-def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
+async def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
     if step < 1:
         raise ValueError("Step should be at least 1")
     logging.debug(f'Using LR: {lr}, weight_decay: {weight_decay}, beta1: {beta1}, beta2: {beta2}, eps: {eps}, clip_thresh: {clip_thresh}, step: {step}')
@@ -134,19 +134,20 @@ def create_app(public_keys_file, enable_memory_logging=False):
     iteration_number_file = os.path.join(state_dir, 'iteration_number.json')
     
     update_timestamp_lock = asyncio.Lock()
+    master_public_keys = None
 
-    def save_json(file_path, data, file_lock):
+    async def save_json(file_path, data, file_lock):
         with file_lock:
-            with open(file_path, 'w') as f:
-                json.dump(data, f)
+            async with aiofiles.open(file_path, 'w') as f:
+                await f.write(json.dumps(data))
 
-    def load_json(file_path, default, file_lock):
+    async def load_json(file_path, default, file_lock):
         with file_lock:
             if os.path.exists(file_path):
-                with open(file_path, 'r') as f:
-                    return json.load(f)
+                async with aiofiles.open(file_path, 'r') as f:
+                    return json.loads(await f.read())
             else:
-                save_json(file_path, default, file_lock)
+                await save_json(file_path, default, file_lock)
                 return default
     
     def set_dict_and_adam(dict, tensor_name, value):
@@ -154,17 +155,13 @@ def create_app(public_keys_file, enable_memory_logging=False):
         dict[f'{tensor_name}_adam_m'] = value
         dict[f'{tensor_name}_adam_v'] = value
 
-    # Load master's public keys
-    with open(public_keys_file, 'r') as f:
-        master_public_keys = json.load(f)
-
     async def initialize_tensor(name, sync_version_number=None, zero_init=False):
         log_memory_usage('Before initializing tensor')
         
         snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Take snapshot before the operation
         
-        block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
-        last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
+        block_timestamps = await load_json(block_timestamps_file, {}, block_timestamps_file_lock)
+        last_future_version_number = await load_json(last_future_version_file, {}, last_future_version_file_lock)
         
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
@@ -182,9 +179,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         torch.save(tensor, file_path)
         block_timestamps[name] = sync_version_number
-        save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+        await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
         last_future_version_number[name] = sync_version_number
-        save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
+        await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
 
         if MEMORY_LOGGING_ENABLED:
             snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
@@ -242,7 +239,11 @@ def create_app(public_keys_file, enable_memory_logging=False):
         return batch_filename, targets_filename
 
     async def initialize_service():
+        nonlocal master_public_keys
         logging.info("Initializing distributed environment and tensors")
+
+        async with aiofiles.open(public_keys_file, 'r') as f:
+            master_public_keys = json.loads(await f.read())
         model_adapter.initialize_environment('gloo')
         await initialize_all_tensors()
         await preload_batch()
@@ -309,7 +310,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 return jsonify({'error': 'Invalid message format'}), 401
 
             # Load the used nonces from file
-            used_nonces = load_json(os.path.join(state_dir, 'used_nonces.json'), {}, block_timestamps_file_lock)
+            used_nonces = await load_json(os.path.join(state_dir, 'used_nonces.json'), {}, block_timestamps_file_lock)
 
             # Check if the nonce has been used before
             if nonce in used_nonces:
@@ -324,7 +325,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
             # Store the nonce to prevent reuse
             used_nonces[nonce] = True
-            save_json(os.path.join(state_dir, 'used_nonces.json'), used_nonces, block_timestamps_file_lock)
+            await save_json(os.path.join(state_dir, 'used_nonces.json'), used_nonces, block_timestamps_file_lock)
 
             return await f(*args, **kwargs)
         return decorated_function
@@ -367,7 +368,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             logging.error(f"Error in /get_batch: {e}", exc_info=True)
             return jsonify({'error': 'Could not get batch'}), 500
 
-    def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
+    async def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
         tensor_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
         if not os.path.exists(tensor_path):
             raise FileNotFoundError(f"Tensor file for {tensor_name} not found at {tensor_path}")
@@ -409,7 +410,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         clip_threshold = 1.0
 
         # Get the StableAdamW updates
-        param_update, m_update, v_update = stable_adamw_update(
+        param_update, m_update, v_update = await stable_adamw_update(
             tensor,
             grads_flat,
             adam_m,
@@ -429,7 +430,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         return param_update.view(-1), m_update.view(-1), v_update.view(-1)
 
-    def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
+    async def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         future_version_number = get_future_version_number()
         old_block_timestamp = None
         
@@ -437,27 +438,27 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         if new_block_timestamp < future_version_number and not update_timestamp_lock.locked():
             if new_block_timestamp > block_timestamps.get(tensor_name, 0):
-                update_timestamp_lock.acquire()
+                await update_timestamp_lock.acquire()
                 old_block_timestamp = block_timestamps.get(tensor_name, 0)
                 set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
-                save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+                await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
                 
                 for name in f'{tensor_name}', f'{tensor_name}_adam_m', f'{tensor_name}_adam_v':
                     if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
                         shutil.copy(os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt'))
         
             set_dict_and_adam(num_updates, tensor_name, 0)
-            save_json(num_updates_file, num_updates, num_updates_file_lock)
+            await save_json(num_updates_file, num_updates, num_updates_file_lock)
             
             set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
-            save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
+            await save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
         return old_block_timestamp
     
-    def cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number):
+    async def cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number):
         future_version_number = get_future_version_number()
         if last_future_version_number.get(tensor_name, 0) < future_version_number:
             set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
-            save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
+            await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
 
         if old_block_timestamp is not None:
             # Define the file paths
@@ -476,9 +477,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if update_timestamp_lock.locked():
             update_timestamp_lock.release()
     
-    def update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
-        old_block_timestamp = update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
-        cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
+    async def update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
+        old_block_timestamp = await update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
+        await cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
 
     @app.route('/update_state', methods=['POST'])
     @requires_authentication
@@ -496,17 +497,17 @@ def create_app(public_keys_file, enable_memory_logging=False):
             return jsonify({'error': 'Missing tensor_name or result_url'}), 400
 
         # Load state from files
-        block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
-        num_updates = load_json(num_updates_file, {}, num_updates_file_lock)
-        last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
-        iteration_number = load_json(iteration_number_file, {}, iteration_number_file_lock)
+        block_timestamps = await load_json(block_timestamps_file, {}, block_timestamps_file_lock)
+        num_updates = await load_json(num_updates_file, {}, num_updates_file_lock)
+        last_future_version_number = await load_json(last_future_version_file, {}, last_future_version_file_lock)
+        iteration_number = await load_json(iteration_number_file, {}, iteration_number_file_lock)
 
         future_version_number = get_future_version_number()
 
         if data['version_number'] != block_timestamps.get(tensor_name, 0):
             delta = block_timestamps.get(tensor_name, 0) - data['version_number']
             logging.info(f'Delta of {delta} recorded with version number {data["version_number"]}')
-        old_block_timestamp = update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
+        old_block_timestamp = await update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
         
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
@@ -548,11 +549,11 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
             num_of_updates = num_updates[tensor_name] + 1
             set_dict_and_adam(num_updates, tensor_name, num_of_updates)
-            save_json(num_updates_file, num_updates, num_updates_file_lock)
+            await save_json(num_updates_file, num_updates, num_updates_file_lock)
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
             learning_params = get_sot_learning_hyperparameters(iteration_number[tensor_name])
-            future_tensor, m_update, v_update = apply_adamw(
+            future_tensor, m_update, v_update = await apply_adamw(
                 current_version_number,
                 tensor_name,
                 averaged_grads,
@@ -569,7 +570,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             torch.save(m_update, future_tensor_adam_m_path)
             torch.save(v_update, future_tensor_adam_v_path)
 
-            cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
+            await cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
             # Cleanup old accumulated grads tensors
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
@@ -604,7 +605,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         latest_version_number = request.args.get('version_number')
         if latest_version_number is None or not version_number_exists(latest_version_number, tensor_name):
-            block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
+            block_timestamps = await load_json(block_timestamps_file, {}, block_timestamps_file_lock)
             latest_version_number = block_timestamps.get(tensor_name, 0)
         else:
             latest_version_number = int(latest_version_number)
@@ -629,11 +630,11 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if not tensor_name:
             return jsonify({'error': 'Missing tensor_name parameter'}), 400
         
-        block_timestamps = load_json(block_timestamps_file, {}, block_timestamps_file_lock)
-        num_updates = load_json(num_updates_file, {}, num_updates_file_lock)
-        iteration_number = load_json(iteration_number_file, {}, iteration_number_file_lock)
-        last_future_version_number = load_json(last_future_version_file, {}, last_future_version_file_lock)
-        update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
+        block_timestamps = await load_json(block_timestamps_file, {}, block_timestamps_file_lock)
+        num_updates = await load_json(num_updates_file, {}, num_updates_file_lock)
+        iteration_number = await load_json(iteration_number_file, {}, iteration_number_file_lock)
+        last_future_version_number = await load_json(last_future_version_file, {}, last_future_version_file_lock)
+        await update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
 
         latest_version_number = block_timestamps.get(tensor_name, 0)
         return jsonify({'version_number': latest_version_number})
@@ -699,10 +700,12 @@ def create_app(public_keys_file, enable_memory_logging=False):
         total_size = request.content_length
         chunk_size = 1024 * 1024  # 1MB
 
-        with open(local_file_path, 'wb') as f:
-            for chunk in tqdm(tensor_file.stream, total=total_size // chunk_size, unit='MB', desc='Receiving'):
-                if chunk:
-                    f.write(chunk)
+        async with aiofiles.open(local_file_path, 'wb') as f:
+            while True:
+                chunk = tensor_file.read(chunk_size)
+                if not chunk:
+                    break
+                await f.write(chunk)
         logging.debug("Tensor upload completed.")
 
         tensor_name = filename.split('.')[0]
@@ -729,9 +732,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         # Update the loss value with thread-safety
         async with latest_loss_lock:
-            latest_loss = load_json(os.path.join(state_dir, 'latest_loss.json'), {'value': None}, block_timestamps_file_lock)
+            latest_loss = await load_json(os.path.join(state_dir, 'latest_loss.json'), {'value': None}, block_timestamps_file_lock)
             latest_loss['value'] = loss
-            save_json(os.path.join(state_dir, 'latest_loss.json'), latest_loss, block_timestamps_file_lock)
+            await save_json(os.path.join(state_dir, 'latest_loss.json'), latest_loss, block_timestamps_file_lock)
 
         logging.info(f"Updated latest loss for version {data['version_number']}: {loss}")
         return jsonify({'status': 'success'}), 200
@@ -739,7 +742,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
     @app.route('/get_loss', methods=['GET'])
     async def get_loss():
         logging.info("Accessing /get_loss endpoint")
-        latest_loss = load_json(os.path.join(state_dir, 'latest_loss.json'), {'value': None}, block_timestamps_file_lock)
+        latest_loss = await load_json(os.path.join(state_dir, 'latest_loss.json'), {'value': None}, block_timestamps_file_lock)
         logging.info(f"Retrieved loss: {latest_loss.get('value')}")
         loss = latest_loss.get('value')
         return jsonify({'loss': loss}), 200
