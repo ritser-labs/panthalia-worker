@@ -49,7 +49,8 @@ class StandardPlugin:
         max_lr=0.0002,
         min_lr=0.0001,
         tensor_version_interval=38,
-        expected_worker_time=33
+        expected_worker_time=33,
+        max_concurrent_iterations=4
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
@@ -62,6 +63,7 @@ class StandardPlugin:
         self.min_lr = min_lr
         self.tensor_version_interval = tensor_version_interval
         self.expected_worker_time = expected_worker_time
+        self.max_concurrent_iterations = max_concurrent_iterations
     
     def get_master_learning_hyperparameters(self, current_master_iteration):
         return {

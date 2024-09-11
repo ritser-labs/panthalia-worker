@@ -7,7 +7,7 @@ import requests
 import threading
 import curses
 from flask import Flask, jsonify, send_from_directory
-from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, wait_for_rpc_available, fund_wallets
+from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, wait_for_rpc_available, fund_wallets, MAX_CONCURRENT_ITERATIONS
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
@@ -462,6 +462,7 @@ async def main():
                 '--wallets', MASTER_WALLETS_FILE,
                 '--sot_url', args.sot_url,
                 '--subnet_addresses', args.subnet_addresses,
+                '--max_concurrent_iterations', MAX_CONCURRENT_ITERATIONS,
             ]
             if args.detailed_logs:
                 master_command.append('--detailed_logs')

@@ -6,7 +6,7 @@ import argparse
 import requests
 import threading
 import curses
-from ..common import load_abi, wait_for_rpc_available, wait_for_sot, SOT_PRIVATE_PORT, fund_wallets
+from ..common import load_abi, wait_for_rpc_available, wait_for_sot, SOT_PRIVATE_PORT, fund_wallets, MAX_CONCURRENT_ITERATIONS
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 from .cloud_adapters.runpod import launch_instance_and_record_logs, terminate_all_pods, get_public_ip_and_port, INPUT_JSON_PATH
@@ -570,7 +570,7 @@ async def main():
                 'WALLETS': INPUT_JSON_PATH + '_0',
                 'SOT_URL': sot_url,
                 'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
-                'MAX_CONCURRENT_ITERATIONS': '32',
+                'MAX_CONCURRENT_ITERATIONS': MAX_CONCURRENT_ITERATIONS,
             }
 
             # Start master.py on a remote instance
