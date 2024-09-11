@@ -143,7 +143,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 await f.write(json.dumps(data))
 
     async def load_json(file_path, default, file_lock):
-        async with file_lock:
+        with file_lock:
             if os.path.exists(file_path):
                 async with aiofiles.open(file_path, 'r') as f:
                     content = await f.read()
