@@ -406,7 +406,7 @@ async def report_sync_status():
         logging.error(f"Exception while reporting sync status: {e}")
 
 def time_until_next_version():
-    return get_future_version_number() - int(time.time())
+    return get_future_version_number() - time.time()
 
 async def initialize_tensor(tensor_name):
     global latest_model
@@ -426,7 +426,7 @@ async def initialize_tensor(tensor_name):
     
     if time_until_next < expected_worker_time:
         logging.debug(f'Not enough time left waiting for {time_until_next} seconds.')
-        await asyncio.sleep(time_until_next)
+        await asyncio.sleep(time_until_next + 0.1)
 
     if latest_block_timestamps[tensor_name] == version_number:
         logging.debug(f"Tensor {tensor_name} already initialized to version {version_number}. Skipping initialization.")
