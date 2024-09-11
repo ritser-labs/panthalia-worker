@@ -26,7 +26,7 @@ class QueuedLock:
                 with self._lock:
                     if not self._is_locked:
                         self._is_locked = True
-                        logging.debug(f"Acquired lock for event: {self._queue.queue[0][1]}")
+                        logging.debug(f"Acquired lock for event: {self._queue.queue[0][0]}")
                         return
             event.wait()  # Wait until the event is set
 
@@ -45,7 +45,7 @@ class QueuedLock:
             # Notify the next thread in the queue (with the highest priority)
             next_event = self._queue.queue[0][2]
             next_event.set()
-            logging.debug(f"Notified next event: {self._queue.queue[0][1]}")
+            logging.debug(f"Notified next event: {self._queue.queue[0][0]}")
 
     def locked(self):
         """
