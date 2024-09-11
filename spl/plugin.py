@@ -49,7 +49,7 @@ class StandardPlugin:
         max_lr=0.0002,
         min_lr=0.0001,
         tensor_version_interval=38,
-        expected_worker_time=35
+        expected_worker_time=33
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
