@@ -420,20 +420,25 @@ async def initialize_tensor(tensor_name):
     
     # Start measuring time
     init_start_time = time.time()
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{args.sot_url}/current_timestamp", params={'tensor_name': tensor_name}) as response:
-            version_number = (await response.json())['version_number']
-
-
-    time_until_next = time_until_next_version()
     
-    logging.debug(f"Time until next version: {time_until_next} seconds")
+    valid_version = False
     
-    if time_until_next < expected_worker_time:
-        time_to_sleep = time_until_next + 1
-        logging.debug(f'Not enough time left waiting for {time_to_sleep} seconds.')
-        await asyncio.sleep(time_to_sleep)
+    while not valid_version:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{args.sot_url}/current_timestamp", params={'tensor_name': tensor_name}) as response:
+                version_number = (await response.json())['version_number']
+
+        time_until_next = time_until_next_version()
+        
+        logging.debug(f"Time until next version: {time_until_next} seconds")
+        
+        if time_until_next < expected_worker_time:
+            time_to_sleep = time_until_next + 1
+            logging.debug(f'Not enough time left waiting for {time_to_sleep} seconds.')
+            await asyncio.sleep(time_to_sleep)
+        else:
+            valid_version = True
+            
 
     if latest_block_timestamps[tensor_name] == version_number:
         logging.debug(f"Tensor {tensor_name} already initialized to version {version_number}. Skipping initialization.")
