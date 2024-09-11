@@ -162,7 +162,7 @@ def fetch_latest_loss(sot_url):
     # Check if the cache is expired
     if current_time - latest_loss_cache['last_fetched'] > LOSS_REFRESH_INTERVAL:
         try:
-            response = requests.get(f"{sot_url}/get_loss")
+            response = requests.get(f"{sot_url}/get_loss", timeout=1)
             if response.status_code == 200:
                 data = response.json()
                 latest_loss_cache['value'] = data.get('loss', None)
