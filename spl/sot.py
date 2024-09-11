@@ -473,7 +473,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
                     os.remove(file_path)
                 else:
                     print(f"File not found: {file_path}")
-        update_timestamp_lock.release()
+        if update_timestamp_lock.locked():
+            update_timestamp_lock.release()
     
     def update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         old_block_timestamp = update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
