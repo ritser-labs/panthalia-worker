@@ -37,12 +37,13 @@ class QueuedLock:
                 raise RuntimeError("Cannot release an unlocked QueuedLock")
             self._is_locked = False
 
-            # Remove the event from the front of the priority queue
-            priority, count, event = self._queue.get()
-            if not self._queue.empty():
-                # Notify the next thread in the queue (with the highest priority)
-                next_event = self._queue.queue[0][2]
-                next_event.set()
+        # Remove the event from the front of the priority queue
+        priority, count, event = self._queue.get()
+        if not self._queue.empty():
+            # Notify the next thread in the queue (with the highest priority)
+            next_event = self._queue.queue[0][2]
+            next_event.set()
+            logging.debug(f"Notified next event: {self._queue.queue[0][1]}")
 
     def locked(self):
         """
