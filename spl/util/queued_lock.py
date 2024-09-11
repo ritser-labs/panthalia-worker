@@ -1,6 +1,7 @@
 import threading
 import queue
 import itertools
+import logging
 
 class QueuedLock:
     def __init__(self):
@@ -25,6 +26,7 @@ class QueuedLock:
                 with self._lock:
                     if not self._is_locked:
                         self._is_locked = True
+                        logging.debug(f"Acquired lock for event: {self._queue.queue[0][1]}")
                         return
             event.wait()  # Wait until the event is set
 
