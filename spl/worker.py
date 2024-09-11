@@ -302,6 +302,7 @@ async def process_tasks():
                 # Process the task
                 accumulation_steps = task_params['accumulation_steps']
                 logging.debug(f"Executing training task for task {task_id}")
+                time_synced = time.time()
                 model, version_number = await sync_tensors(contract_index)
 
                 updates, loss = model_adapter.train_task(model, batch, targets, accumulation_steps)
@@ -330,6 +331,7 @@ async def process_tasks():
             if task_start_time:
                 total_time = time.time() - task_start_time
                 logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
+                logging.info(f'Time since sync: {time.time() - time_synced:.2f} seconds')
 
             end_time = time.time()
             logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
@@ -426,7 +428,7 @@ async def initialize_tensor(tensor_name):
     
     if time_until_next < expected_worker_time:
         logging.debug(f'Not enough time left waiting for {time_until_next} seconds.')
-        await asyncio.sleep(time_until_next + 0.1)
+        await asyncio.sleep(time_until_next + 1)
 
     if latest_block_timestamps[tensor_name] == version_number:
         logging.debug(f"Tensor {tensor_name} already initialized to version {version_number}. Skipping initialization.")
