@@ -289,14 +289,14 @@ async def process_tasks():
             contract_index = next_task['contract_index']
             time_status_changed = next_task['time_status_changed']  # Extract the time_status_changed
 
-            logging.debug(f"Processing task with ID: {task_id}, params: {task_params}, and contract_index: {contract_index}")
+            logging.debug(f"{task_id}: Processing task with params: {task_params} and contract_index: {contract_index}")
 
             start_time = time.time()
             # Downloading batch and targets (asynchronously)
-            logging.debug(f"Downloading batch from URL: {task_params['batch_url']}")
+            logging.debug(f"{task_id}: Downloading batch from URL: {task_params['batch_url']}")
             batch = await download_file(task_params['batch_url'])
 
-            logging.debug(f"Downloading targets from URL: {task_params['targets_url']}")
+            logging.debug(f"{task_id}: Downloading targets from URL: {task_params['targets_url']}")
             targets = await download_file(task_params['targets_url'])
 
             # Acquire the lock, passing the time_status_changed as the priority
@@ -305,12 +305,12 @@ async def process_tasks():
             try:
                 # Process the task
                 accumulation_steps = task_params['accumulation_steps']
-                logging.debug(f"Executing training task for task {task_id}")
+                logging.debug(f"{task_id}: Executing training task")
                 time_synced = time.time()
                 model, version_number = await sync_tensors(contract_index)
 
                 updates, loss = model_adapter.train_task(model, batch, targets, accumulation_steps)
-                logging.info(f"Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
+                logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
 
             finally:
                 # Release the task_processing_lock
@@ -320,7 +320,7 @@ async def process_tasks():
             upload_lock.acquire(priority=time_status_changed)
             try:
                 result = await upload_results(version_number, updates, loss)
-                logging.info(f"Uploaded results for task {task_id}")
+                logging.info(f"{task_id}: Uploaded results for task {task_id}")
             finally:
                 upload_lock.release()
 
@@ -334,11 +334,11 @@ async def process_tasks():
                 task_start_time = task_start_times.pop(task_id, None)
             if task_start_time:
                 total_time = time.time() - task_start_time
-                logging.info(f"Total time to process task {task_id}: {total_time:.2f} seconds")
-                logging.info(f'Time since sync: {time.time() - time_synced:.2f} seconds')
+                logging.info(f"{task_id}: Total time to process: {total_time:.2f} seconds")
+                logging.info(f'{task_id}: Time since sync: {time.time() - time_synced:.2f} seconds')
 
             end_time = time.time()
-            logging.info(f"process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
+            logging.info(f"{task_id}: process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
 
             task_success = True  # Mark the task as successful if no exceptions occurred
 
