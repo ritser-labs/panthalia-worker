@@ -46,8 +46,8 @@ class StandardPlugin:
         tokenizer,
         num_microbatches,
         example_per_microbatch,
-        max_lr=0.003,
-        min_lr=0.0003,
+        max_lr=0.0001,
+        min_lr=0.00001,
         tensor_version_interval=36,
         expected_worker_time=33
     ):
@@ -106,7 +106,7 @@ class StandardPlugin:
 
 NUM_MICROBATCHES = 256
 
-EXAMPLES_PER_MICROBATCH = 32
+EXAMPLES_PER_MICROBATCH = 96
 
 exported_plugin = StandardPlugin(
     model_adapter,

@@ -427,8 +427,9 @@ async def initialize_tensor(tensor_name):
     logging.debug(f"Time until next version: {time_until_next} seconds")
     
     if time_until_next < expected_worker_time:
-        logging.debug(f'Not enough time left waiting for {time_until_next} seconds.')
-        await asyncio.sleep(time_until_next + 1)
+        time_to_sleep = time_until_next + 1
+        logging.debug(f'Not enough time left waiting for {time_to_sleep} seconds.')
+        await asyncio.sleep(time_to_sleep)
 
     if latest_block_timestamps[tensor_name] == version_number:
         logging.debug(f"Tensor {tensor_name} already initialized to version {version_number}. Skipping initialization.")
