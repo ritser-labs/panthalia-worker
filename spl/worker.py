@@ -268,6 +268,10 @@ async def process_tasks():
     global task_queue, concurrent_tasks_counter
     retry_attempt = 0  # Initialize retry counter
     task_success = False  # Track success status
+    
+    if task_queue.queue_length() == 0:
+        logging.debug("No tasks in the queue to process.")
+        return
 
     while retry_attempt < MAX_WORKER_TASK_RETRIES and not task_success:
         with concurrent_tasks_counter_lock:
@@ -571,6 +575,7 @@ async def main():
     # Create a ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=10) as executor:
         while True:
+            executor.submit(asyncio.run, process_tasks())
             logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
             last_loop_time = time.time()
             await deposit_stake()
