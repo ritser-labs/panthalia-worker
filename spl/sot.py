@@ -132,6 +132,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
     num_updates_file = os.path.join(state_dir, 'num_updates.json')
     last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
     iteration_number_file = os.path.join(state_dir, 'iteration_number.json')
+    
+    update_timestamp_lock = asyncio.Lock()
 
     def save_json(file_path, data, file_lock):
         with file_lock:
@@ -433,8 +435,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
         
         new_block_timestamp = last_future_version_number.get(tensor_name, 0)
 
-        if new_block_timestamp < future_version_number:
+        if new_block_timestamp < future_version_number and not update_timestamp_lock.locked():
             if new_block_timestamp > block_timestamps.get(tensor_name, 0):
+                update_timestamp_lock.acquire()
                 old_block_timestamp = block_timestamps.get(tensor_name, 0)
                 set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
                 save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
@@ -470,7 +473,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
                     os.remove(file_path)
                 else:
                     print(f"File not found: {file_path}")
-
+        update_timestamp_lock.release()
     
     def update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         old_block_timestamp = update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
