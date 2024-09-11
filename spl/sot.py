@@ -32,6 +32,7 @@ block_timestamps_file_lock = FileLock(os.path.join(data_dir, 'state', 'block_tim
 num_updates_file_lock = FileLock(os.path.join(data_dir, 'state', 'num_updates.json.lock'))
 last_future_version_file_lock = FileLock(os.path.join(data_dir, 'state', 'last_future_version_number.json.lock'))
 iteration_number_file_lock = FileLock(os.path.join(data_dir, 'state', 'iteration_number.json.lock'))
+used_nonces_file_lock = FileLock(os.path.join(data_dir, 'state', 'used_nonces.json.lock'))
 
 # Initialize locks for thread safety
 latest_loss_lock = asyncio.Lock()
@@ -310,7 +311,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 return jsonify({'error': 'Invalid message format'}), 401
 
             # Load the used nonces from file
-            used_nonces = await load_json(os.path.join(state_dir, 'used_nonces.json'), {}, block_timestamps_file_lock)
+            used_nonces = await load_json(os.path.join(state_dir, 'used_nonces.json'), {}, used_nonces_file_lock)
 
             # Check if the nonce has been used before
             if nonce in used_nonces:
@@ -325,7 +326,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
             # Store the nonce to prevent reuse
             used_nonces[nonce] = True
-            await save_json(os.path.join(state_dir, 'used_nonces.json'), used_nonces, block_timestamps_file_lock)
+            await save_json(os.path.join(state_dir, 'used_nonces.json'), used_nonces, used_nonces_file_lock)
 
             return await f(*args, **kwargs)
         return decorated_function
