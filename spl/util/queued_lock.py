@@ -43,3 +43,10 @@ class QueuedLock:
                 # Notify the next thread in the queue (with the highest priority)
                 next_event = self._queue.queue[0][2]
                 next_event.set()
+
+    def locked(self):
+        """
+        Check if the lock is currently held.
+        :return: True if the lock is held, False otherwise.
+        """
+        return self._is_locked

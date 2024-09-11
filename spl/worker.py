@@ -299,10 +299,10 @@ async def process_tasks():
             logging.debug(f"{task_id}: Downloading targets from URL: {task_params['targets_url']}")
             targets = await download_file(task_params['targets_url'])
 
-            # Acquire the lock, passing the time_status_changed as the priority
-            task_processing_lock.acquire(priority=time_status_changed)
-
             try:
+                # Acquire the lock, passing the time_status_changed as the priority
+                task_processing_lock.acquire(priority=time_status_changed)
+
                 # Process the task
                 accumulation_steps = task_params['accumulation_steps']
                 logging.debug(f"{task_id}: Executing training task")
@@ -314,15 +314,17 @@ async def process_tasks():
 
             finally:
                 # Release the task_processing_lock
-                task_processing_lock.release()
+                if task_processing_lock.locked():
+                    task_processing_lock.release()
             
-            # Upload the result
-            upload_lock.acquire(priority=time_status_changed)
             try:
+                # Upload the result
+                upload_lock.acquire(priority=time_status_changed)
                 result = await upload_results(version_number, updates, loss)
                 logging.info(f"{task_id}: Uploaded results for task {task_id}")
             finally:
-                upload_lock.release()
+                if upload_lock.locked():
+                    upload_lock.release()
 
             # Submit the solution
             await submit_solution(task_id, result, contract_index)
