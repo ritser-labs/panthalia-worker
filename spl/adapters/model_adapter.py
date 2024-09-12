@@ -85,10 +85,7 @@ class StandardModelAdapter(ModelAdapter):
         logging.debug(f"Moved inputs and targets to device. Time taken: {time.time() - start_time:.2f} seconds")
 
         microbatch_size = inputs.shape[0] // accumulation_steps
-
-        # Preallocate gradient accumulation tensors and zero them
-        grads_accumulated = [torch.zeros_like(param, device=device) for param in model.parameters()]
-
+        grads_accumulated = [torch.zeros_like(param) for param in model.parameters()]
         total_loss = 0.0
 
         logging.info(f"Accumulation steps: {accumulation_steps}, Microbatch size: {microbatch_size}")
@@ -117,13 +114,6 @@ class StandardModelAdapter(ModelAdapter):
                 list_of_grads = [param.grad for param in model.parameters()]
                 #logging.info(f'Grads: {list_of_grads}')
 
-                with torch.no_grad():
-                    for j, param in enumerate(model.parameters()):
-                        if param.grad is not None:
-                            grads_accumulated[j] += param.grad
-                # Clear gradients for next accumulation step
-                model.zero_grad()
-                
                 self.postprocess_model_after_batch(model)
 
                 # Delete intermediate variables
@@ -138,8 +128,8 @@ class StandardModelAdapter(ModelAdapter):
 
         # Normalize accumulated gradients
         with torch.no_grad():
-            for grad in grads_accumulated:
-                grad.div_(accumulation_steps)
+            for j, param in enumerate(model.parameters()):
+                grads_accumulated[j] = param.grad / accumulation_steps
         updates = torch.cat([grad.view(-1) for grad in grads_accumulated])
         loss = total_loss / accumulation_steps
 
