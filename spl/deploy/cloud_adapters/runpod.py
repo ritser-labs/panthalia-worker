@@ -362,6 +362,8 @@ def launch_instance_and_record_logs(
 
         pod_helpers['sftp_thread'] = threading.Thread(target=copy_file_from_remote, args=(ssh, remote_file_path, local_file_path))
         pod_helpers['sftp_thread'].start()
+        pod_helpers['sftp'] = sftp
+        pod_helpers['ssh'] = ssh
 
         return new_pod, pod_helpers
 

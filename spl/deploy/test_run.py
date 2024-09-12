@@ -37,6 +37,9 @@ ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 
+REMOTE_MODEL_FILE = '/app/spl/data/state/model.pt'
+LOCAL_MODEL_FILE = os.path.join(parent_dir, 'data', 'state', 'model.pt')
+
 DOCKER_IMAGE = 'runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04'
 GPU_TYPE = 'NVIDIA GeForce RTX 4090'
 with open(os.path.join(script_dir, 'env_setup.sh'), 'r') as f:
@@ -267,7 +270,7 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
         for i, (task_type, (solver_selected, active)) in enumerate(task_counts.items()):
             stdscr.addstr(task_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
 
-        stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
+        stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit, 's' to download model.", curses.A_BOLD)
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
         stdscr.refresh()
         logging.debug(6)
@@ -284,6 +287,20 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
             draw_screen()
         elif key == curses.KEY_RESIZE:
             last_resize = time.time()
+        elif key == ord('s'):
+            # Handle the "s" key press - SSH download model.pt from the SOT instance
+            try:
+                logging.info(f"Attempting to download {REMOTE_MODEL_FILE} to {LOCAL_MODEL_FILE}...")
+
+                # Get the SSH client for the SOT instance from pod_helpers
+                sftp = pod_helpers['sot']['sftp']
+                sftp.get(REMOTE_MODEL_FILE, LOCAL_MODEL_FILE)
+                logging.info(f"Downloaded model: {LOCAL_MODEL_FILE}")
+                sftp.close()
+
+            except Exception as e:
+                logging.error(f"Failed to download model: {e}")
+            draw_screen()
         elif key == ord('q'):
             terminate_processes()
             break
