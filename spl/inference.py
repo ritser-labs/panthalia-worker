@@ -12,8 +12,15 @@ print(f"Vocab size: {tokenizer.get_vocab_size()}")
 
 # Load the model from the SOT service
 def load_model():
-    flattened_params = torch.load(os.path.join(script_dir, 'data', 'state', 'model.pt'), map_location=device)
-    model = model_adapter.tensor_to_model(flattened_params)
+    model_path = os.path.join(script_dir, 'data', 'state', 'model.pt')
+    weights_tensor = None
+    if not os.path.exists(model_path):
+        print('Model not found, initializing new model')
+        weights_tensor = model_adapter.init_tensor()
+    else:
+        print(f'Model loaded from {model_path}')
+        weights_tensor = torch.load(model_path, map_location=device)
+    model = model_adapter.tensor_to_model(weights_tensor)
     model.train()
     return model
 
