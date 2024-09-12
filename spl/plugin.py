@@ -47,7 +47,7 @@ class StandardPlugin:
         num_microbatches,
         example_per_microbatch,
         max_lr=0.0004,
-        min_lr=0.0002,
+        min_lr=0.00004,
         tensor_version_interval=49,
         expected_worker_time=44,
         max_concurrent_iterations=4
