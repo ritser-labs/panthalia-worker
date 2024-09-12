@@ -46,8 +46,8 @@ class StandardPlugin:
         tokenizer,
         num_microbatches,
         example_per_microbatch,
-        max_lr=0.001,
-        min_lr=0.0003,
+        max_lr=0.0004,
+        min_lr=0.0002,
         tensor_version_interval=44,
         expected_worker_time=39,
         max_concurrent_iterations=4
