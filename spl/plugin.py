@@ -48,8 +48,8 @@ class StandardPlugin:
         example_per_microbatch,
         max_lr=0.0002,
         min_lr=0.0001,
-        tensor_version_interval=38,
-        expected_worker_time=33,
+        tensor_version_interval=44,
+        expected_worker_time=39,
         max_concurrent_iterations=4
     ):
         self.model_adapter = model_adapter
