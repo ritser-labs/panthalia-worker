@@ -109,7 +109,7 @@ class StandardModelAdapter(ModelAdapter):
                 total_loss += loss.item()
 
                 logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
-
+                backprop_start_time = time.time()
                 # Backward pass and accumulate gradients
                 loss.backward()
                 list_of_params = [param for param in model.parameters()]
@@ -130,7 +130,7 @@ class StandardModelAdapter(ModelAdapter):
                 del loss, microbatch_inputs, microbatch_targets
                 torch.cuda.empty_cache()
 
-                logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Backward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
+                logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Backward pass completed. Time taken: {time.time() - backprop_start_time:.2f} seconds")
 
             except Exception as e:
                 logging.error(f"Error processing microbatch {i + 1}/{accumulation_steps}: {e}", exc_info=True)
