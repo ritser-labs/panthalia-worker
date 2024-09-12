@@ -70,6 +70,7 @@ def parse_args():
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
     parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
     parser.add_argument('--worker_count', type=int, default=1, help="Number of workers to start")
+    parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
     return parser.parse_args()
 
 args = parse_args()

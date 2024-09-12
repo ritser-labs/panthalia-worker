@@ -58,6 +58,7 @@ def parse_args():
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
     parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
     parser.add_argument('--worker_count', type=int, default=1, help="Number of workers to start")
+    parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
     return parser.parse_args()
 
 args = parse_args()
@@ -440,6 +441,8 @@ async def main():
                 '--group', str(args.group),
                 '--backend', args.backend,
             ]
+            if args.torch_compile:
+                command.append('--torch_compile')
             worker_name = f'worker_{worker_idx}'
             log_file_path = os.path.join(LOG_DIR, f"{worker_name}.log")
             log_file = open(log_file_path, 'w')
@@ -462,7 +465,7 @@ async def main():
                 '--wallets', MASTER_WALLETS_FILE,
                 '--sot_url', args.sot_url,
                 '--subnet_addresses', args.subnet_addresses,
-                '--max_concurrent_iterations', MAX_CONCURRENT_ITERATIONS,
+                '--max_concurrent_iterations', str(MAX_CONCURRENT_ITERATIONS),
             ]
             if args.detailed_logs:
                 master_command.append('--detailed_logs')

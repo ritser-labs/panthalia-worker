@@ -36,7 +36,16 @@ cd ..
 # Command selection based on the SERVICE_TYPE argument
 case $SERVICE_TYPE in
     worker)
-        python -m spl.worker --task_types ${TASK_TYPES} --subnet_addresses ${SUBNET_ADDRESSES} --private_keys ${PRIVATE_KEYS} --rpc_url ${RPC_URL} --sot_url ${SOT_URL} --pool_address ${POOL_ADDRESS} --group ${GROUP} --backend ${BACKEND}
+        # Build the command for the worker service
+        CMD="python -m spl.worker --task_types ${TASK_TYPES} --subnet_addresses ${SUBNET_ADDRESSES} --private_keys ${PRIVATE_KEYS} --rpc_url ${RPC_URL} --sot_url ${SOT_URL} --pool_address ${POOL_ADDRESS} --group ${GROUP} --backend ${BACKEND}"
+
+        # Append --torch_compile if TORCH_COMPILE is set to true
+        if [ "$TORCH_COMPILE" = "true" ]; then
+            CMD="$CMD --torch_compile"
+        fi
+
+        # Execute the command
+        eval $CMD
         ;;
     master)
         python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES} --max_concurrent_iterations ${MAX_CONCURRENT_ITERATIONS}

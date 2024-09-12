@@ -149,7 +149,7 @@ class StandardModelAdapter(ModelAdapter):
     
     def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
         model = torch.compile(model)
-        _ = model(*self.get_dummy_input())
+        _ = self.forward(model, self.get_dummy_input())
         return model
 
     @abstractmethod
@@ -234,11 +234,14 @@ class TransformerModelAdapter(StandardModelAdapter):
                     layer.attention.cache_v = layer.attention.cache_v.detach()
     
     def get_dummy_input(self):
-        return (torch.randint(
-            0,
-            self.model_config.model_params.vocab_size,
-            (1, self.model_config.model_params.max_seq_len)
-        ).to(device), 0)
+        batch_size = 1
+        value = torch.randint(
+            1,  # Lower bound for random integers (inclusive)
+            self.model_config.get_vocab_size(),  # Upper bound for random integers (exclusive)
+            (batch_size, self.model_config.get_max_seq_len())  # Shape: (batch_size, max_seq_len)
+        ).to(device)
+        print(f'Dummy input: {value}')
+        return value
     
     def get_top_token(self, logits):
         return torch.argmax(logits, dim=-1).cpu().numpy().tolist()[0]
