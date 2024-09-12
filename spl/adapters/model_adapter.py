@@ -89,6 +89,7 @@ class StandardModelAdapter(ModelAdapter):
         total_loss = 0.0
 
         logging.info(f"Accumulation steps: {accumulation_steps}, Microbatch size: {microbatch_size}")
+        model.zero_grad()
         
 
         for i in range(accumulation_steps):
