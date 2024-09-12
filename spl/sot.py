@@ -165,6 +165,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         dict[f'{tensor_name}_adam_v'] = value
 
     async def initialize_tensor(name, sync_version_number=None, zero_init=False):
+        logging.info(f"Initializing tensor {name}")
         log_memory_usage('Before initializing tensor')
         
         snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Take snapshot before the operation
@@ -199,6 +200,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         log_memory_usage('After initializing tensor')
 
     async def initialize_all_tensors():
+        logging.info("Initializing all tensors")
         await initialize_tensor(TENSOR_NAME, zero_init=False)
         await initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
         await initialize_tensor(f'{TENSOR_NAME}_adam_v', zero_init=True)
@@ -255,8 +257,10 @@ def create_app(public_keys_file, enable_memory_logging=False):
             master_public_keys = json.loads(await f.read())
         model_adapter.initialize_environment('gloo')
         await initialize_all_tensors()
+        logging.info(f'Loading initial batch for service')
         await preload_batch()
         log_memory_usage('After initializing service')
+        logging.info("Service initialized")
 
     @app.route('/health', methods=['GET'])
     async def health_check():
