@@ -192,7 +192,7 @@ class Master:
         loss_value = result['loss']
         self.loss_queue.put(loss_value)
         await self.update_latest_loss(loss_value, result['version_number'])
-        await self.update_sot_all(TENSOR_NAME, learning_params, TENSOR_NAME, result, iteration_number=iteration_number)
+        await self.update_sot(learning_params, TENSOR_NAME, result, batch_url, targets_url)
 
 
         task = asyncio.create_task(self.main_iteration(self.iteration))
@@ -240,11 +240,13 @@ class Master:
                 return result
             await asyncio.sleep(0.5)
 
-    async def update_sot(self, learning_params, tensor_name, result):
+    async def update_sot(self, learning_params, tensor_name, result, batch_url, targets_url):
         params = {
             'result_url': result['grads_url'],
             'tensor_name': tensor_name,
             'version_number': result['version_number'],
+            'batch_url': batch_url,
+            'targets_url': targets_url,
             **learning_params
         }
 
@@ -271,9 +273,6 @@ class Master:
                     logging.error(f"Failed to update loss value: {await response.text()}")
                 else:
                     logging.info(f"Updated latest loss value to {loss_value}")
-
-    async def update_sot_all(self, tensor_name, learning_params, task_type, result, layer_idx=None, iteration_number=None):
-        await self.update_sot(learning_params, tensor_name, result)
 
     async def get_batch_and_targets_url(self):
         wallet = self.get_next_wallet()

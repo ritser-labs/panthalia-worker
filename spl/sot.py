@@ -490,6 +490,13 @@ def create_app(public_keys_file, enable_memory_logging=False):
         old_block_timestamp = await update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
         await cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
 
+    def get_local_file_path(url, request):
+        if not url.startswith(f"http://{request.host}/data/state/"):
+            logging.error(f"Invalid URL: {url}")
+            return None
+        path_relative_to_state = url.replace(f"http://{request.host}/data/state/", '')
+        return os.path.join(state_dir, path_relative_to_state)
+
     @app.route('/update_state', methods=['POST'])
     @requires_authentication
     async def update_state():
@@ -521,12 +528,14 @@ def create_app(public_keys_file, enable_memory_logging=False):
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
         try:
-            # Extract local file path from result_url
-            if not result_url.startswith(f"http://{request.host}/data/state/"):
-                logging.error(f"Invalid result_url: {result_url}")
-                return jsonify({'error': 'Invalid result_url'}), 400
-            file_path = result_url.replace(f"http://{request.host}/data/state/", '')
-            local_file_path = os.path.join(state_dir, file_path)
+            local_file_path = get_local_file_path(result_url, request)
+            
+            local_batch_file_path = get_local_file_path(batch_url, request)
+            local_targets_file_path = get_local_file_path(targets_url, request)
+            logging.debug(f'Deleting batch and targets: {local_batch_file_path}, {local_targets_file_path}')
+            os.remove(local_batch_file_path)
+            os.remove(local_targets_file_path)
+            logging.debug(f"Deleted batch and targets: {local_batch_file_path}, {local_targets_file_path}")
 
             if not os.path.exists(local_file_path):
                 logging.error(f"File not found at {local_file_path}")
