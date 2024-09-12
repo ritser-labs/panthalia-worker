@@ -296,8 +296,6 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
                 sftp = pod_helpers['sot']['sftp']
                 sftp.get(REMOTE_MODEL_FILE, LOCAL_MODEL_FILE)
                 logging.info(f"Downloaded model: {LOCAL_MODEL_FILE}")
-                sftp.close()
-
             except Exception as e:
                 logging.error(f"Failed to download model: {e}")
             draw_screen()
