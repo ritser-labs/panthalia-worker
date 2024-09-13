@@ -108,7 +108,7 @@ class StandardPlugin:
 
 NUM_MICROBATCHES = 32 # 256,512
 
-EXAMPLES_PER_MICROBATCH = 768 # 32,512
+EXAMPLES_PER_MICROBATCH = 512 # 32,512
 
 exported_plugin = StandardPlugin(
     model_adapter,
