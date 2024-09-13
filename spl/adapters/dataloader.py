@@ -6,7 +6,6 @@ from torch.utils.data import IterableDataset
 from datasets import load_dataset
 from .model_config import BaseModelConfig, TransformerModelConfig
 import time
-import logging
 
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,7 +21,6 @@ class LanguageDataLoader(IterableDataset):
         start_time = time.time()
         self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
         end_time = time.time()
-        logging.debug(f"[INFO] Time to fill buffer: {end_time - start_time:.4f} seconds")
 
     def __iter__(self):
         self.buffer_pos = 0  # Reset position when creating a new iterator
@@ -34,7 +32,6 @@ class LanguageDataLoader(IterableDataset):
             buffer_refill_start_time = time.time()
             self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
             buffer_refill_end_time = time.time()
-            logging.debug(f"[INFO] Buffer refill time: {buffer_refill_end_time - buffer_refill_start_time:.4f} seconds")
 
             if not self.buffer:
                 raise StopIteration
@@ -45,7 +42,6 @@ class LanguageDataLoader(IterableDataset):
         token_pair = self.buffer[self.buffer_pos]
         self.buffer_pos += 1  # Move to the next pair
         line_end_time = time.time()
-        logging.debug(f"[INFO] Time to read token pair from buffer: {line_end_time - line_start_time:.4f} seconds")
 
         return token_pair
 
@@ -64,7 +60,6 @@ class LanguageDataLoader(IterableDataset):
         tokenize_start_time = time.time()
         tokens = self.model_config.tokenizer.encode(text)
         tokenize_end_time = time.time()
-        logging.debug(f"[INFO] Time to tokenize text: {tokenize_end_time - tokenize_start_time:.4f} seconds")
 
         split_start_time = time.time()
         start_pos = 0
@@ -80,7 +75,6 @@ class LanguageDataLoader(IterableDataset):
             start_pos += seq_len
 
         split_end_time = time.time()
-        logging.debug(f"[INFO] Time to split tokens: {split_end_time - split_start_time:.4f} seconds")
         return token_pairs
 
     def fill_buffer_with_token_pairs(self, text_generator, max_seq_len):
@@ -94,12 +88,10 @@ class LanguageDataLoader(IterableDataset):
             if len(self.buffer) >= self.buffer_size:
                 break
         tokenization_end_time = time.time()
-        logging.debug(f"[INFO] Time to tokenize text and split into token pairs: {tokenization_end_time - tokenization_start_time:.4f} seconds")
 
         random.shuffle(self.buffer)
 
         buffer_fill_end_time = time.time()
-        logging.debug(f"[INFO] Time to fill buffer with token pairs: {buffer_fill_end_time - buffer_fill_start_time:.4f} seconds")
 
 
 
@@ -110,7 +102,6 @@ class WikipediaDataLoader(LanguageDataLoader):
         self.dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
         self.dataset_iter = iter(self.dataset)
         dataset_load_end_time = time.time()
-        logging.debug(f"[INFO] Time to load Wikipedia dataset: {dataset_load_end_time - dataset_load_start_time:.4f} seconds")
 
     def _text_generator(self):
         for example in self.dataset_iter:
@@ -125,7 +116,6 @@ class ShakespeareDataLoader(LanguageDataLoader):
         lines_load_start_time = time.time()
         self.lines = self.load_lines()
         lines_load_end_time = time.time()
-        logging.debug(f"[INFO] Time to load Shakespeare lines: {lines_load_end_time - lines_load_start_time:.4f} seconds")
 
         super().__init__(model_config, buffer_size, max_seq_len)
 
@@ -167,7 +157,6 @@ class FineWebDataLoader(LanguageDataLoader):
         self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True)
         self.dataset_iter = iter(self.dataset)
         dataset_load_end_time = time.time()
-        logging.debug(f"[INFO] Time to load FineWeb dataset: {dataset_load_end_time - dataset_load_start_time:.4f} seconds")
 
     def _text_generator(self):
         for example in self.dataset_iter:
