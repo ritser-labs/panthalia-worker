@@ -482,10 +482,6 @@ async def main():
 
         # Print initial stage
         logging.info("Starting deployment...")
-    
-        with open(args.subnet_addresses, 'r') as file:
-            subnet_addresses = json.load(file)
-
 
         # Set environment variables for deployment
         os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
@@ -510,6 +506,10 @@ async def main():
         # Print deployment stage completion
         logging.info("Deployment completed successfully, loading JSON files...")
 
+
+    
+        with open(args.subnet_addresses, 'r') as file:
+            subnet_addresses = json.load(file)
 
         with open(args.deployment_config, 'r') as file:
             deployment_config = json.load(file)
