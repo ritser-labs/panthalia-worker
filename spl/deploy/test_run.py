@@ -447,7 +447,7 @@ async def main():
         template_id=BASE_TEMPLATE_ID,
         cmd=DOCKER_CMD,
         env=env,
-        input_jsons=[master_public_keys, subnet_addresses]
+        input_jsons=[master_public_keys]
     )
 
     # Start Anvil on a remote instance
