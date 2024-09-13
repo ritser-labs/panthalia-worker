@@ -418,10 +418,6 @@ async def main():
 
     # Reset logs
     reset_logs(LOG_DIR)
-    
-    with open(args.subnet_addresses, 'r') as file:
-        subnet_addresses = json.load(file)
-
     master_wallets = generate_wallets(args.num_master_wallets)
     master_public_keys = [wallet['address'] for wallet in master_wallets]
 
@@ -435,7 +431,6 @@ async def main():
         'RANK': '0',
         'WORLD_SIZE': '1',
         'PUBLIC_KEYS': INPUT_JSON_PATH + '_0',
-        'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
         'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
     }
 
@@ -487,6 +482,10 @@ async def main():
 
         # Print initial stage
         logging.info("Starting deployment...")
+    
+        with open(args.subnet_addresses, 'r') as file:
+            subnet_addresses = json.load(file)
+
 
         # Set environment variables for deployment
         os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
