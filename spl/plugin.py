@@ -106,7 +106,7 @@ class StandardPlugin:
             'accumulation_steps': self.accumulation_steps
         }
 
-NUM_MICROBATCHES = 32 # 256,512
+NUM_MICROBATCHES = 48 # 256,512
 
 EXAMPLES_PER_MICROBATCH = 512 # 32,512
 
