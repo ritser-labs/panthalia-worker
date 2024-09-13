@@ -27,47 +27,6 @@ def load_model():
 # Initialize the model
 model = None
 
-# Function to make a prediction and get the next token
-def predict_next_token(tokens):
-    input_tensor = torch.tensor([tokens], dtype=torch.long).to(device)
-    with torch.inference_mode():
-        outputs = model_adapter.forward(model, input_tensor)
-    # The last token in the output corresponds to the prediction for the next token in the sequence
-    next_token = model_adapter.get_top_token(outputs[:, -1, :])
-    return next_token
-
-# Function to run continuous inference and keep generating tokens
-def generate_tokens(text, max_length=50):
-    tokens = tokenizer.encode(
-        text,
-        bos=False,
-        eos=False,
-        allowed_special=set(),
-        disallowed_special=()
-    )
-
-    print(f"Initial tokens: {tokens}")
-
-    # Keep generating until the desired length is reached or exit is triggered
-    while True:
-        # Predict the next token
-        next_token = predict_next_token(tokens)
-        print(f"Next token: {next_token}")
-
-        # Add the next token to the sequence
-        tokens.append(next_token)
-
-        # If the sequence gets too long, truncate the first token
-        if len(tokens) > max_length:
-            tokens = tokens[1:]
-
-        # Decode the current sequence to text and print
-        decoded_text = tokenizer.decode(tokens)
-        print(f"Generated text: {decoded_text}")
-
-        # Optional: You can add a stopping condition here, e.g., based on a special token or length
-        # To stop the loop manually, just use a KeyboardInterrupt (Ctrl+C)
-
 # Main function to initialize and run the model
 def main():
     global model
@@ -93,7 +52,11 @@ def main():
             user_input = input("Input: ")
             if user_input.lower() == 'exit':
                 break
-            generate_tokens(user_input)
+            tokenized_user_input = tokenizer.encode(user_input)
+            tokenized_user_input_tensor = torch.tensor(tokenized_user_input, dtype=torch.long).unsqueeze(0).to(device)
+            tokenized_output = model_adapter.generate(model, tokenized_user_input_tensor)
+            output = tokenizer.decode(tokenized_output[0])
+            print(f"Output: {output}")
     except KeyboardInterrupt:
         print("Shutting down...")
 

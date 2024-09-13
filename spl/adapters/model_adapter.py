@@ -236,6 +236,9 @@ class TransformerModelAdapter(StandardModelAdapter):
     
     def get_top_token(self, logits):
         return torch.argmax(logits, dim=-1).cpu().numpy().tolist()[0]
+    
+    def generate(self, model, input, max_new_tokens=None):
+        pass
 
 class AdderModelAdapter(StandardModelAdapter):
     def loss_fn(self, logits, targets) -> torch.Tensor:
@@ -262,3 +265,8 @@ class NanoGPTModelAdapter(TransformerModelAdapter):
     
     def forward(self, model, inputs):
         return model.forward(inputs)[0]
+
+    def generate(self, model, input, max_new_tokens=None):
+        if max_new_tokens is None:
+            max_new_tokens = self.model_config.get_max_seq_len()
+        return model.generate(input, max_new_tokens)
