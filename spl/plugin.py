@@ -47,11 +47,12 @@ class StandardPlugin:
         tokenizer,
         num_microbatches,
         example_per_microbatch,
-        max_lr=0.0004,
-        min_lr=0.00004,
-        tensor_version_interval=36,
-        expected_worker_time=31,
-        max_concurrent_iterations=4
+        max_lr=1,
+        min_lr=1,
+        tensor_version_interval=60,
+        expected_worker_time=55,
+        max_concurrent_iterations=4,
+        inner_learning_rate=0.001
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
@@ -65,10 +66,12 @@ class StandardPlugin:
         self.tensor_version_interval = tensor_version_interval
         self.expected_worker_time = expected_worker_time
         self.max_concurrent_iterations = max_concurrent_iterations
+        self.inner_learning_rate = inner_learning_rate
     
     def get_master_learning_hyperparameters(self, current_master_iteration):
         return {
-            'accumulation_steps': self.accumulation_steps,
+            'steps': self.num_microbatches,
+            'learning_rate': self.inner_learning_rate
         }
     
     def get_sot_learning_hyperparameters(self, current_iteration):
@@ -81,10 +84,10 @@ class StandardPlugin:
         Returns:
             dict: A dictionary containing the learning rate and Adam optimizer parameters.
         """
-        T_0 = 200  # Initial number of iterations for the first cycle
+        T_0 = 20  # Initial number of iterations for the first cycle
         T_mult = 2  # Factor to increase the cycle length after each restart
-        eta_max = self.max_lr * self.num_microbatches  # Initial learning rate (maximum)
-        eta_min = self.min_lr * self.num_microbatches  # Minimum learning rate
+        eta_max = self.max_lr  # Initial learning rate (maximum)
+        eta_min = self.min_lr  # Minimum learning rate
 
         # Determine the current cycle length
         cycle_length = T_0
@@ -95,6 +98,8 @@ class StandardPlugin:
 
         # Calculate the learning rate using the cosine annealing formula
         lr = eta_min + (eta_max - eta_min) * (1 + math.cos(math.pi * current_iteration / cycle_length)) / 2
+        
+        print(f'Calculated LR: {lr}')
 
         return {
             'learning_rate': lr,
@@ -106,9 +111,9 @@ class StandardPlugin:
             'accumulation_steps': self.accumulation_steps
         }
 
-NUM_MICROBATCHES = 48 # 256,512
+NUM_MICROBATCHES = 450 # 256,512
 
-EXAMPLES_PER_MICROBATCH = 512 # 32,512
+EXAMPLES_PER_MICROBATCH = 32 # 32,512
 
 exported_plugin = StandardPlugin(
     model_adapter,

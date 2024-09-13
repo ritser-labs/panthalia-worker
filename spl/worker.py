@@ -304,12 +304,13 @@ async def process_tasks():
                 task_processing_lock.acquire(priority=time_status_changed)
 
                 # Process the task
-                accumulation_steps = task_params['accumulation_steps']
+                steps = task_params['steps']
+                learning_rate = task_params['learning_rate']
                 logging.debug(f"{task_id}: Executing training task")
                 time_synced = time.time()
                 model, version_number = await sync_tensors(contract_index)
 
-                updates, loss = model_adapter.train_task(model, batch, targets, accumulation_steps)
+                updates, loss = model_adapter.train_task(model, batch, targets, steps, learning_rate)
                 logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
 
             finally:

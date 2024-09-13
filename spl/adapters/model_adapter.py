@@ -14,7 +14,7 @@ class ModelAdapter(ABC):
         self.model_config = model_config
     
     @abstractmethod
-    def train_task(self, model, inputs, targets, accumulation_steps):
+    def train_task(self, model, inputs, targets, steps, learning_rate):
         pass
     
     @abstractmethod
@@ -75,7 +75,7 @@ class StandardModelAdapter(ModelAdapter):
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss
 
-    def train_task(self, model, inputs, targets, accumulation_steps):
+    def train_task(self, model, inputs, targets, steps, learning_rate):
         logging.info("Starting train_task")
 
         start_time = time.time()
@@ -84,59 +84,54 @@ class StandardModelAdapter(ModelAdapter):
 
         logging.debug(f"Moved inputs and targets to device. Time taken: {time.time() - start_time:.2f} seconds")
 
-        microbatch_size = inputs.shape[0] // accumulation_steps
-        grads_accumulated = [torch.zeros_like(param) for param in model.parameters()]
-        total_loss = 0.0
+        batch_size = inputs.shape[0] // steps
+        initial_params = [param.clone().detach() for param in model.parameters()]
 
-        logging.info(f"Accumulation steps: {accumulation_steps}, Microbatch size: {microbatch_size}")
-        model.zero_grad()
-        
+        logging.info(f"Steps: {steps}, Batch size: {batch_size}")
+        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-        for i in range(accumulation_steps):
+        first_loss = None
+        for i in range(steps):
             batch_start_time = time.time()
             try:
-                microbatch_inputs = inputs[i * microbatch_size:(i + 1) * microbatch_size].detach()
-                microbatch_targets = targets[i * microbatch_size:(i + 1) * microbatch_size].detach()
-                
-                #logging.info(f'Microbatch Inputs: {microbatch_inputs}')
-                #logging.info(f'Microbatch Targets: {microbatch_targets}')
+                batch_inputs = inputs[i * batch_size:(i + 1) * batch_size].detach()
+                batch_targets = targets[i * batch_size:(i + 1) * batch_size].detach()
 
                 # Forward pass
-                loss = self.forward_and_loss(model, microbatch_inputs, microbatch_targets)
-                #logging.info(f'Loss: {loss}')
-                total_loss += loss.item()
+                optimizer.zero_grad()
+                loss = self.forward_and_loss(model, batch_inputs, batch_targets)
+                loss_value = loss.item()
+                if first_loss is None:
+                    first_loss = loss_value
 
-                logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
+                logging.debug(f"Step {i + 1}/{steps}: Forward pass completed. Time taken: {time.time() - batch_start_time:.2f} seconds")
+                logging.debug(f"Loss: {loss_value}")
                 backprop_start_time = time.time()
+
                 # Backward pass and accumulate gradients
                 loss.backward()
-                list_of_params = [param for param in model.parameters()]
-                #logging.info(f'Params: {list_of_params}')
-                list_of_grads = [param.grad for param in model.parameters()]
-                #logging.info(f'Grads: {list_of_grads}')
+                optimizer.step()
 
                 self.postprocess_model_after_batch(model)
 
                 # Delete intermediate variables
-                del loss, microbatch_inputs, microbatch_targets
+                del loss, batch_inputs, batch_targets
                 torch.cuda.empty_cache()
 
-                logging.debug(f"Microbatch {i + 1}/{accumulation_steps}: Backward pass completed. Time taken: {time.time() - backprop_start_time:.2f} seconds")
+                logging.debug(f"Step {i + 1}/{steps}: Backward pass completed. Time taken: {time.time() - backprop_start_time:.2f} seconds")
 
             except Exception as e:
-                logging.error(f"Error processing microbatch {i + 1}/{accumulation_steps}: {e}", exc_info=True)
+                logging.error(f"Error processing batch {i + 1}/{steps}: {e}", exc_info=True)
                 raise  # Re-raise the exception after logging
 
-        # Normalize accumulated gradients
+        # Efficient parameter difference computation
         with torch.no_grad():
-            for j, param in enumerate(model.parameters()):
-                grads_accumulated[j] = param.grad / accumulation_steps
-        updates = torch.cat([grad.view(-1) for grad in grads_accumulated])
-        loss = total_loss / accumulation_steps
+            param_diff = [init_param - param for param, init_param in zip(model.parameters(), initial_params)]
+            updates = torch.cat([diff.view(-1) for diff in param_diff])
 
-        logging.info(f"Model task completed. Total loss: {loss:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
+        logging.info(f"Model task completed. Loss: {first_loss:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
         logging.info(f'Updates: {updates}')
-        return updates, loss
+        return updates, first_loss
     
     def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
         model = torch.compile(model)
@@ -148,8 +143,9 @@ class StandardModelAdapter(ModelAdapter):
         pass
     
     def model_to_tensor(self, model: torch.nn.Module) -> torch.Tensor:
-        params = list(model.parameters())
-        return torch.cat([p.view(-1) for p in params])
+        return torch.cat(tuple(p.view(-1) for p in model.parameters())).to(device)
+
+
 
     def tensor_to_model(self, tensor: torch.Tensor, existing_model=None) -> torch.nn.Module:
         if existing_model is not None:
