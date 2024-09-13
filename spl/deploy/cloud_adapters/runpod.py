@@ -358,7 +358,8 @@ async def launch_instance_and_record_logs(
         remote_file_path = "/app/spl/loss_plot.png"  # Path to the file on the remote system
 
         # Define the local path relative to the script
-        local_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loss_plot.png")
+        local_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "loss_plot.png")
+
 
         pod_helpers['sftp_thread'] = asyncio.create_task(copy_file_from_remote(ssh, remote_file_path, local_file_path))
         pod_helpers['sftp'] = sftp
