@@ -536,6 +536,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         try:
             local_file_path = get_local_file_path(result_url, request)
+            batch_url = data.get('batch_url')
+            targets_url = data.get('targets_url')
             
             local_batch_file_path = get_local_file_path(batch_url, request)
             local_targets_file_path = get_local_file_path(targets_url, request)
