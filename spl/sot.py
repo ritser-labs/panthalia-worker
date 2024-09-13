@@ -215,6 +215,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         batch = []
         targets = []
+        
+        logging.debug(f"Preloading batch for service")
 
         for inputs, target_tokens in dataset:
             if len(batch) >= batch_size:
@@ -226,6 +228,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             batch.append(inputs)
             targets.append(target_tokens)
 
+        logging.debug(f"Preloaded batch of size {len(batch)}")
         if batch:
             batch_tensor = torch.stack(batch)
             targets_tensor = torch.stack(targets)
