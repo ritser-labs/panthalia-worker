@@ -561,20 +561,7 @@ async def main():
             )
             for worker_idx in range(args.worker_count)
         ]
-        worker_results = await asyncio.gather(*worker_tasks)
-
-        # Unpack worker results
-        for worker_name, worker_instance, worker_helpers in worker_results:
-            pod_helpers[worker_name] = worker_helpers
-            processes[worker_name] = worker_instance
-
         try:
-            # Wait for all workers to sync
-            if not await wait_for_workers_to_sync(args.worker_count):
-                logging.error("Error: Not all workers synced within the timeout period.")
-                terminate_processes()
-                exit(1)
-
             # Print master initialization stage
             logging.info("Starting master process...")
 
@@ -604,6 +591,15 @@ async def main():
             pod_helpers['master'] = master_helpers
             processes['master'] = master_instance
             logging.info(f"Master process started on instance {master_instance['id']}")
+                
+                
+            worker_results = await asyncio.gather(*worker_tasks)
+
+            # Unpack worker results
+            for worker_name, worker_instance, worker_helpers in worker_results:
+                pod_helpers[worker_name] = worker_helpers
+                processes[worker_name] = worker_instance
+
 
             # Start the curses interface in a new thread
             curses_thread = threading.Thread(target=curses.wrapper, args=(monitor_processes, processes, pod_helpers, task_counts))
