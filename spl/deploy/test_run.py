@@ -389,7 +389,7 @@ async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_cont
     }
 
     worker_name = f'worker_{worker_idx}'
-    worker_instance, worker_helpers = launch_instance_and_record_logs(
+    worker_instance, worker_helpers = await launch_instance_and_record_logs(
         name=worker_name,
         gpu_type=GPU_TYPE,
         image=DOCKER_IMAGE,
@@ -418,10 +418,46 @@ async def main():
 
     # Reset logs
     reset_logs(LOG_DIR)
+    
+    with open(args.subnet_addresses, 'r') as file:
+        subnet_addresses = json.load(file)
+
+    master_wallets = generate_wallets(args.num_master_wallets)
+    master_public_keys = [wallet['address'] for wallet in master_wallets]
+
+
+    os.environ['RANK'] = '0'
+    os.environ['WORLD_SIZE'] = '1'
+    
+    env = {
+        'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
+        'SERVICE_TYPE': 'sot',
+        'RANK': '0',
+        'WORLD_SIZE': '1',
+        'PUBLIC_KEYS': INPUT_JSON_PATH + '_0',
+        'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
+        'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
+    }
+
+    logging.info(f'Environment variables: {env}')
+
+    # Start the SOT service on a remote instance
+    logging.info("Starting SOT instance...")
+    
+    sot_promise = launch_instance_and_record_logs(
+        name="sot_instance",
+        gpu_count=0,
+        ports=f'{SOT_PRIVATE_PORT}/tcp',
+        log_file=SOT_LOG_FILE,
+        template_id=BASE_TEMPLATE_ID,
+        cmd=DOCKER_CMD,
+        env=env,
+        input_jsons=[master_public_keys, subnet_addresses]
+    )
 
     # Start Anvil on a remote instance
     logging.info("Starting Anvil instance...")
-    anvil_instance, anvil_helpers = launch_instance_and_record_logs(
+    anvil_instance, anvil_helpers = await launch_instance_and_record_logs(
         name="anvil_instance",
         gpu_count=0,
         ports='8545/tcp',
@@ -430,7 +466,7 @@ async def main():
         template_id=BASE_TEMPLATE_ID
     )
     pod_helpers['anvil'] = anvil_helpers
-    anvil_ip, anvil_port = get_public_ip_and_port(anvil_instance['id'], private_port=8545)
+    anvil_ip, anvil_port = await get_public_ip_and_port(anvil_instance['id'], private_port=8545)
     rpc_url = f"http://{anvil_ip}:{anvil_port}"
     processes['anvil'] = anvil_instance
     logging.info(f"Anvil started on {rpc_url}")
@@ -475,9 +511,6 @@ async def main():
         # Print deployment stage completion
         logging.info("Deployment completed successfully, loading JSON files...")
 
-        # Load subnet addresses and deployment config
-        with open(args.subnet_addresses, 'r') as file:
-            subnet_addresses = json.load(file)
 
         with open(args.deployment_config, 'r') as file:
             deployment_config = json.load(file)
@@ -495,47 +528,15 @@ async def main():
 
         logging.info('Generating wallets')
 
-        # Generate wallets for the master and fund them
-        master_wallets = generate_wallets(args.num_master_wallets)
         await fund_wallets(web3, args.private_key, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
-
-        # Save the public keys of the master wallets
-        master_public_keys = [wallet['address'] for wallet in master_wallets]
 
         # Generate wallets for workers and fund them
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
         await fund_wallets(web3, args.private_key, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
 
-
-        os.environ['RANK'] = '0'
-        os.environ['WORLD_SIZE'] = '1'
-        
-        env = {
-            'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
-            'SERVICE_TYPE': 'sot',
-            'RANK': '0',
-            'WORLD_SIZE': '1',
-            'PUBLIC_KEYS': INPUT_JSON_PATH + '_0',
-            'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
-            'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
-        }
-
-        logging.info(f'Environment variables: {env}')
-
-        # Start the SOT service on a remote instance
-        logging.info("Starting SOT instance...")
-        sot_instance, sot_helpers = launch_instance_and_record_logs(
-            name="sot_instance",
-            gpu_count=0,
-            ports=f'{SOT_PRIVATE_PORT}/tcp',
-            log_file=SOT_LOG_FILE,
-            template_id=BASE_TEMPLATE_ID,
-            cmd=DOCKER_CMD,
-            env=env,
-            input_jsons=[master_public_keys, subnet_addresses]
-        )
+        sot_instance, sot_helpers = await sot_promise
         pod_helpers['sot'] = sot_helpers
-        sot_ip, sot_port = get_public_ip_and_port(sot_instance['id'], private_port=SOT_PRIVATE_PORT)
+        sot_ip, sot_port = await get_public_ip_and_port(sot_instance['id'], private_port=SOT_PRIVATE_PORT)
         sot_url = f"http://{sot_ip}:{sot_port}"
         processes['sot'] = sot_instance
         logging.info(f"SOT service started on {sot_url}")
@@ -590,7 +591,7 @@ async def main():
             }
 
             # Start master.py on a remote instance
-            master_instance, master_helpers = launch_instance_and_record_logs(
+            master_instance, master_helpers = await launch_instance_and_record_logs(
                 name="master_instance",
                 gpu_count=0,
                 ports='',
