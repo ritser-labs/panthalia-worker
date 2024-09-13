@@ -22,6 +22,19 @@ class LlamaModelConfig(TransformerModelConfig):
         self.model_class = Transformer
         self.vocab_size = params.vocab_size
         self.max_seq_len = params.max_seq_len
+    
+    def encode(text):
+        return tokenizer.encode(
+            text,
+            bos=False,
+            eos=False,
+            allowed_special=set(),
+            disallowed_special=(),
+        )
+    
+    def decode(tokens):
+        return tokenizer.decode(tokens)
+
 
 class NanoGPTConfig(TransformerModelConfig):
     def __init__(self, tokenizer, params):
@@ -31,6 +44,12 @@ class NanoGPTConfig(TransformerModelConfig):
         self.model_class = GPT
         self.vocab_size = params.vocab_size
         self.max_seq_len = params.block_size
+    
+    def encode(text):
+        return tokenizer.encode(text)
+    
+    def decode(tokens):
+        return tokenizer.decode(tokens)
 
 class AdderModelConfig(BaseModelConfig):
     def __init__(self):

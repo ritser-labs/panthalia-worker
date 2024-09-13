@@ -3,7 +3,7 @@ from .adapters.dataloader import *
 from .adapters.model_config import *
 import os
 from .adapters.model_adapter import *
-from .tokenizer import Tokenizer
+from .tokenizer import *
 import math
 
 
@@ -17,8 +17,9 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 # and change pad_id
 tokenizer_path = os.path.join(current_dir, 'tokenizers', 'char.tiktoken')
 
-tokenizer = Tokenizer(tokenizer_path)
+#tokenizer = Tokenizer(tokenizer_path)
 
+tokenizer = CharacterLevelTokenizer()
 
 model_params = GPTConfig(
     block_size=256,
@@ -105,8 +106,7 @@ class StandardPlugin:
             'accumulation_steps': self.accumulation_steps
         }
 
-
-NUM_MICROBATCHES = 1024 # 256
+NUM_MICROBATCHES = 512 # 256
 
 EXAMPLES_PER_MICROBATCH = 512 # 32
 
