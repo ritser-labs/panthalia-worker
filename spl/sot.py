@@ -67,40 +67,38 @@ def log_memory_diff(snapshot1, snapshot2, note=''):
             logging.debug(stat)
 
 
-async def stable_adamw_update(params, grads, m, v, lr=0.002, weight_decay=0.2, beta1=0.9, beta2=0.99, eps=1e-6, clip_thresh=1.0, step=1):
-    if step < 1:
-        raise ValueError("Step should be at least 1")
-    logging.debug(f'Using LR: {lr}, weight_decay: {weight_decay}, beta1: {beta1}, beta2: {beta2}, eps: {eps}, clip_thresh: {clip_thresh}, step: {step}')
-    logging.debug(f"Params before update: {params}")
-    logging.debug(f"Grads: {grads}")
-    logging.debug(f"m before update: {m}")
-    logging.debug(f"v before update: {v}")
+def nag_update(params, grads, m, lr=0.002, weight_decay=0.2, beta1=0.9, eps=1e-6, step=1):
+    """
+    Performs a Nesterov Accelerated Gradient (NAG) update.
 
-    m = beta1 * m + (1 - beta1) * grads
-    v = beta2 * v + (1 - beta2) * grads ** 2
+    Args:
+    params (torch.Tensor): The current parameters.
+    grads (torch.Tensor): The gradients of the parameters.
+    m (torch.Tensor): The momentum from the previous step.
+    lr (float): Learning rate.
+    weight_decay (float): Weight decay (L2 regularization).
+    beta1 (float): Momentum term coefficient.
+    eps (float): A small epsilon value to avoid division by zero.
+    step (int): Current step of the optimization.
 
-    logging.debug(f"Updated m: {m}")
-    logging.debug(f"Updated v: {v}")
+    Returns:
+    new_params (torch.Tensor): The updated parameters.
+    new_m (torch.Tensor): The updated momentum.
+    """
 
-    m_hat = m / (1 - beta1 ** step)
-    v_hat = v / (1 - beta2 ** step)
+    # Apply weight decay to the gradients
+    grads = grads + weight_decay * params
 
-    denominator = torch.sqrt(v_hat) + eps
+    # Nesterov lookahead step: params - beta1 * m
+    lookahead_params = params - beta1 * m
 
-    rms = torch.sqrt(torch.mean(grads * grads / torch.max(v, (eps * eps) * torch.ones_like(v))))
+    # Compute the updated momentum: m = beta1 * m + (1 - beta1) * grad
+    new_m = beta1 * m + (1 - beta1) * grads
 
-    new_lr = lr * (1. / max(1., rms / clip_thresh))
+    # Update parameters using the velocity (new momentum)
+    new_params = lookahead_params - lr * new_m
 
-    params = params * (1.0 - new_lr * weight_decay) - new_lr * m_hat / denominator
-
-    logging.debug(f"m_hat: {m_hat}")
-    logging.debug(f"v_hat: {v_hat}")
-    logging.debug(f"denominator: {denominator}")
-    logging.debug(f"rms: {rms}")
-    logging.debug(f"new_lr: {new_lr}")
-    logging.debug(f"Updated params: {params}")
-
-    return params, m, v
+    return new_params, new_m
 
 
 def create_app(public_keys_file, enable_memory_logging=False):
@@ -162,7 +160,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
     def set_dict_and_adam(dict, tensor_name, value):
         dict[tensor_name] = value
         dict[f'{tensor_name}_adam_m'] = value
-        dict[f'{tensor_name}_adam_v'] = value
 
     async def initialize_tensor(name, sync_version_number=None, zero_init=False):
         logging.info(f"Initializing tensor {name}")
@@ -203,7 +200,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
         logging.info("Initializing all tensors")
         await initialize_tensor(TENSOR_NAME, zero_init=False)
         await initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
-        await initialize_tensor(f'{TENSOR_NAME}_adam_v', zero_init=True)
 
     preloaded_batch = None
 
@@ -402,49 +398,40 @@ def create_app(public_keys_file, enable_memory_logging=False):
         logging.debug(f"Flattened gradients: {grads_flat}")
 
         if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
-            logging.error(f"NaNs or Infs detected in gradients before AdamW update for {tensor_name}")
+            logging.error(f"NaNs or Infs detected in gradients before optimizer update for {tensor_name}")
             raise ValueError(f"NaNs or Infs detected in gradients for {tensor_name}")
 
         tensor_adam_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
-        tensor_adam_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{version_number}.pt')
 
-        adam_m, adam_v = None, None
+        adam_m = None
 
         if os.path.exists(tensor_adam_m_path):
             adam_m = torch.load(tensor_adam_m_path, map_location=device).to(device)
-        if os.path.exists(tensor_adam_v_path):
-            adam_v = torch.load(tensor_adam_v_path, map_location=device).to(device)
 
-        if adam_m is None or adam_v is None:
-            logging.debug(f'adam_m or adam_v not found for {tensor_name}, initializing to zeros')
+        if adam_m is None:
+            logging.debug(f'adam_m not found for {tensor_name}, initializing to zeros')
             adam_m = torch.zeros_like(tensor, device=device)
-            adam_v = torch.zeros_like(tensor, device=device)
 
-        logging.debug(f"m before AdamW: {adam_m}")
-        logging.debug(f"v before AdamW: {adam_v}")
+        logging.debug(f"m before optimizer: {adam_m}")
 
         clip_threshold = 1.0
 
         # Get the StableAdamW updates
-        param_update, m_update, v_update = await stable_adamw_update(
+        param_update, m_update = nag_update(
             tensor,
             grads_flat,
             adam_m,
-            adam_v,
             learning_rate,
             weight_decay,
             beta1,
-            beta2,
             epsilon,
-            clip_threshold,
             t
         )
 
-        logging.debug(f"Updates after applying StableAdamW: {param_update}")
-        logging.debug(f"m after AdamW: {m_update}")
-        logging.debug(f"v after AdamW: {v_update}")
+        logging.debug(f"Updates after applying optimizer: {param_update}")
+        logging.debug(f"m after optimizer: {m_update}")
 
-        return param_update.view(-1), m_update.view(-1), v_update.view(-1)
+        return param_update.view(-1), m_update.view(-1)
 
     async def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         future_version_number = get_future_version_number()
@@ -459,7 +446,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
                 await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
                 
-                for name in f'{tensor_name}', f'{tensor_name}_adam_m', f'{tensor_name}_adam_v':
+                for name in f'{tensor_name}', f'{tensor_name}_adam_m':
                     if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
                         shutil.copy(os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt'))
         
@@ -480,8 +467,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             # Define the file paths
             file_paths = [
                 os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt'),
-                os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt'),
-                os.path.join(state_dir, f'{tensor_name}_adam_v_{old_block_timestamp}.pt')
+                os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt')
             ]
             
             # Remove each file if it exists
@@ -558,7 +544,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
             future_tensor_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
             unversioned_tensor_path = os.path.join(state_dir, f'{tensor_name}.pt')
             future_tensor_adam_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{future_version_number}.pt')
-            future_tensor_adam_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{future_version_number}.pt')
 
             # Load or initialize the accumulated_grads tensor
             if os.path.exists(accumulated_grads_path):
@@ -580,7 +565,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
             learning_params = get_sot_learning_hyperparameters(iteration_number[tensor_name])
-            future_tensor, m_update, v_update = await apply_adamw(
+            future_tensor, m_update = await apply_adamw(
                 current_version_number,
                 tensor_name,
                 averaged_grads,
@@ -595,7 +580,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
             torch.save(future_tensor, future_tensor_path)
             torch.save(future_tensor, unversioned_tensor_path)
             torch.save(m_update, future_tensor_adam_m_path)
-            torch.save(v_update, future_tensor_adam_v_path)
 
             await cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
             # Cleanup old accumulated grads tensors
