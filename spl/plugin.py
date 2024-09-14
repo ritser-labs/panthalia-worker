@@ -104,5 +104,13 @@ exported_plugin = StandardPlugin(
     dataset,
     tokenizer,
     num_microbatches=NUM_MICROBATCHES,
-    example_per_microbatch=EXAMPLES_PER_MICROBATCH
+    example_per_microbatch=EXAMPLES_PER_MICROBATCH,
+    outer_max_lr=0.7,
+    outer_min_lr=0.7,
+    tensor_version_interval=60,
+    expected_worker_time=55,
+    max_concurrent_iterations=4,
+    inner_max_lr=0.001,
+    inner_min_lr=0.0001,
+    inner_T_0=200
 )

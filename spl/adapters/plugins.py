@@ -10,8 +10,8 @@ class StandardPlugin:
         tokenizer,
         num_microbatches,
         example_per_microbatch,
-        max_lr=0.7,
-        min_lr=0.7,
+        outer_max_lr=0.7,
+        outer_min_lr=0.7,
         tensor_version_interval=60,
         expected_worker_time=55,
         max_concurrent_iterations=4,
@@ -25,8 +25,8 @@ class StandardPlugin:
         self.tokenizer = tokenizer
         self.num_microbatches = num_microbatches
         self.batch_size = num_microbatches * example_per_microbatch
-        self.max_lr = max_lr
-        self.min_lr = min_lr
+        self.outer_max_lr = outer_max_lr
+        self.outer_min_lr = outer_min_lr
         self.tensor_version_interval = tensor_version_interval
         self.expected_worker_time = expected_worker_time
         self.max_concurrent_iterations = max_concurrent_iterations
@@ -54,8 +54,8 @@ class StandardPlugin:
         """
         T_0 = 20  # Initial number of iterations for the first cycle
         T_mult = 2  # Factor to increase the cycle length after each restart
-        eta_max = self.max_lr  # Initial learning rate (maximum)
-        eta_min = self.min_lr  # Minimum learning rate
+        eta_max = self.outer_max_lr  # Initial learning rate (maximum)
+        eta_min = self.outer_min_lr  # Minimum learning rate
 
         # Determine the current cycle length
         cycle_length = T_0
