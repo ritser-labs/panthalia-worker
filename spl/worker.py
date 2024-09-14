@@ -305,12 +305,14 @@ async def process_tasks():
 
                 # Process the task
                 steps = task_params['steps']
-                learning_rate = task_params['learning_rate']
+                max_lr = task_params['max_lr']
+                min_lr = task_params['min_lr']
+                T_0 = task_params['T_0']
                 logging.debug(f"{task_id}: Executing training task")
                 time_synced = time.time()
                 model, version_number = await sync_tensors(contract_index)
 
-                updates, loss = model_adapter.train_task(model, batch, targets, steps, learning_rate)
+                updates, loss = model_adapter.train_task(model, batch, targets, steps, max_lr, min_lr, T_0)
                 logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
 
             finally:

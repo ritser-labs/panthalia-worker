@@ -14,7 +14,7 @@ class ModelAdapter(ABC):
         self.model_config = model_config
     
     @abstractmethod
-    def train_task(self, model, inputs, targets, steps, learning_rate):
+    def train_task(self, model, inputs, targets, steps, *args, **kwargs):
         pass
     
     @abstractmethod
@@ -75,7 +75,7 @@ class StandardModelAdapter(ModelAdapter):
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss
 
-    def train_task(self, model, inputs, targets, steps, learning_rate):
+    def train_task(self, model, inputs, targets, steps, max_lr, min_lr, T_0):
         logging.info("Starting train_task")
 
         start_time = time.time()
@@ -88,7 +88,10 @@ class StandardModelAdapter(ModelAdapter):
         initial_params = [param.clone().detach() for param in model.parameters()]
 
         logging.info(f"Steps: {steps}, Batch size: {batch_size}")
-        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr)  # Start with max_lr
+
+        # Define the cosine annealing scheduler
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_0, eta_min=min_lr)
 
         first_loss = None
         for i in range(steps):
@@ -112,6 +115,9 @@ class StandardModelAdapter(ModelAdapter):
                 loss.backward()
                 optimizer.step()
 
+                # Update the learning rate using the scheduler
+                scheduler.step()
+
                 self.postprocess_model_after_batch(model)
 
                 # Delete intermediate variables
@@ -132,6 +138,7 @@ class StandardModelAdapter(ModelAdapter):
         logging.info(f"Model task completed. Loss: {first_loss:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
         logging.info(f'Updates: {updates}')
         return updates, first_loss
+
     
     def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
         model = torch.compile(model)

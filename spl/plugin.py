@@ -52,7 +52,9 @@ class StandardPlugin:
         tensor_version_interval=60,
         expected_worker_time=55,
         max_concurrent_iterations=4,
-        inner_learning_rate=0.001
+        inner_max_lr=0.001,
+        inner_min_lr=0.0001,
+        inner_T_0=200,
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
@@ -66,12 +68,16 @@ class StandardPlugin:
         self.tensor_version_interval = tensor_version_interval
         self.expected_worker_time = expected_worker_time
         self.max_concurrent_iterations = max_concurrent_iterations
-        self.inner_learning_rate = inner_learning_rate
+        self.inner_max_lr = inner_max_lr
+        self.inner_min_lr = inner_min_lr
+        self.inner_T_0 = inner_T_0
     
     def get_master_learning_hyperparameters(self, current_master_iteration):
         return {
             'steps': self.num_microbatches,
-            'learning_rate': self.inner_learning_rate
+            'max_lr': self.inner_max_lr,
+            'min_lr': self.inner_min_lr,
+            'T_0': self.inner_T_0
         }
     
     def get_sot_learning_hyperparameters(self, current_iteration):
