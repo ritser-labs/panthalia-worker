@@ -18,14 +18,25 @@ executor = ThreadPoolExecutor()
 
 async def generate_ssh_key_pair():
     """
-    Generates an SSH key pair using Paramiko and saves it locally.
-    
+    Generates an SSH key pair using Paramiko and saves it locally if it doesn't already exist.
+
     Returns:
         str: The path to the private key file.
         str: The public key string.
     """
-    key = paramiko.RSAKey.generate(2048)
     private_key_path = os.path.expanduser("~/.ssh/id_rsa_runpod")
+    
+    # Check if the private key file already exists
+    if os.path.exists(private_key_path):
+        logging.info(f"SSH private key already exists at {private_key_path}, skipping generation.")
+        
+        # Load the existing key
+        key = paramiko.RSAKey(filename=private_key_path)
+        public_key_str = f"{key.get_name()} {key.get_base64()}"
+        return private_key_path, public_key_str
+
+    # Generate a new SSH key pair
+    key = paramiko.RSAKey.generate(2048)
     public_key_str = f"{key.get_name()} {key.get_base64()}"
 
     # Save the private key
@@ -35,7 +46,9 @@ async def generate_ssh_key_pair():
     # Set appropriate permissions for the private key file
     os.chmod(private_key_path, 0o600)
 
+    logging.info(f"Generated new SSH private key at {private_key_path}")
     return private_key_path, public_key_str
+
 
 def generate_deploy_cpu_pod_mutation(
         name,
