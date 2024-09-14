@@ -24,7 +24,6 @@ tokenizer = exported_plugin.tokenizer
 get_sot_learning_hyperparameters = exported_plugin.get_sot_learning_hyperparameters
 get_master_learning_hyperparameters = exported_plugin.get_master_learning_hyperparameters
 batch_size = exported_plugin.batch_size
-accumulation_steps = exported_plugin.accumulation_steps
 expected_worker_time = exported_plugin.expected_worker_time
 
 MAX_CONCURRENT_ITERATIONS = exported_plugin.max_concurrent_iterations

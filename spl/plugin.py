@@ -3,21 +3,12 @@ from .adapters.dataloader import *
 from .adapters.model_config import *
 import os
 from .adapters.model_adapter import *
+from .adapters.plugins import StandardPlugin
 from .tokenizer import *
 import math
 
 
 BUFFER_SIZE = 100000  # Size of the buffer to shuffle data
-
-current_dir = os.path.dirname(os.path.abspath(__file__))
-
-
-# IMPORTANT: if you change tokenizer, dont forget to comment out the code in tokenizer.py
-# that ignores non ascii characters
-# and change pad_id
-tokenizer_path = os.path.join(current_dir, 'tokenizers', 'char.tiktoken')
-
-#tokenizer = Tokenizer(tokenizer_path)
 
 tokenizer = CharacterLevelTokenizer()
 
@@ -38,85 +29,6 @@ dataset = ShakespeareDataLoader(model_config, buffer_size=BUFFER_SIZE, max_seq_l
 
 model_adapter = NanoGPTModelAdapter(model_config)
 
-class StandardPlugin:
-    def __init__(
-        self,
-        model_adapter,
-        model_config,
-        dataset,
-        tokenizer,
-        num_microbatches,
-        example_per_microbatch,
-        max_lr=0.7,
-        min_lr=0.7,
-        tensor_version_interval=60,
-        expected_worker_time=55,
-        max_concurrent_iterations=4,
-        inner_max_lr=0.001,
-        inner_min_lr=0.0001,
-        inner_T_0=200,
-    ):
-        self.model_adapter = model_adapter
-        self.model_config = model_config
-        self.dataset = dataset
-        self.tokenizer = tokenizer
-        self.num_microbatches = num_microbatches
-        self.batch_size = num_microbatches * example_per_microbatch
-        self.accumulation_steps = num_microbatches
-        self.max_lr = max_lr
-        self.min_lr = min_lr
-        self.tensor_version_interval = tensor_version_interval
-        self.expected_worker_time = expected_worker_time
-        self.max_concurrent_iterations = max_concurrent_iterations
-        self.inner_max_lr = inner_max_lr
-        self.inner_min_lr = inner_min_lr
-        self.inner_T_0 = inner_T_0
-    
-    def get_master_learning_hyperparameters(self, current_master_iteration):
-        return {
-            'steps': self.num_microbatches,
-            'max_lr': self.inner_max_lr,
-            'min_lr': self.inner_min_lr,
-            'T_0': self.inner_T_0
-        }
-    
-    def get_sot_learning_hyperparameters(self, current_iteration):
-        """
-        Calculate the learning rate using cosine annealing with warm restarts.
-
-        Args:
-            current_iteration (int): Current iteration number.
-
-        Returns:
-            dict: A dictionary containing the learning rate and Adam optimizer parameters.
-        """
-        T_0 = 20  # Initial number of iterations for the first cycle
-        T_mult = 2  # Factor to increase the cycle length after each restart
-        eta_max = self.max_lr  # Initial learning rate (maximum)
-        eta_min = self.min_lr  # Minimum learning rate
-
-        # Determine the current cycle length
-        cycle_length = T_0
-        t = current_iteration
-        while current_iteration >= cycle_length:
-            current_iteration -= cycle_length
-            cycle_length *= T_mult
-
-        # Calculate the learning rate using the cosine annealing formula
-        lr = eta_min + (eta_max - eta_min) * (1 + math.cos(math.pi * current_iteration / cycle_length)) / 2
-        
-        print(f'Calculated LR: {lr}')
-
-        return {
-            'learning_rate': lr,
-            'beta1': 0.9,
-            'beta2': 0.999,
-            'epsilon': 1e-8,
-            'weight_decay': 0.01,
-            't': t,  # Add the current iteration as 't'
-            'accumulation_steps': self.accumulation_steps
-        }
-
 NUM_MICROBATCHES = 450 # 256,512
 
 EXAMPLES_PER_MICROBATCH = 32 # 32,512
@@ -129,11 +41,3 @@ exported_plugin = StandardPlugin(
     num_microbatches=NUM_MICROBATCHES,
     example_per_microbatch=EXAMPLES_PER_MICROBATCH
 )
-
-#model_config = AdderModelConfig()
-
-#dataset = AddNumbersDataLoader()
-
-#model_adapter = AdderModelAdapter(model_config)
-
-#exported_plugin = StandardPlugin(model_adapter, model_config, dataset, tokenizer, num_microbatches=NUM_MICROBATCHES, example_per_microbatch=EXAMPLES_PER_MICROBATCH, expected_worker_time=4)
