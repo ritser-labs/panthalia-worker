@@ -113,9 +113,7 @@ class ShakespeareDataLoader(LanguageDataLoader):
         self.file_path = file_path
         self.block_size = block_size
 
-        lines_load_start_time = time.time()
         self.lines = self.load_lines()
-        lines_load_end_time = time.time()
 
         super().__init__(model_config, buffer_size, max_seq_len)
 
