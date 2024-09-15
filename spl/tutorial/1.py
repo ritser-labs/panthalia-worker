@@ -1,7 +1,7 @@
-# Defining our tokenizer
+# Previous code
 
 class CharacterLevelTokenizer:
-    def __init__(self, pad_id: int = 0):
+    def __init__(self, pad_id: int = PAD_TOKEN_ID):
         self.pad_id = pad_id
         
     def encode(self, text: str) -> list:
@@ -11,7 +11,5 @@ class CharacterLevelTokenizer:
         return ''.join([chr(value) for value in ascii_list])
 
     def get_vocab_size(self) -> int:
-        return 128
+        return VOCAB_SIZE
 
-
-tokenizer = CharacterLevelTokenizer()
