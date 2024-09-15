@@ -516,6 +516,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if data['version_number'] != block_timestamps.get(tensor_name, 0):
             delta = block_timestamps.get(tensor_name, 0) - data['version_number']
             logging.info(f'Delta of {delta} recorded with version number {data["version_number"]}')
+            return jsonify({'error': 'Version number mismatch'}), 409
         old_block_timestamp = await update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
         
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
