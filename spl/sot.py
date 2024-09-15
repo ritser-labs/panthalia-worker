@@ -433,11 +433,28 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         return param_update.view(-1), m_update.view(-1)
 
+    async def fix_outdated_last_future_version_number(tensor_name, last_future_version_number):
+        value = last_future_version_number.get(tensor_name, 0)
+        current_version_number = get_current_version_number()
+        if value < current_version_number:
+            if os.path.exists(os.path.join(state_dir, f'{tensor_name}_{value}.pt')):
+                for f in f'{tensor_name}', f'{tensor_name}_adam_m':
+                    shutil.copy(
+                        os.path.join(state_dir, f'{f}_{value}.pt'),
+                        os.path.join(state_dir, f'{f}_{current_version_number}.pt')
+                    )
+
+            last_future_version_number[tensor_name] = get_current_version_number()
+            await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
+
     async def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         future_version_number = get_future_version_number()
         old_block_timestamp = None
+
+        fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
         
         new_block_timestamp = last_future_version_number.get(tensor_name, 0)
+        # the cause might be that last_future_version_number is not updated
 
         if new_block_timestamp < future_version_number and not update_timestamp_lock.locked():
             if new_block_timestamp > block_timestamps.get(tensor_name, 0):
