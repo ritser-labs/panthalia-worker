@@ -94,7 +94,7 @@ model_adapter = NanoGPTModelAdapter(model_config)
 
 dataset = ShakespeareDataLoader(model_config, buffer_size=100_000, max_seq_len=model_params.block_size)
 
-NUM_MICROBATCHES = 450 # 256,512
+NUM_MICROBATCHES = 920 # 256,512
 
 EXAMPLES_PER_MICROBATCH = 32 # 32,512
 
