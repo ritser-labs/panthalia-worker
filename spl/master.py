@@ -13,7 +13,7 @@ import requests
 from web3 import AsyncWeb3
 from web3.middleware import async_geth_poa_middleware
 from web3.exceptions import ContractCustomError, TransactionNotFound
-from .common import load_contracts, TaskStatus, PoolState, Task, get_master_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SUBMIT_TASK_RETRY_DURATION, TENSOR_NAME
+from .common import load_contracts, TaskStatus, PoolState, Task, get_master_learning_hyperparameters, async_transact_with_contract_function, TENSOR_VERSION_INTERVAL, wait_for_state_change, approve_token_once, MAX_SUBMIT_TASK_RETRY_DURATION, MAX_SELECT_SOLVER_TIME, TENSOR_NAME
 from io import BytesIO
 import os
 from eth_account.messages import encode_defunct
@@ -141,20 +141,36 @@ class Master:
                 retry_delay = min(2 * retry_delay, 60)
                 await asyncio.sleep(retry_delay)
 
-    async def select_solver(self, task_type, task_id, iteration_number, retry_delay=1):
-        try:
-            logging.info(f"Selecting solver for task ID: {task_id}")
+    async def select_solver(self, task_type, task_id, iteration_number):
+        max_duration = datetime.timedelta(seconds=MAX_SELECT_SOLVER_TIME)
+        start_time = datetime.datetime.now()
 
-            start_transact_time = time.time()
-            receipt = await async_transact_with_contract_function(
-                self.web3, self.contracts[task_type], 'selectSolver', self.get_next_wallet()['private_key'], task_id, attempts=1)
-            end_transact_time = time.time()
-            logging.info(f"Transaction duration: {end_transact_time - start_transact_time} seconds")
+        attempt = 0
+        while True:
+            attempt += 1
+            current_time = datetime.datetime.now()
+            elapsed_time = current_time - start_time
 
-            logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
-            return True
-        except Exception as e:
-            logging.error(f"Error selecting solver: {e}")
+            if elapsed_time >= max_duration:
+                logging.error(f"Failed to select solver within {max_duration}")
+                raise RuntimeError(f"Failed to select solver within {max_duration}")
+
+            try:
+                logging.info(f"Selecting solver for task ID: {task_id}")
+
+                start_transact_time = time.time()
+                receipt = await async_transact_with_contract_function(
+                    self.web3, self.contracts[task_type], 'selectSolver', self.get_next_wallet()['private_key'], task_id, attempts=1)
+                end_transact_time = time.time()
+
+                logging.info(f"Transaction duration: {end_transact_time - start_transact_time} seconds")
+                logging.info(f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}")
+                return True
+            except Exception as e:
+                logging.error(f"Error selecting solver on attempt {attempt}: {e}")
+                logging.error(f'Retrying...')
+                await asyncio.sleep(0.5)
+
 
     async def get_task_result(self, task_type, task_id, iteration_number):
         try:
