@@ -62,17 +62,25 @@ class LanguageDataLoader(IterableDataset):
         tokenize_end_time = time.time()
 
         split_start_time = time.time()
-        start_pos = 0
         token_pairs = []
-        while start_pos < len(tokens) - 1:
-            upper_bound = min(len(tokens) - start_pos, max_seq_len)
-            seq_len = upper_bound
-            #seq_len = random.randint(2, upper_bound)
+        
+        # Calculate how many chunks can be made based on the total length and max_seq_len
+        num_chunks = len(tokens) // max_seq_len
+
+        for _ in range(num_chunks):
+            # Randomly pick a start position ensuring we have enough tokens for a sequence
+            start_pos = random.randint(0, len(tokens) - max_seq_len - 1)
+
+            # Extract the sequence of tokens from the random start position
+            seq_len = max_seq_len
             substr = tokens[start_pos:start_pos + seq_len]
+
+            # Create input-target pairs where targets are the next token shifted by one
             inputs = self.truncate_tokens(substr[:-1], max_seq_len, self.model_config.tokenizer.pad_id)
             targets = self.truncate_tokens(substr[1:], max_seq_len, self.model_config.tokenizer.pad_id)
+
+            # Append the pair to the list
             token_pairs.append((inputs, targets))
-            start_pos += seq_len
 
         split_end_time = time.time()
         return token_pairs
