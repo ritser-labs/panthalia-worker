@@ -94,9 +94,9 @@ model_adapter = NanoGPTModelAdapter(model_config)
 
 dataset = ShakespeareDataLoader(model_config, buffer_size=100_000, max_seq_len=model_params.block_size)
 
-NUM_MICROBATCHES = 768
+NUM_MICROBATCHES = 200
 
-EXAMPLES_PER_MICROBATCH = 32
+EXAMPLES_PER_MICROBATCH = 512
 
 exported_plugin = StandardPlugin(
     model_adapter,
@@ -105,10 +105,10 @@ exported_plugin = StandardPlugin(
     tokenizer,
     num_microbatches=NUM_MICROBATCHES,
     example_per_microbatch=EXAMPLES_PER_MICROBATCH,
-    outer_max_lr=0.7,
-    outer_min_lr=0.7,
-    tensor_version_interval=60,
-    expected_worker_time=55,
+    outer_max_lr=1,
+    outer_min_lr=1,
+    tensor_version_interval=45,
+    expected_worker_time=40,
     max_concurrent_iterations=4,
     inner_max_lr=0.001,
     inner_min_lr=0.0001,
