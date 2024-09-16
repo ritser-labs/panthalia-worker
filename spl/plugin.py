@@ -28,7 +28,7 @@ model_params = GPTConfig(
     n_head=6,
     n_embd=384,
     dropout=0.2,
-    bias=True,
+    bias=False,
     pad_token_id=tokenizer.pad_id
 )
 
@@ -94,9 +94,9 @@ model_adapter = NanoGPTModelAdapter(model_config)
 
 dataset = ShakespeareDataLoader(model_config, buffer_size=100_000, max_seq_len=model_params.block_size)
 
-NUM_MICROBATCHES = 880 # 256,512
+NUM_MICROBATCHES = 768
 
-EXAMPLES_PER_MICROBATCH = 32 # 32,512
+EXAMPLES_PER_MICROBATCH = 32
 
 exported_plugin = StandardPlugin(
     model_adapter,

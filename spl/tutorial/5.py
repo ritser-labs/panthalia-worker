@@ -14,9 +14,9 @@ dataset = ShakespeareDataLoader(
     max_seq_len=model_params.block_size
 )
 
-NUM_MICROBATCHES = 880 # 256,512
+NUM_MICROBATCHES = 768
 
-EXAMPLES_PER_MICROBATCH = 32 # 32,512
+EXAMPLES_PER_MICROBATCH = 32
 
 # Defining hyperparemeters for both inner and outer optimizers
 # of DiLoCo

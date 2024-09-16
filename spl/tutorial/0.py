@@ -11,7 +11,7 @@ model_params = GPTConfig(
     n_head=6,
     n_embd=384,
     dropout=0.2,
-    bias=True,
+    bias=False,
     pad_token_id=PAD_TOKEN_ID
 )
 
