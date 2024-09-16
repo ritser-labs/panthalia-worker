@@ -438,7 +438,7 @@ async def initialize_tensor(tensor_name):
         logging.debug(f"Time until next version: {time_until_next} seconds")
         
         if time_until_next < expected_worker_time:
-            time_to_sleep = time_until_next + 1
+            time_to_sleep = time_until_next
             logging.debug(f'Not enough time left waiting for {time_to_sleep} seconds.')
             await asyncio.sleep(time_to_sleep)
         else:
