@@ -267,6 +267,20 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=1):
     finally:
         sftp.close()
 
+async def async_exec_command(ssh, command):
+    """
+    Run the SSH command asynchronously using an executor.
+    Args:
+        ssh (paramiko.SSHClient): The active SSH connection.
+        command (str): The command to execute.
+
+    Returns:
+        tuple: stdin, stdout, stderr as with paramiko exec_command.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, ssh.exec_command, command)
+
+
 async def launch_instance_and_record_logs(
     name,
     image=None,
@@ -344,7 +358,7 @@ async def launch_instance_and_record_logs(
         sftp.chmod(remote_path, 0o755)  # Make it executable
 
         # Execute the temporary script file using bash
-        stdin, stdout, stderr = ssh.exec_command(f'/bin/bash {remote_path}')
+        stdin, stdout, stderr = await async_exec_command(ssh, f'/bin/bash {remote_path}')
 
         # Step 5: Write logs to file
         pod_helpers = {}
