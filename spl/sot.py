@@ -86,19 +86,18 @@ def nag_update(params, grads, m, lr=0.002, weight_decay=0.2, beta1=0.9, eps=1e-6
     new_m (torch.Tensor): The updated momentum.
     """
 
-    # Apply weight decay directly to the parameters
-    if weight_decay > 0:
-        params = params * (1 - lr * weight_decay)
+    # Apply weight decay to the gradients
+    grads = grads + weight_decay * params
 
-    # Nesterov lookahead step: params - beta1 * m (before gradient is applied)
+    # Nesterov lookahead step: params - beta1 * m
     lookahead_params = params - beta1 * m
 
-    # Compute updated momentum: m = beta1 * m + grads
-    new_m = beta1 * m + grads
+    # Compute the updated momentum: m = beta1 * m + (1 - beta1) * grad
+    new_m = beta1 * m + (1 - beta1) * grads
 
     # Update parameters using the velocity (new momentum)
     new_params = lookahead_params - lr * new_m
-
+    
     return new_params, new_m
 
 
