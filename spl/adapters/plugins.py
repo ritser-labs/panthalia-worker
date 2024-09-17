@@ -12,6 +12,7 @@ class StandardPlugin:
         example_per_microbatch,
         outer_max_lr=0.7,
         outer_min_lr=0.7,
+        outer_weight_decay=0.00,
         tensor_version_interval=60,
         expected_worker_time=55,
         max_concurrent_iterations=4,
@@ -27,6 +28,7 @@ class StandardPlugin:
         self.batch_size = num_microbatches * example_per_microbatch
         self.outer_max_lr = outer_max_lr
         self.outer_min_lr = outer_min_lr
+        self.outer_weight_decay = outer_weight_decay
         self.tensor_version_interval = tensor_version_interval
         self.expected_worker_time = expected_worker_time
         self.max_concurrent_iterations = max_concurrent_iterations
@@ -74,6 +76,6 @@ class StandardPlugin:
             'beta1': 0.9,
             'beta2': 0.999,
             'epsilon': 1e-8,
-            'weight_decay': 0.01,
+            'weight_decay': self.outer_weight_decay,
             't': t,
         }
