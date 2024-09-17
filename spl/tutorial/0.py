@@ -3,7 +3,7 @@ from ..adapters.models.nanogpt import GPTConfig
 VOCAB_SIZE = 128
 PAD_TOKEN_ID = 0
 
-# Configuring the model itself
+# a 10.67 million parameter NanoGPT model
 model_params = GPTConfig(
     block_size=256,
     vocab_size=VOCAB_SIZE,
