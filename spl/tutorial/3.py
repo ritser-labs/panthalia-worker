@@ -7,7 +7,14 @@ from ..adapters.dataloader import LanguageDataLoader, datasets_dir
 # Defining the data loader
 # This defines the training data we'll use
 class ShakespeareDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, file_path=os.path.join(datasets_dir, 'shakespeare.txt'), block_size=124000):
+    def __init__(
+            self,
+            model_config: TransformerModelConfig,
+            buffer_size, max_seq_len,
+            file_path=os.path.join(
+                datasets_dir, 'shakespeare.txt'),
+            block_size=124000
+        ):
         self.file_path = file_path
         self.block_size = block_size
 
