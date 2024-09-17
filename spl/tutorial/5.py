@@ -14,12 +14,10 @@ dataset = ShakespeareDataLoader(
     max_seq_len=model_params.block_size
 )
 
-NUM_MICROBATCHES = 768
+NUM_MICROBATCHES = 285
 
-EXAMPLES_PER_MICROBATCH = 32
+EXAMPLES_PER_MICROBATCH = 64
 
-# Defining hyperparemeters for both inner and outer optimizers
-# of DiLoCo
 exported_plugin = StandardPlugin(
     model_adapter,
     model_config,
@@ -27,10 +25,11 @@ exported_plugin = StandardPlugin(
     tokenizer,
     num_microbatches=NUM_MICROBATCHES,
     example_per_microbatch=EXAMPLES_PER_MICROBATCH,
-    outer_max_lr=0.7,
-    outer_min_lr=0.7,
-    tensor_version_interval=60,
-    expected_worker_time=55,
+    outer_max_lr=1,
+    outer_min_lr=1,
+    outer_weight_decay=0.0,
+    tensor_version_interval=36,
+    expected_worker_time=31,
     max_concurrent_iterations=4,
     inner_max_lr=0.001,
     inner_min_lr=0.0001,
