@@ -72,6 +72,7 @@ logging.basicConfig(
     ]
 )
 logging.getLogger(__name__).setLevel(logging.INFO)
+logging.getLogger('.adapters.dataloader').setLevel(logging.INFO)
 
 # Add a global variable to control memory logging
 MEMORY_LOGGING_ENABLED = False
@@ -226,10 +227,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
         batch = []
         targets = []
         global dataset_iterator
-
         async with dataset_lock:
             if dataset_iterator is None:
-                dataset_iterator = dataset.__aiter__()  # Initialize the iterator
+                dataset_iterator = dataset.__aiter__()
 
             try:
                 for _ in range(batch_size):
@@ -257,23 +257,31 @@ def create_app(public_keys_file, enable_memory_logging=False):
         torch.save(targets_tensor, os.path.join(temp_dir, targets_filename))
         return batch_filename, targets_filename
 
+
     async def batch_preloader():
         """Background task to preload batches and enqueue them."""
-        while True:
-            try:
+        logging.info("Batch preloader started.")
+        try:
+            while True:
                 if preloaded_batches_queue.full():
                     await asyncio.sleep(0.1)  # Wait until space is available
                     continue
                 batch_filename, targets_filename = await load_next_batch()
                 if batch_filename is None:
-                    logging.info("No more batches to preload.")
+                    logging.info("No more batches to preload. Exiting batch preloader.")
                     break
                 await preloaded_batches_queue.put((batch_filename, targets_filename))
                 logging.debug(f"Enqueued batch: {batch_filename}, {targets_filename}")
                 log_memory_usage('Batch preloaded')
-            except Exception as e:
-                logging.error(f"Error preloading batch: {e}", exc_info=True)
-                await asyncio.sleep(1)  # Wait before retrying
+        except asyncio.CancelledError:
+            logging.info("Batch preloader received cancellation signal.")
+            # Perform any necessary cleanup here
+            raise
+        except Exception as e:
+            logging.error(f"Error preloading batch: {e}", exc_info=True)
+            await asyncio.sleep(1)  # Wait before retrying
+        finally:
+            logging.info("Batch preloader has stopped.")
 
     async def initialize_service():
         nonlocal master_public_keys
@@ -284,10 +292,33 @@ def create_app(public_keys_file, enable_memory_logging=False):
         model_adapter.initialize_environment('gloo')
         await initialize_all_tensors()
         logging.info(f'Loading initial batches for service')
-        # Start the background preloader task
-        asyncio.create_task(batch_preloader())
+
         log_memory_usage('After initializing service')
         logging.info("Service initialized")
+
+    @app.before_serving
+    async def before_serving():
+        """Hook to run before the app starts serving."""
+        logging.info("App is starting to serve.")
+        await initialize_service()  # Initialize asynchronously
+        # Initialize the background task if not already initialized
+        if not hasattr(app, 'preloader_task'):
+            app.preloader_task = asyncio.create_task(batch_preloader())
+            logging.debug("Batch preloader task started")
+
+    @app.after_serving
+    async def after_serving():
+        """Hook to run after the app stops serving."""
+        logging.info("App is shutting down. Cancelling batch preloader task...")
+        if hasattr(app, 'preloader_task'):
+            app.preloader_task.cancel()
+            try:
+                await app.preloader_task
+            except asyncio.CancelledError:
+                logging.info("Batch preloader task cancelled successfully.")
+            except Exception as e:
+                logging.error(f"Error while cancelling batch preloader: {e}", exc_info=True)
+
 
     @app.route('/health', methods=['GET'])
     async def health_check():
@@ -798,17 +829,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
         loss = latest_loss.get('value')
         return jsonify({'loss': loss}), 200
 
-    def initialize():
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            # If no event loop is available, create a new one
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        loop.run_until_complete(initialize_service())
-
-    initialize()
     return app
 
 if __name__ == "__main__":

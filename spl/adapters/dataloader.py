@@ -13,14 +13,13 @@ import aiofiles
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
 
-class LanguageDataLoader(IterableDataset):
+class LanguageDataLoader:
     def __init__(self, model_config: BaseModelConfig, buffer_size: int, max_seq_len: int):
         self.max_seq_len = max_seq_len
         self.model_config = model_config
         self.buffer_size = buffer_size
         self.buffer = []  # In-memory buffer to hold token pairs
 
-    # Explicitly define async iterator method
     def __aiter__(self):
         return self
 
@@ -40,11 +39,6 @@ class LanguageDataLoader(IterableDataset):
         self.buffer_pos += 1  # Move to the next pair
 
         return token_pair
-
-    async def __iter__(self):
-        self.buffer_pos = 0  # Reset position when creating a new iterator
-        await self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
-        return self
 
     def truncate_tokens(self, tokens, max_seq_len, pad_token):
         if len(tokens) < max_seq_len:
@@ -99,34 +93,42 @@ class WikipediaDataLoader(LanguageDataLoader):
         async for example in self.dataset:
             yield example['text']
 
-
 class ShakespeareDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, file_path=os.path.join(datasets_dir, 'shakespeare.txt'), block_size=124000):
         self.file_path = file_path
         self.block_size = block_size
-        self.lines = asyncio.run(self.load_lines())
+        self.file_handle = None  # Initialize the file handle for on-demand reading
         super().__init__(model_config, buffer_size, max_seq_len)
 
-    async def load_lines(self):
-        async with aiofiles.open(self.file_path, 'r') as f:
-            lines = await f.readlines()
-        return lines
+    async def _open_file(self):
+        """Open the file lazily when needed."""
+        if self.file_handle is None:
+            try:
+                self.file_handle = await aiofiles.open(self.file_path, 'r')
+            except Exception as e:
+                logging.error(f"Failed to open file {self.file_path}: {e}", exc_info=True)
+                raise
+
+    async def _close_file(self):
+        """Close the file handle to clean up."""
+        if self.file_handle is not None:
+            await self.file_handle.close()
+            self.file_handle = None
 
     async def _text_generator(self):
-        num_lines = len(self.lines)
-        start_index = 0
+
+        await self._open_file()  # Ensure the file is opened
 
         while True:
-            end_index = start_index + self.block_size
-            if end_index > num_lines:
-                start_index = 0
-                end_index = self.block_size
-
-            yield ''.join(self.lines[start_index:end_index]).strip()
-            start_index = end_index
-
-            if start_index >= num_lines:
-                start_index = 0
+            try:
+                chunk = await self.file_handle.read(self.block_size)  # Read the file in chunks
+                if not chunk:
+                    await self.file_handle.seek(0)  # Reset to the beginning if EOF is reached
+                    continue  # Continue reading from the start
+                yield chunk.strip()  # Yield the chunk as the text to process
+            except Exception as e:
+                logging.error(f"Error reading file {self.file_path}: {e}", exc_info=True)
+                raise
 
 
 class LowercaseAlphabetDataLoader(LanguageDataLoader):
@@ -147,8 +149,16 @@ class FineWebDataLoader(LanguageDataLoader):
         super().__init__(model_config, buffer_size, max_seq_len)
 
     async def _text_generator(self):
-        async for example in self.dataset:
+        print('Starting to iterate dataset')
+        # Wrap the synchronous dataset iteration in an async generator
+        for example in await asyncio.to_thread(self.iterate_dataset):
+            print(f'Example: {example}')
             yield example['text']
+
+    def iterate_dataset(self):
+        """ Synchronous iteration over the dataset """
+        for example in self.dataset:
+            yield example
 
 
 class AddNumbersDataLoader(IterableDataset):
