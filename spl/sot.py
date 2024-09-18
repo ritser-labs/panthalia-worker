@@ -253,8 +253,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
         random_suffix = random.randint(1000, 9999)
         batch_filename = f'batch_{timestamp}_{random_suffix}.pt'
         targets_filename = f'targets_{timestamp}_{random_suffix}.pt'
-        torch.save(batch_tensor, os.path.join(temp_dir, batch_filename))
-        torch.save(targets_tensor, os.path.join(temp_dir, targets_filename))
+        await asyncio.to_thread(torch.save, batch_tensor, os.path.join(state_dir, batch_filename))
+        await asyncio.to_thread(torch.save, targets_tensor, os.path.join(state_dir, targets_filename))
         return batch_filename, targets_filename
 
 
