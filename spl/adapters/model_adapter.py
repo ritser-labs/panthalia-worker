@@ -194,12 +194,16 @@ class StandardModelAdapter(ModelAdapter):
             tensors = [param.data for param in module.parameters()]
             tensor = torch.cat([torch.zeros_like(tensor).view(-1) for tensor in tensors])
         return tensor
+    
+    def initialize_environment(self, *args, **kwargs):
+        torch.set_float32_matmul_precision('high')
 
 class FairscaleModelAdapter(ModelAdapter):
     def initialize_environment(self, backend='nccl'):
         logging.info("Initializing distributed environment")
         self.initialize_distributed_environment(backend)
         initialize_model_parallel(model_parallel_size_=1)
+        super().initialize_environment()
 
         logging.info("Environment and global variables initialized")
     
