@@ -648,8 +648,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
             return jsonify({'error': 'Tensor not found'}), 404
 
         try:
-            response = await send_file(state_file_path, mimetype='application/octet-stream')
-            response.headers['version_number'] = latest_version_number
+            headers = {'version_number': latest_version_number}
+            response = await send_file(state_file_path, mimetype='application/octet-stream', headers=headers)
             return response
         except Exception as e:
             logging.error(f"Error in /latest_state: {e}", exc_info=True)
