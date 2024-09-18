@@ -439,7 +439,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if value < current_version_number:
             if os.path.exists(os.path.join(state_dir, f'{tensor_name}_{value}.pt')):
                 for f in f'{tensor_name}', f'{tensor_name}_adam_m':
-                    shutil.copy(
+                    await asyncio.to_thread(shutil.copy,
                         os.path.join(state_dir, f'{f}_{value}.pt'),
                         os.path.join(state_dir, f'{f}_{current_version_number}.pt')
                     )
@@ -465,7 +465,10 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 
                 for name in f'{tensor_name}', f'{tensor_name}_adam_m':
                     if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
-                        shutil.copy(os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt'))
+                        await asyncio.to_thread(shutil.copy,
+                            os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), 
+                            os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')
+                        )
         
             set_dict_and_adam(num_updates, tensor_name, 0)
             await save_json(num_updates_file, num_updates, num_updates_file_lock)
@@ -490,7 +493,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             # Remove each file if it exists
             for file_path in file_paths:
                 if os.path.exists(file_path):
-                    os.remove(file_path)
+                    await asyncio.to_thread(os.remove, file_path)
                 else:
                     print(f"File not found: {file_path}")
         if update_timestamp_lock.locked():
@@ -546,8 +549,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
             local_batch_file_path = get_local_file_path(batch_url, request)
             local_targets_file_path = get_local_file_path(targets_url, request)
             logging.debug(f'Deleting batch and targets: {local_batch_file_path}, {local_targets_file_path}')
-            os.remove(local_batch_file_path)
-            os.remove(local_targets_file_path)
+            await asyncio.to_thread(os.remove, local_batch_file_path)
+            await asyncio.to_thread(os.remove, local_targets_file_path)
             logging.debug(f"Deleted batch and targets: {local_batch_file_path}, {local_targets_file_path}")
 
             if not os.path.exists(local_file_path):
@@ -603,13 +606,13 @@ def create_app(public_keys_file, enable_memory_logging=False):
             # Cleanup old accumulated grads tensors
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
-                    os.remove(os.path.join(state_dir, filename))
+                    await asyncio.to_thread(os.remove, os.path.join(state_dir, filename))
 
             logging.debug(f"Updated state for {tensor_name} version {future_version_number} with {num_of_updates} updates")
 
             # Delete the file corresponding to result_url after processing
             if os.path.exists(local_file_path):
-                os.remove(local_file_path)
+                await asyncio.to_thread(os.remove, local_file_path)
                 logging.info(f"Deleted file: {local_file_path}")
             else:
                 logging.warning(f"File not found for deletion: {local_file_path}")
