@@ -3,7 +3,7 @@ from collections import defaultdict
 import os
 import json
 import logging
-from quart import Quart, request, jsonify, send_file, Response
+from quart import Quart, request, jsonify, send_file, Response, after_this_request
 import torch
 from io import BytesIO
 import aiohttp
@@ -648,9 +648,13 @@ def create_app(public_keys_file, enable_memory_logging=False):
             return jsonify({'error': 'Tensor not found'}), 404
 
         try:
-            headers = {'version_number': latest_version_number}
-            response = await send_file(state_file_path, mimetype='application/octet-stream', headers=headers)
-            return response
+            @after_this_request
+            def add_header(response):
+                response.headers['version_number'] = str(latest_version_number)
+                return response
+
+            return await send_file(state_file_path, mimetype='application/octet-stream')
+
         except Exception as e:
             logging.error(f"Error in /latest_state: {e}", exc_info=True)
             return jsonify({'error': 'Could not retrieve latest state'}), 500
