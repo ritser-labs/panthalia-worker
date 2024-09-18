@@ -696,20 +696,16 @@ def create_app(public_keys_file, enable_memory_logging=False):
             return jsonify({'error': 'File not found'}), 404
 
         try:
-            # Using aiofiles for async file handling
-            async with aiofiles.open(file_path, mode='rb') as f:
-                data = await f.read()
-            
-            headers = {
-                'Content-Disposition': f'attachment; filename={filename}',
-                'Content-Length': str(len(data))
-            }
-            response = Response(data, headers=headers, mimetype='application/octet-stream')
-            return response
-
+            # Use send_file to handle file streaming and headers
+            return await send_file(
+                file_path,
+                mimetype='application/octet-stream',
+                as_attachment=True
+            )
         except Exception as e:
             logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
             return jsonify({'error': 'File not found or could not be read'}), 404
+
 
     @app.route('/upload_tensor', methods=['POST'])
     async def upload_tensor():
