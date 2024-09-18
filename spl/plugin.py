@@ -26,9 +26,9 @@ model_adapter = NanoGPTModelAdapter(model_config)
 
 dataset = FineWebDataLoader(model_config, buffer_size=100, max_seq_len=model_params.block_size)
 
-NUM_MICROBATCHES = 142
+NUM_MICROBATCHES = 500
 
-EXAMPLES_PER_MICROBATCH = 8
+EXAMPLES_PER_MICROBATCH = 20
 
 exported_plugin = StandardPlugin(
     model_adapter,
@@ -40,8 +40,8 @@ exported_plugin = StandardPlugin(
     outer_max_lr=1,
     outer_min_lr=1,
     outer_weight_decay=0.0,
-    tensor_version_interval=180,
-    expected_worker_time=150,
+    tensor_version_interval=30,
+    expected_worker_time=20,
     max_concurrent_iterations=4,
     inner_max_lr=0.001,
     inner_min_lr=0.0001,
