@@ -309,8 +309,8 @@ class Master:
                             return self.sot_url + response_json['batch_url'], self.sot_url + response_json['targets_url']
                         else:
                             print(f"Request failed with status code {response.status}")
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                print(f"Request failed: {e}. Retrying in {self.retry_delay} seconds...")
+            except Exception as e:
+                print(f"Request failed: {e}. Retrying in {retry_delay} seconds...")
 
             retries += 1
             await asyncio.sleep(retry_delay)
