@@ -75,7 +75,7 @@ class StandardModelAdapter(ModelAdapter):
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss
 
-    def train_task(self, model, inputs, targets, steps, max_lr, min_lr, T_0):
+    def train_task(self, model, inputs, targets, steps, max_lr, min_lr, T_0, weight_decay):
         logging.info("Starting train_task")
 
         start_time = time.time()
@@ -88,7 +88,7 @@ class StandardModelAdapter(ModelAdapter):
         initial_params = [param.clone().detach() for param in model.parameters()]
 
         logging.info(f"Steps: {steps}, Batch size: {batch_size}")
-        optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr)  # Start with max_lr
+        optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=weight_decay)  # Start with max_lr
 
         # Define the cosine annealing scheduler
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_0, eta_min=min_lr)

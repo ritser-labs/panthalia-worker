@@ -308,11 +308,12 @@ async def process_tasks():
                 max_lr = task_params['max_lr']
                 min_lr = task_params['min_lr']
                 T_0 = task_params['T_0']
+                weight_decay = task_params['weight_decay']
                 logging.debug(f"{task_id}: Executing training task")
                 time_synced = time.time()
                 model, version_number = await sync_tensors(contract_index)
 
-                updates, loss = model_adapter.train_task(model, batch, targets, steps, max_lr, min_lr, T_0)
+                updates, loss = model_adapter.train_task(model, batch, targets, steps, max_lr, min_lr, T_0, weight_decay)
                 logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
 
             finally:

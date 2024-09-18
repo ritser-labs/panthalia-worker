@@ -19,6 +19,7 @@ class StandardPlugin:
         inner_max_lr=0.001,
         inner_min_lr=0.0001,
         inner_T_0=200,
+        inner_weight_decay=0.0
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
@@ -35,13 +36,15 @@ class StandardPlugin:
         self.inner_max_lr = inner_max_lr
         self.inner_min_lr = inner_min_lr
         self.inner_T_0 = inner_T_0
+        self.inner_weight_decay = inner_weight_decay
     
     def get_master_learning_hyperparameters(self, current_master_iteration):
         return {
             'steps': self.num_steps,
             'max_lr': self.inner_max_lr,
             'min_lr': self.inner_min_lr,
-            'T_0': self.inner_T_0
+            'T_0': self.inner_T_0,
+            'weight_decay': self.inner_weight_decay,
         }
     
     def get_sot_learning_hyperparameters(self, current_iteration):
