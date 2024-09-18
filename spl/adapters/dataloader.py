@@ -65,9 +65,12 @@ class LanguageDataLoader(IterableDataset):
         token_pairs = []
         
         # Calculate how many chunks can be made based on the total length and max_seq_len
-        num_chunks = len(tokens) // max_seq_len
+        num_chunks = (len(tokens) - max_seq_len) // max_seq_len
 
         for _ in range(num_chunks):
+            if len(tokens) < max_seq_len:
+                break
+            
             # Randomly pick a start position ensuring we have enough tokens for a sequence
             start_pos = random.randint(0, len(tokens) - max_seq_len - 1)
 
@@ -158,11 +161,9 @@ class LowercaseAlphabetDataLoader(LanguageDataLoader):
 
 class FineWebDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len):
-        dataset_load_start_time = time.time()
-        super().__init__(model_config, buffer_size, max_seq_len)
         self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True)
         self.dataset_iter = iter(self.dataset)
-        dataset_load_end_time = time.time()
+        super().__init__(model_config, buffer_size, max_seq_len)
 
     def _text_generator(self):
         for example in self.dataset_iter:
