@@ -22,33 +22,60 @@ import aiofiles
 import shutil
 
 # Import your custom modules
-from .common import get_sot_learning_hyperparameters, model_adapter, batch_size, get_current_version_number, TENSOR_NAME, dataset, SOT_PRIVATE_PORT, get_future_version_number
+from .common import (
+    get_sot_learning_hyperparameters,
+    model_adapter,
+    batch_size,
+    get_current_version_number,
+    TENSOR_NAME,
+    dataset,
+    SOT_PRIVATE_PORT,
+    get_future_version_number
+)
 from .device import device
+
+# Constants for batch preloading
+PRELOAD_BATCH_COUNT = 3  # Number of batches to preload
+preloaded_batches_queue = asyncio.Queue(maxsize=PRELOAD_BATCH_COUNT)
+dataset_iterator = None
+dataset_lock = asyncio.Lock()
 
 # File locks to prevent race conditions when reading/writing files
 script_dir = os.path.dirname(__file__)
 data_dir = os.path.join(script_dir, 'data')
-block_timestamps_file_lock = FileLock(os.path.join(data_dir, 'state', 'block_timestamps.json.lock'))
-num_updates_file_lock = FileLock(os.path.join(data_dir, 'state', 'num_updates.json.lock'))
-last_future_version_file_lock = FileLock(os.path.join(data_dir, 'state', 'last_future_version_number.json.lock'))
-iteration_number_file_lock = FileLock(os.path.join(data_dir, 'state', 'iteration_number.json.lock'))
-used_nonces_file_lock = FileLock(os.path.join(data_dir, 'state', 'used_nonces.json.lock'))
+state_dir = os.path.join(data_dir, 'state')
+temp_dir = os.path.join(state_dir, 'temp')
+os.makedirs(temp_dir, exist_ok=True)
+
+block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
+num_updates_file = os.path.join(state_dir, 'num_updates.json')
+last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
+iteration_number_file = os.path.join(state_dir, 'iteration_number.json')
+
+block_timestamps_file_lock = FileLock(os.path.join(state_dir, 'block_timestamps.json.lock'))
+num_updates_file_lock = FileLock(os.path.join(state_dir, 'num_updates.json.lock'))
+last_future_version_file_lock = FileLock(os.path.join(state_dir, 'last_future_version_number.json.lock'))
+iteration_number_file_lock = FileLock(os.path.join(state_dir, 'iteration_number.json.lock'))
+used_nonces_file_lock = FileLock(os.path.join(state_dir, 'used_nonces.json.lock'))
 
 # Initialize locks for thread safety
 latest_loss_lock = asyncio.Lock()
-preloaded_batch_lock = asyncio.Lock()
-preloaded_batch_condition = asyncio.Condition(preloaded_batch_lock)
 
 SOT_FETCH_TIMEOUT = 300  # Timeout for fetching data from the SOT service
 
 # Initialize logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[
-    logging.StreamHandler()
-])
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
 logging.getLogger(__name__).setLevel(logging.INFO)
 
 # Add a global variable to control memory logging
 MEMORY_LOGGING_ENABLED = False
+
 
 def log_memory_usage(note=''):
     """Log the current memory usage of the process if enabled."""
@@ -56,6 +83,7 @@ def log_memory_usage(note=''):
         process = psutil.Process(os.getpid())
         mem_info = process.memory_info()
         logging.debug(f"Memory usage ({note}): RSS={mem_info.rss / 1024 ** 2:.2f} MB, VMS={mem_info.vms / 1024 ** 2:.2f} MB")
+
 
 def log_memory_diff(snapshot1, snapshot2, note=''):
     """Log the difference in memory usage between two snapshots if enabled."""
@@ -97,7 +125,7 @@ def nag_update(params, grads, m, lr=0.002, weight_decay=0.2, beta1=0.9, eps=1e-6
 
     # Update parameters using the velocity (new momentum)
     new_params = lookahead_params - lr * new_m
-    
+
     return new_params, new_m
 
 
@@ -110,28 +138,18 @@ def create_app(public_keys_file, enable_memory_logging=False):
         tracemalloc.start()  # Start tracing memory allocations
 
     app = Quart(__name__)
-    
+
     app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 * 1024  # 100 GB
-    
+
     log_memory_usage('Before initializing or loading initial state')
 
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
     logging.info("Initializing or loading initial state...")
-    state_dir = os.path.join(data_dir, 'state')
     os.makedirs(state_dir, exist_ok=True)
 
-    # Create the temp directory within state_dir
-    temp_dir = os.path.join(state_dir, 'temp')
-    os.makedirs(temp_dir, exist_ok=True)
-
-    # File paths to store block timestamps, num_updates, and last_future_version_number
-    block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
-    num_updates_file = os.path.join(state_dir, 'num_updates.json')
-    last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
-    iteration_number_file = os.path.join(state_dir, 'iteration_number.json')
-    
+    # Initialize variables
     update_timestamp_lock = asyncio.Lock()
     master_public_keys = None
 
@@ -156,20 +174,20 @@ def create_app(public_keys_file, enable_memory_logging=False):
             else:
                 logging.info(f"The file {file_path} does not exist. Saving default value.")
                 return default
-    
-    def set_dict_and_adam(dict, tensor_name, value):
-        dict[tensor_name] = value
-        dict[f'{tensor_name}_adam_m'] = value
+
+    def set_dict_and_adam(dict_obj, tensor_name, value):
+        dict_obj[tensor_name] = value
+        dict_obj[f'{tensor_name}_adam_m'] = value
 
     async def initialize_tensor(name, sync_version_number=None, zero_init=False):
         logging.info(f"Initializing tensor {name}")
         log_memory_usage('Before initializing tensor')
-        
+
         snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Take snapshot before the operation
-        
+
         block_timestamps = await load_json(block_timestamps_file, {}, block_timestamps_file_lock)
         last_future_version_number = await load_json(last_future_version_file, {}, last_future_version_file_lock)
-        
+
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
                 name, get_current_version_number())
@@ -201,52 +219,59 @@ def create_app(public_keys_file, enable_memory_logging=False):
         await initialize_tensor(TENSOR_NAME, zero_init=False)
         await initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
 
-    preloaded_batch = None
-
-    async def preload_batch():
-        nonlocal preloaded_batch
-        log_memory_usage('Before preloading batch')
-        
-        snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Snapshot before loading batch
-
+    async def load_next_batch():
+        """Load the next batch from the dataset."""
         batch = []
         targets = []
-        
-        logging.debug(f"Preloading batch for service")
+        global dataset_iterator
 
-        for inputs, target_tokens in dataset:
-            if len(batch) >= batch_size:
-                break
-            if isinstance(inputs, list):
-                inputs = torch.tensor(inputs)
-            if isinstance(target_tokens, list):
-                target_tokens = torch.tensor(target_tokens)
-            batch.append(inputs)
-            targets.append(target_tokens)
+        async with dataset_lock:
+            if dataset_iterator is None:
+                dataset_iterator = dataset.__aiter__()  # Initialize the iterator
 
-        logging.debug(f"Preloaded batch of size {len(batch)}")
-        if batch:
-            batch_tensor = torch.stack(batch)
-            targets_tensor = torch.stack(targets)
+            try:
+                for _ in range(batch_size):
+                    inputs, target_tokens = await dataset_iterator.__anext__()
+                    if isinstance(inputs, list):
+                        inputs = torch.tensor(inputs)
+                    if isinstance(target_tokens, list):
+                        target_tokens = torch.tensor(target_tokens)
+                    batch.append(inputs)
+                    targets.append(target_tokens)
+            except StopAsyncIteration:
+                logging.info("Dataset iterator exhausted.")
+                dataset_iterator = None  # Reset the iterator
 
-            timestamp = int(time.time())
-            random_suffix = random.randint(1000, 9999)
-            batch_filename = f'batch_{timestamp}_{random_suffix}.pt'
-            targets_filename = f'targets_{timestamp}_{random_suffix}.pt'
+        if not batch:
+            return None, None  # No more data
 
-            torch.save(batch_tensor, os.path.join(temp_dir, batch_filename))
-            torch.save(targets_tensor, os.path.join(temp_dir, targets_filename))
-
-            async with preloaded_batch_condition:
-                preloaded_batch = (batch_filename, targets_filename)
-                preloaded_batch_condition.notify_all()
-
-        if MEMORY_LOGGING_ENABLED:
-            snapshot_after = tracemalloc.take_snapshot()  # Snapshot after loading batch
-            log_memory_diff(snapshot_before, snapshot_after, note='After preloading batch')  # Log memory differences
-
-        log_memory_usage('After preloading batch')
+        batch_tensor = torch.stack(batch)
+        targets_tensor = torch.stack(targets)
+        timestamp = int(time.time())
+        random_suffix = random.randint(1000, 9999)
+        batch_filename = f'batch_{timestamp}_{random_suffix}.pt'
+        targets_filename = f'targets_{timestamp}_{random_suffix}.pt'
+        torch.save(batch_tensor, os.path.join(temp_dir, batch_filename))
+        torch.save(targets_tensor, os.path.join(temp_dir, targets_filename))
         return batch_filename, targets_filename
+
+    async def batch_preloader():
+        """Background task to preload batches and enqueue them."""
+        while True:
+            try:
+                if preloaded_batches_queue.full():
+                    await asyncio.sleep(0.1)  # Wait until space is available
+                    continue
+                batch_filename, targets_filename = await load_next_batch()
+                if batch_filename is None:
+                    logging.info("No more batches to preload.")
+                    break
+                await preloaded_batches_queue.put((batch_filename, targets_filename))
+                logging.debug(f"Enqueued batch: {batch_filename}, {targets_filename}")
+                log_memory_usage('Batch preloaded')
+            except Exception as e:
+                logging.error(f"Error preloading batch: {e}", exc_info=True)
+                await asyncio.sleep(1)  # Wait before retrying
 
     async def initialize_service():
         nonlocal master_public_keys
@@ -256,8 +281,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
             master_public_keys = json.loads(await f.read())
         model_adapter.initialize_environment('gloo')
         await initialize_all_tensors()
-        logging.info(f'Loading initial batch for service')
-        await preload_batch()
+        logging.info(f'Loading initial batches for service')
+        # Start the background preloader task
+        asyncio.create_task(batch_preloader())
         log_memory_usage('After initializing service')
         logging.info("Service initialized")
 
@@ -281,14 +307,14 @@ def create_app(public_keys_file, enable_memory_logging=False):
     def verify_signature(message, signature):
         nonlocal master_public_keys
         snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Take snapshot before the operation
-        
+
         message = encode_defunct(text=message)
         recovered_address = Account.recover_message(message, signature=signature)
-        
+
         if MEMORY_LOGGING_ENABLED:
             snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
             log_memory_diff(snapshot_before, snapshot_after, note='After verifying signature')  # Log memory differences
-        
+
         logging.debug(f"Recovered address: {recovered_address}, Expected addresses: {master_public_keys}")
         return recovered_address.lower() in [key.lower() for key in master_public_keys]
 
@@ -359,23 +385,17 @@ def create_app(public_keys_file, enable_memory_logging=False):
     @requires_authentication
     async def get_batch():
         logging.info("Accessing /get_batch endpoint")
-        nonlocal preloaded_batch
-
-        async with preloaded_batch_condition:
-            while preloaded_batch is None:
-                logging.info("Waiting for batch to be preloaded...")
-                await preloaded_batch_condition.wait()
-
-            batch_filename, targets_filename = preloaded_batch
-            preloaded_batch = None
-
-        await preload_batch()
-
         try:
+            batch_filename, targets_filename = await preloaded_batches_queue.get()
+            if batch_filename is None and targets_filename is None:
+                # No more batches
+                return jsonify({'error': 'No more batches available'}), 404
             return jsonify({
                 'batch_url': f'/data/state/temp/{batch_filename}',
                 'targets_url': f'/data/state/temp/{targets_filename}'
             })
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logging.error(f"Error in /get_batch: {e}", exc_info=True)
             return jsonify({'error': 'Could not get batch'}), 500
@@ -394,7 +414,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
         tensor = tensor.to(device)
 
         logging.debug(f"Tensor before AdamW: {tensor}")
-
         logging.debug(f"Flattened gradients: {grads_flat}")
 
         if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
@@ -452,7 +471,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         old_block_timestamp = None
 
         await fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
-        
+
         new_block_timestamp = last_future_version_number.get(tensor_name, 0)
         # the cause might be that last_future_version_number is not updated
 
@@ -462,21 +481,21 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 old_block_timestamp = block_timestamps.get(tensor_name, 0)
                 set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
                 await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
-                
+
                 for name in f'{tensor_name}', f'{tensor_name}_adam_m':
                     if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
                         await asyncio.to_thread(shutil.copy,
                             os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), 
                             os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')
                         )
-        
+
             set_dict_and_adam(num_updates, tensor_name, 0)
             await save_json(num_updates_file, num_updates, num_updates_file_lock)
-            
+
             set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
             await save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
         return old_block_timestamp
-    
+
     async def cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number):
         future_version_number = get_future_version_number()
         if last_future_version_number.get(tensor_name, 0) < future_version_number:
@@ -489,16 +508,16 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt'),
                 os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt')
             ]
-            
+
             # Remove each file if it exists
             for file_path in file_paths:
                 if os.path.exists(file_path):
                     await asyncio.to_thread(os.remove, file_path)
                 else:
-                    print(f"File not found: {file_path}")
+                    logging.warning(f"File not found: {file_path}")
         if update_timestamp_lock.locked():
             update_timestamp_lock.release()
-    
+
     async def update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         old_block_timestamp = await update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
         await cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
@@ -517,7 +536,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
         data = await request.get_json()
         tensor_name = data.get('tensor_name')
         result_url = data.get('result_url')
-        
 
         logging.debug(f"Received tensor_name: {tensor_name}, version: {data['version_number']}, result_url: {result_url}")
 
@@ -538,14 +556,14 @@ def create_app(public_keys_file, enable_memory_logging=False):
             logging.info(f'Delta of {delta} recorded with version number {data["version_number"]}')
             return jsonify({'error': 'Version number mismatch'}), 409
         old_block_timestamp = await update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
-        
+
         logging.info(f"Future version number for {tensor_name}: {future_version_number}")
 
         try:
             local_file_path = get_local_file_path(result_url, request)
             batch_url = data.get('batch_url')
             targets_url = data.get('targets_url')
-            
+
             local_batch_file_path = get_local_file_path(batch_url, request)
             local_targets_file_path = get_local_file_path(targets_url, request)
             logging.debug(f'Deleting batch and targets: {local_batch_file_path}, {local_targets_file_path}')
@@ -627,7 +645,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
     def version_number_exists(version_number, tensor_name):
         return os.path.exists(os.path.join(state_dir, f'{tensor_name}_{version_number}.pt'))
 
-
     @app.route('/latest_state', methods=['GET'])
     async def latest_state():
         logging.info("Accessing /latest_state endpoint")
@@ -641,7 +658,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             latest_version_number = block_timestamps.get(tensor_name, 0)
         else:
             latest_version_number = int(latest_version_number)
-        
+
         state_file_path = os.path.join(state_dir, f'{tensor_name}_{latest_version_number}.pt')
 
         if not os.path.exists(state_file_path):
@@ -665,7 +682,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         tensor_name = request.args.get('tensor_name')
         if not tensor_name:
             return jsonify({'error': 'Missing tensor_name parameter'}), 400
-        
+
         block_timestamps = await load_json(block_timestamps_file, {}, block_timestamps_file_lock)
         num_updates = await load_json(num_updates_file, {}, num_updates_file_lock)
         iteration_number = await load_json(iteration_number_file, {}, iteration_number_file_lock)
@@ -694,7 +711,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
     async def get_data_file(filename):
         logging.info(f"Accessing file: {filename}")
         file_path = os.path.join(state_dir, filename)
-        
+
         if not os.path.exists(file_path):
             logging.error(f"File not found: {file_path}")
             return jsonify({'error': 'File not found'}), 404
@@ -709,7 +726,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
         except Exception as e:
             logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
             return jsonify({'error': 'File not found or could not be read'}), 404
-
 
     @app.route('/upload_tensor', methods=['POST'])
     async def upload_tensor():
@@ -751,6 +767,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         return jsonify({'message': 'Tensor uploaded successfully', 'tensor_url': f'/data/state/temp/{filename}'}), 200
 
     latest_loss = None
+
     @app.route('/update_loss', methods=['POST'])
     async def update_loss():
         nonlocal latest_loss
@@ -780,7 +797,13 @@ def create_app(public_keys_file, enable_memory_logging=False):
         return jsonify({'loss': loss}), 200
 
     def initialize():
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            # If no event loop is available, create a new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
         loop.run_until_complete(initialize_service())
 
     initialize()
@@ -805,7 +828,7 @@ if __name__ == "__main__":
 
         config = Config()
         config.bind = [f'0.0.0.0:{SOT_PRIVATE_PORT}']
-        
+
         # Correctly pass the app callable to serve
         asyncio.run(serve(app, config))
 
