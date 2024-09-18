@@ -28,7 +28,7 @@ dataset = FineWebDataLoader(model_config, buffer_size=100, max_seq_len=model_par
 
 NUM_MICROBATCHES = 500
 
-EXAMPLES_PER_MICROBATCH = 16
+EXAMPLES_PER_MICROBATCH = 8
 
 exported_plugin = StandardPlugin(
     model_adapter,
