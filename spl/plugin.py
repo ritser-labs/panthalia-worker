@@ -26,17 +26,17 @@ model_adapter = NanoGPTModelAdapter(model_config)
 
 dataset = FineWebDataLoader(model_config, buffer_size=100, max_seq_len=model_params.block_size)
 
-NUM_MICROBATCHES = 500
+NUM_STEPS = 500
 
-EXAMPLES_PER_MICROBATCH = 8
+EXAMPLES_PER_STEP = 14
 
 exported_plugin = StandardPlugin(
     model_adapter,
     model_config,
     dataset,
     tokenizer,
-    num_microbatches=NUM_MICROBATCHES,
-    example_per_microbatch=EXAMPLES_PER_MICROBATCH,
+    num_steps=NUM_STEPS,
+    examples_per_step=EXAMPLES_PER_STEP,
     outer_max_lr=1,
     outer_min_lr=1,
     outer_weight_decay=0.0,

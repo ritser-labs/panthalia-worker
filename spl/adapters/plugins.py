@@ -8,8 +8,8 @@ class StandardPlugin:
         model_config,
         dataset,
         tokenizer,
-        num_microbatches,
-        example_per_microbatch,
+        num_steps,
+        examples_per_step,
         outer_max_lr=0.7,
         outer_min_lr=0.7,
         outer_weight_decay=0.00,
@@ -24,8 +24,8 @@ class StandardPlugin:
         self.model_config = model_config
         self.dataset = dataset
         self.tokenizer = tokenizer
-        self.num_microbatches = num_microbatches
-        self.batch_size = num_microbatches * example_per_microbatch
+        self.num_steps = num_steps
+        self.batch_size = num_steps * examples_per_step
         self.outer_max_lr = outer_max_lr
         self.outer_min_lr = outer_min_lr
         self.outer_weight_decay = outer_weight_decay
@@ -38,7 +38,7 @@ class StandardPlugin:
     
     def get_master_learning_hyperparameters(self, current_master_iteration):
         return {
-            'steps': self.num_microbatches,
+            'steps': self.num_steps,
             'max_lr': self.inner_max_lr,
             'min_lr': self.inner_min_lr,
             'T_0': self.inner_T_0
