@@ -451,7 +451,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         future_version_number = get_future_version_number()
         old_block_timestamp = None
 
-        fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
+        await fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
         
         new_block_timestamp = last_future_version_number.get(tensor_name, 0)
         # the cause might be that last_future_version_number is not updated
