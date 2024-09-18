@@ -149,10 +149,8 @@ class FineWebDataLoader(LanguageDataLoader):
         super().__init__(model_config, buffer_size, max_seq_len)
 
     async def _text_generator(self):
-        print('Starting to iterate dataset')
         # Wrap the synchronous dataset iteration in an async generator
         for example in await asyncio.to_thread(self.iterate_dataset):
-            print(f'Example: {example}')
             yield example['text']
 
     def iterate_dataset(self):
