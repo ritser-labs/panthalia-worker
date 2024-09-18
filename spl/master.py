@@ -292,9 +292,6 @@ class Master:
 
     async def get_batch_and_targets_url(self):
         wallet = self.get_next_wallet()
-        message = json.dumps(self.generate_message('get_batch'), sort_keys=True)
-        signature = self.sign_message(message, wallet)
-        headers = {'Authorization': f'{message}:{signature}'}
         url = os.path.join(self.sot_url, 'get_batch')
 
         retry_delay = 1
@@ -302,6 +299,9 @@ class Master:
         retries = 0
         while retries < max_retries:
             try:
+                message = json.dumps(self.generate_message('get_batch'), sort_keys=True)
+                signature = self.sign_message(message, wallet)
+                headers = {'Authorization': f'{message}:{signature}'}
                 async with aiohttp.ClientSession() as session:
                     async with session.post(url, headers=headers) as response:
                         if response.status == 200:
