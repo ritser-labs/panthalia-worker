@@ -170,6 +170,8 @@ def create_app(public_keys_file, enable_memory_logging=False):
                         return json.loads(content)  # Try loading the JSON content
                     except json.JSONDecodeError as e:
                         logging.error(f"JSONDecodeError in file {file_path}: {e}. Returning default value.")
+                        async with aiofiles.open(file_path, 'w') as f:
+                            await f.write(json.dumps(default))
                         return default
             else:
                 logging.info(f"The file {file_path} does not exist. Saving default value.")

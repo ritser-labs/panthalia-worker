@@ -299,6 +299,7 @@ class Master:
         retries = 0
         while retries < max_retries:
             try:
+                logging.info(f"Retrieving batch and targets URL from {url}")
                 message = json.dumps(self.generate_message('get_batch'), sort_keys=True)
                 signature = self.sign_message(message, wallet)
                 headers = {'Authorization': f'{message}:{signature}'}
@@ -308,9 +309,9 @@ class Master:
                             response_json = await response.json()
                             return self.sot_url + response_json['batch_url'], self.sot_url + response_json['targets_url']
                         else:
-                            print(f"Request failed with status code {response.status}")
+                            logging.error(f"Request failed with status code {response.status}")
             except Exception as e:
-                print(f"Request failed: {e}. Retrying in {retry_delay} seconds...")
+                logging.error(f"Request failed: {e}. Retrying in {retry_delay} seconds...")
 
             retries += 1
             await asyncio.sleep(retry_delay)
