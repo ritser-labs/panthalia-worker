@@ -295,12 +295,28 @@ class Master:
         message = json.dumps(self.generate_message('get_batch'), sort_keys=True)
         signature = self.sign_message(message, wallet)
         headers = {'Authorization': f'{message}:{signature}'}
-
         url = os.path.join(self.sot_url, 'get_batch')
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers) as response:
-                response_json = await response.json()
-                return self.sot_url + response_json['batch_url'], self.sot_url + response_json['targets_url']
+
+        retry_delay = 1
+        max_retries = 400
+        retries = 0
+        while retries < max_retries:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers) as response:
+                        if response.status == 200:
+                            response_json = await response.json()
+                            return self.sot_url + response_json['batch_url'], self.sot_url + response_json['targets_url']
+                        else:
+                            print(f"Request failed with status code {response.status}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                print(f"Request failed: {e}. Retrying in {self.retry_delay} seconds...")
+
+            retries += 1
+            await asyncio.sleep(retry_delay)
+        
+        raise Exception(f"Failed to retrieve batch and targets URL after {self.max_retries} attempts.")
+
 
 if __name__ == "__main__":
     import argparse
