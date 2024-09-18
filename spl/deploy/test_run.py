@@ -387,6 +387,9 @@ async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_cont
         'LOCAL_STORAGE_DIR': args.local_storage_dir,
         'BACKEND': args.backend
     }
+    
+    if args.torch_compile:
+        env['TORCH_COMPILE'] = 'true'
 
     worker_name = f'worker_{worker_idx}'
     worker_instance, worker_helpers = await launch_instance_and_record_logs(
