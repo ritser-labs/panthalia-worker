@@ -16,6 +16,7 @@ from typing import (
 
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
+from abc import ABC, abstractmethod
 
 logger = getLogger(__name__)
 
@@ -232,16 +233,92 @@ class ChatFormat:
         tokens.extend(self.encode_header({"role": "assistant", "content": ""}))
         return tokens
 
-
-class CharacterLevelTokenizer:
+class BaseTokenizer(ABC):
     def __init__(self, pad_id: int = 0):
         self.pad_id = pad_id
-        
+
+    @abstractmethod
     def encode(self, text: str) -> list:
+        """
+        Encodes the input text into a list of token IDs.
+        """
+        pass
+
+    @abstractmethod
+    def decode(self, token_list: list) -> str:
+        """
+        Decodes a list of token IDs back into a string.
+        """
+        pass
+
+    @abstractmethod
+    def get_vocab_size(self) -> int:
+        """
+        Returns the size of the tokenizer's vocabulary.
+        """
+        pass
+
+# Abstract Base Class for a Tokenizer using tiktoken (BPE)
+class BaseTiktokenTokenizer(BaseTokenizer):
+    def __init__(self, pad_id: int = 0):
+        super().__init__(pad_id)
+        self.tokenizer = None
+
+    @abstractmethod
+    def encode(self, text: str) -> list:
+        """
+        Encodes the input text using tiktoken.
+        """
+        pass
+
+    @abstractmethod
+    def decode(self, token_list: list) -> str:
+        """
+        Decodes a list of token IDs back to a string using tiktoken.
+        """
+        pass
+
+    def get_vocab_size(self) -> int:
+        """
+        Returns the size of the tokenizer's vocabulary (n_vocab).
+        """
+        return self.tokenizer.n_vocab if self.tokenizer else 0
+
+# Character-level Tokenizer (child of BaseTokenizer)
+class CharacterLevelTokenizer(BaseTokenizer):
+    def encode(self, text: str) -> list:
+        """
+        Encodes the input text by converting each character to its ASCII value.
+        """
         return [ord(char) for char in text]
-    
+
     def decode(self, ascii_list: list) -> str:
+        """
+        Decodes a list of ASCII values back into a string.
+        """
         return ''.join([chr(value) for value in ascii_list])
 
     def get_vocab_size(self) -> int:
+        """
+        Returns the vocabulary size for character-level encoding (ASCII 0-127).
+        """
         return 128
+
+# GPT-2 Tokenizer (child of BaseTiktokenTokenizer)
+class GPT2Tokenizer(BaseTiktokenTokenizer):
+    def __init__(self, pad_id: int = 0):
+        super().__init__(pad_id)
+        # Initialize tiktoken's GPT-2 tokenizer
+        self.tokenizer = tiktoken.get_encoding("gpt2")
+
+    def encode(self, text: str) -> list:
+        """
+        Encodes the input text using GPT-2's BPE encoding.
+        """
+        return self.tokenizer.encode(text)
+
+    def decode(self, token_list: list) -> str:
+        """
+        Decodes a list of GPT-2 tokens back to a string.
+        """
+        return self.tokenizer.decode(token_list)
