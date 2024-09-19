@@ -649,9 +649,17 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 learning_params['t']
             )
 
-            torch.save(future_tensor, future_tensor_path)
-            torch.save(future_tensor, unversioned_tensor_path)
-            torch.save(m_update, future_tensor_adam_m_path)
+            # Prepare temporary file paths
+            future_tensor_temp_path = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt.tmp')
+            future_tensor_adam_m_temp_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{future_version_number}.pt.tmp')
+
+            # Save the future tensor and momentum to temporary files
+            asyncio.to_thread(torch.save, future_tensor, future_tensor_temp_path)
+            asyncio.to_thread(torch.save, m_update, future_tensor_adam_m_temp_path)
+
+            # Atomically rename the temporary files to their final names
+            os.rename(future_tensor_temp_path, future_tensor_path)
+            os.rename(future_tensor_adam_m_temp_path, future_tensor_adam_m_path)
 
             await cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
             # Cleanup old accumulated grads tensors
