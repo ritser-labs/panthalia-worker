@@ -56,7 +56,6 @@ class LanguageDataLoader:
         tokenize_start = time.time()
         tokens = self.model_config.tokenizer.encode(text)
         tokenize_end = time.time()
-        print(f"Tokenization time: {tokenize_end - tokenize_start}")
         token_pairs = []
 
         # Calculate how many chunks can be made based on the total length and max_seq_len
@@ -83,7 +82,6 @@ class LanguageDataLoader:
             token_pairs.append((inputs, targets))
 
         split_end = time.time()
-        print(f"Splitting time: {split_end - split_start}")
 
         return token_pairs
 
