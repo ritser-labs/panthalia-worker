@@ -471,7 +471,7 @@ async def initialize_tensor(tensor_name):
         iterations += 1
         logging.debug(f"Initialization loop iteration {iterations}")
         try:
-            timeout = aiohttp.ClientTimeout(total=30)  # 30 seconds timeout
+            timeout = aiohttp.ClientTimeout(total=200)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 logging.debug("Fetching current timestamp from SOT")
                 async with session.post(
