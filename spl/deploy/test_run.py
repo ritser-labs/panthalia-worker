@@ -19,7 +19,10 @@ import traceback
 import socket
 import shlex
 import signal
-from .util import is_port_open  # Importing the is_port_open function
+from .util import is_port_open
+import paramiko
+import runpod
+from .cloud_adapters.runpod import get_pod_ssh_ip_port
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
@@ -36,6 +39,7 @@ LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
 ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
+STATE_FILE = os.path.join(STATE_DIR, 'state.json')  # State file to save/load state
 
 REMOTE_MODEL_FILE = '/app/spl/data/state/model.pt'
 LOCAL_MODEL_FILE = os.path.join(parent_dir, 'data', 'state', 'model.pt')
@@ -100,13 +104,16 @@ async def wait_for_workers_to_sync(worker_count, timeout=600):
     start_time = time.time()
     get_num_workers_url = os.path.join(sot_url, 'get_num_synced')
     while time.time() - start_time < timeout:
-        response = requests.get(get_num_workers_url)
-        synced_workers = response.json()
-        logging.debug(f"Synced {synced_workers}/{worker_count} workers.")
-        if synced_workers >= worker_count:
-            logging.debug("All workers have synced.")
-            return True
-        time.sleep(2)
+        try:
+            response = requests.get(get_num_workers_url)
+            synced_workers = response.json()
+            logging.debug(f"Synced {synced_workers}/{worker_count} workers.")
+            if synced_workers >= worker_count:
+                logging.debug("All workers have synced.")
+                return True
+        except requests.RequestException as e:
+            logging.error(f"Error checking worker sync status: {e}")
+        await asyncio.sleep(2)
     logging.debug("Timeout waiting for workers to sync.")
     return False
 
@@ -147,9 +154,30 @@ def delete_directory_contents(directory):
             logging.debug(f"Error deleting directory {directory}: {e}")
 
 def terminate_processes():
+    """Terminate all running pods and remove the state file."""
     terminate_all_pods()
+    # Remove the state file upon termination
+    if os.path.exists(STATE_FILE):
+        os.remove(STATE_FILE)
+        logging.info(f"State file {STATE_FILE} deleted successfully.")
 
-def signal_handler(signal, frame):
+def load_or_prompt_state():
+    """Check if a state file exists and prompt whether to load or delete it."""
+    if os.path.exists(STATE_FILE):
+        while True:
+            choice = input(f"State file {STATE_FILE} exists. Do you want to load it (L) or delete it (D)? [L/D]: ").strip().lower()
+            if choice == 'l':
+                return load_state()
+            elif choice == 'd':
+                os.remove(STATE_FILE)
+                logging.info(f"State file {STATE_FILE} deleted successfully.")
+                return {'pods': {}, 'deployscript_run': False}
+            else:
+                print("Invalid choice. Please enter 'L' to load or 'D' to delete.")
+    else:
+        return {'pods': {}, 'deployscript_run': False}
+
+def signal_handler(signal_received, frame):
     logging.info("SIGINT received, shutting down...")
     terminate_processes()
     os._exit(0)  # Force exit the program
@@ -171,15 +199,11 @@ def reset_logs(log_dir):
 def fetch_latest_loss():
     global latest_loss_cache, sot_url
     current_time = time.time()
-    
-    logging.debug(10)
 
     # Check if the cache is expired
     if current_time - latest_loss_cache['last_fetched'] > LOSS_REFRESH_INTERVAL:
-        logging.debug(20)
         try:
             response = requests.get(f"{sot_url}/get_loss", timeout=1)
-            logging.debug(30)
             if response.status_code == 200:
                 data = response.json()
                 latest_loss_cache['value'] = data.get('loss', None)
@@ -216,7 +240,6 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
     right_col_width = max_name_length + 2
 
     def draw_screen():
-        logging.debug(1)
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         split_point = width - right_col_width
@@ -229,7 +252,6 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
             not name.startswith('worker'),
             name
         ))
-        logging.debug(2)
 
         # Display logs on the left side
         process_name = ordered_process_names[selected_process]
@@ -246,35 +268,30 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
         # Draw the separator line
         for y in range(height):
             stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
-        
-        logging.debug(3)
 
         for i, name in enumerate(ordered_process_names):
             is_selected = (i == selected_process)
-            status = pod_helpers[name]['is_ssh_session_alive']()
+            status = pod_helpers.get(name, {}).get('is_ssh_session_alive', lambda: False)()
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
 
             stdscr.addstr(i, split_point, f"{indicator} {name}", color)
-        logging.debug(4)
 
         # Fetch and display the latest loss
         latest_loss = fetch_latest_loss()
         loss_display = f"Latest Loss: {latest_loss:.3f}" if latest_loss is not None else "Latest Loss: N/A"
         loss_y = height - len(task_counts) - 5
         stdscr.addstr(loss_y, split_point, loss_display, curses.color_pair(4))
-        
-        logging.debug(5)
 
         # Draw task counts below the latest loss
         task_start = height - 3 - len(task_counts)
         for i, (task_type, (solver_selected, active)) in enumerate(task_counts.items()):
             stdscr.addstr(task_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
 
-        stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit, 's' to download model.", curses.A_BOLD)
+        # Instructions
+        stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit and terminate pods, 'e' to exit without terminating.", curses.A_BOLD)
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
         stdscr.refresh()
-        logging.debug(6)
 
     draw_screen()  # Initial draw
 
@@ -302,13 +319,19 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
             draw_screen()
         elif key == ord('q'):
             terminate_processes()
+            # Remove the state file upon termination
+            if os.path.exists(STATE_FILE):
+                os.remove(STATE_FILE)
+            break
+        elif key == ord('e'):
+            # Exit without terminating pods
+            logging.info("Exiting monitoring interface without terminating pods.")
             break
 
         if last_resize and time.time() - last_resize > 0.1:
             draw_screen()
             last_resize = None
 
-        logging.debug("Drawing screen...")
         draw_screen()
         time.sleep(0.05)
 
@@ -338,23 +361,26 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
     while True:
         for task_type, contract_filters in filters.items():
             for event_name, event_filter in contract_filters.items():
-                new_entries = await event_filter.get_new_entries()
-                for event in new_entries:
-                    task_id = event['args']['taskId']
-                    if task_type not in tasks:
-                        tasks[task_type] = {}
-                    if event_name == 'TaskRequestSubmitted':
-                        tasks[task_type][task_id] = {'active': True, 'solver_selected': False}
-                    elif event_name == 'SolverSelected':
-                        if task_id in tasks[task_type]:
-                            tasks[task_type][task_id]['solver_selected'] = True
-                    elif event_name == 'SolutionSubmitted':
-                        if task_id in tasks[task_type]:
-                            tasks[task_type][task_id]['active'] = False
-                    elif event_name == 'TaskResolved':
-                        if task_id in tasks[task_type]:
-                            tasks[task_type][task_id]['active'] = False
-        
+                try:
+                    new_entries = await event_filter.get_new_entries()
+                    for event in new_entries:
+                        task_id = event['args']['taskId']
+                        if task_type not in tasks:
+                            tasks[task_type] = {}
+                        if event_name == 'TaskRequestSubmitted':
+                            tasks[task_type][task_id] = {'active': True, 'solver_selected': False}
+                        elif event_name == 'SolverSelected':
+                            if task_id in tasks[task_type]:
+                                tasks[task_type][task_id]['solver_selected'] = True
+                        elif event_name == 'SolutionSubmitted':
+                            if task_id in tasks[task_type]:
+                                tasks[task_type][task_id]['active'] = False
+                        elif event_name == 'TaskResolved':
+                            if task_id in tasks[task_type]:
+                                tasks[task_type][task_id]['active'] = False
+                except Exception as e:
+                    logging.error(f"Error processing events for {task_type}: {e}")
+
         # Update the task counts
         for task_type in subnet_addresses.keys():
             active_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['active'])
@@ -367,7 +393,7 @@ async def set_interval_mining(web3, interval):
     """Set the mining interval on the Ethereum node."""
     await web3.provider.make_request('evm_setIntervalMining', [interval])
 
-async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_contract, pool_address):
+async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_contract, pool_address, state):
     global sot_url, rpc_url
     # Define environment variables for the worker
     this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
@@ -387,11 +413,13 @@ async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_cont
         'LOCAL_STORAGE_DIR': args.local_storage_dir,
         'BACKEND': args.backend
     }
-    
+
     if args.torch_compile:
         env['TORCH_COMPILE'] = 'true'
 
     worker_name = f'worker_{worker_idx}'
+
+    # Launch the worker instance and save state
     worker_instance, worker_helpers = await launch_instance_and_record_logs(
         name=worker_name,
         gpu_type=GPU_TYPE,
@@ -403,15 +431,47 @@ async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_cont
         template_id=BASE_TEMPLATE_ID,
         cmd=DOCKER_CMD
     )
+
+    # Save the pod ID and private key path to state
+    state['pods'][worker_name] = {
+        'pod_id': worker_instance['id'],
+        'private_key_path': worker_helpers['private_key_path'],
+        'log_file': os.path.join(LOG_DIR, f"{worker_name}.log")
+    }
+    save_state(state)
+
     logging.info(f"Started worker process {worker_idx} for tasks on instance {worker_instance['id']} with env {env}")
 
     return worker_name, worker_instance, worker_helpers
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        while True:
+            choice = input(f"State file {STATE_FILE} exists. Do you want to load it (L) or delete it (D)? [L/D]: ").strip().lower()
+            if choice == 'l':
+                return load_state()
+            elif choice == 'd':
+                os.remove(STATE_FILE)
+                logging.info(f"State file {STATE_FILE} deleted successfully.")
+                return {'pods': {}, 'deployscript_run': False}
+            else:
+                print("Invalid choice. Please enter 'L' to load or 'D' to delete.")
+    else:
+        return {'pods': {}, 'deployscript_run': False}
+
+def save_state(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE_FILE, 'w') as f:
+        json.dump(state, f)
 
 async def main():
     global sot_url, rpc_url
     processes = {}
     task_counts = {}  # Dictionary to store task counts
     pod_helpers = {}
+    
+    # Use the new function to load state or prompt to delete
+    state = load_or_prompt_state()
 
     # Retrieve the public IP address of the machine
     public_ip = get_public_ip()
@@ -424,59 +484,77 @@ async def main():
     master_wallets = generate_wallets(args.num_master_wallets)
     master_public_keys = [wallet['address'] for wallet in master_wallets]
 
-
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
-    
-    env = {
-        'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
-        'SERVICE_TYPE': 'sot',
-        'RANK': '0',
-        'WORLD_SIZE': '1',
-        'PUBLIC_KEYS': INPUT_JSON_PATH + '_0',
-        'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
-    }
 
-    logging.info(f'Environment variables: {env}')
+    # Load subnet_addresses and deployment_config
+    with open(args.subnet_addresses, 'r') as file:
+        subnet_addresses = json.load(file)
 
-    # Start the SOT service on a remote instance
-    logging.info("Starting SOT instance...")
-    
-    sot_promise = launch_instance_and_record_logs(
-        name="sot_instance",
-        gpu_count=0,
-        ports=f'{SOT_PRIVATE_PORT}/tcp',
-        log_file=SOT_LOG_FILE,
-        template_id=BASE_TEMPLATE_ID,
-        cmd=DOCKER_CMD,
-        env=env,
-        input_jsons=[master_public_keys]
-    )
+    with open(args.deployment_config, 'r') as file:
+        deployment_config = json.load(file)
 
-    # Start Anvil on a remote instance
-    logging.info("Starting Anvil instance...")
-    anvil_instance, anvil_helpers = await launch_instance_and_record_logs(
-        name="anvil_instance",
-        gpu_count=0,
-        ports='8545/tcp',
-        log_file=ANVIL_LOG_FILE,
-        cmd=ANVIL_CMD,
-        template_id=BASE_TEMPLATE_ID
-    )
-    pod_helpers['anvil'] = anvil_helpers
-    anvil_ip, anvil_port = await get_public_ip_and_port(anvil_instance['id'], private_port=8545)
-    rpc_url = f"http://{anvil_ip}:{anvil_port}"
-    processes['anvil'] = anvil_instance
-    logging.info(f"Anvil started on {rpc_url}")
+    sot_promise = None
+    if 'sot' not in state['pods']:
+        logging.info("Starting SOT instance...")
 
-    # Wait until the Anvil port is open
-    logging.info(f"Waiting for Anvil to open port {anvil_port}...")
-    while not is_port_open(anvil_ip, anvil_port):
-        logging.info("Anvil port not open yet. Retrying in 1 second...")
-        time.sleep(1)
-    logging.info("Anvil port is now open.")
+        env = {
+            'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
+            'SERVICE_TYPE': 'sot',
+            'RANK': '0',
+            'WORLD_SIZE': '1',
+            'PUBLIC_KEYS': INPUT_JSON_PATH + '_0',
+            'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
+        }
 
-    try:
+        logging.info(f'Environment variables for SOT: {env}')
+
+        # Start the SOT service on a remote instance
+        sot_promise = launch_instance_and_record_logs(
+            name="sot",
+            gpu_count=0,
+            ports=f'{SOT_PRIVATE_PORT}/tcp',
+            log_file=SOT_LOG_FILE,
+            template_id=BASE_TEMPLATE_ID,
+            cmd=DOCKER_CMD,
+            env=env,
+            input_jsons=[master_public_keys]
+        )
+    if 'anvil' not in state['pods']:
+        logging.info("Starting Anvil instance...")
+
+        anvil_instance, anvil_helpers = await launch_instance_and_record_logs(
+            name="anvil",
+            gpu_count=0,
+            ports='8545/tcp',
+            log_file=ANVIL_LOG_FILE,
+            template_id=BASE_TEMPLATE_ID,
+            cmd=ANVIL_CMD,
+            env={},
+            timeout=300
+        )
+        pod_helpers['anvil'] = anvil_helpers
+        anvil_ip, anvil_port = await get_public_ip_and_port(anvil_instance['id'], private_port=8545)
+        rpc_url = f"http://{anvil_ip}:{anvil_port}"
+        processes['anvil'] = anvil_instance
+        logging.info(f"Anvil started on {rpc_url}")
+
+        # Save Anvil instance to state
+        state['pods']['anvil'] = {
+            'pod_id': anvil_instance['id'],
+            'private_key_path': anvil_helpers['private_key_path'],
+            'log_file': ANVIL_LOG_FILE
+        }
+        state['rpc_url'] = rpc_url
+        save_state(state)
+
+        # Wait until the Anvil port is open
+        logging.info(f"Waiting for Anvil to open port {anvil_port}...")
+        while not is_port_open(anvil_ip, anvil_port):
+            logging.info("Anvil port not open yet. Retrying in 1 second...")
+            await asyncio.sleep(1)
+        logging.info("Anvil port is now open.")
+
         # Delete all .pt files in the state directory except for the latest version for each tensor
         delete_old_tensor_files(STATE_DIR, BLOCK_TIMESTAMPS_FILE)
 
@@ -491,13 +569,12 @@ async def main():
         os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
 
         web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
-        
 
         # Wait for the RPC to be available before proceeding
         if not await wait_for_rpc_available(web3):
             exit(1)
         await set_interval_mining(web3, 1)
-    
+
         # Run Deploy.s.sol script from the correct path
         deploy_command = [
             'forge', 'script', os.path.basename(args.forge_script),
@@ -509,14 +586,6 @@ async def main():
         # Print deployment stage completion
         logging.info("Deployment completed successfully, loading JSON files...")
 
-
-    
-        with open(args.subnet_addresses, 'r') as file:
-            subnet_addresses = json.load(file)
-
-        with open(args.deployment_config, 'r') as file:
-            deployment_config = json.load(file)
-        
         logging.info('JSONs loaded, parsing deployment config...')
 
         distributor_contract_address = deployment_config['distributor']
@@ -536,6 +605,22 @@ async def main():
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
         await fund_wallets(web3, args.private_key, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
 
+        state['deployscript_run'] = True
+        save_state(state)
+    else:
+        logging.info("Deployment script has already been run. Skipping deployment.")
+        rpc_url = state['rpc_url']
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
+        pool_address = deployment_config['pool']
+        pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
+        token_address = await pool_contract.functions.token().call()
+        token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+
+        # Load worker wallets
+        worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
+
+    # Launch SOT after deployment to maximize concurrency
+    if 'sot' not in state['pods']:
         sot_instance, sot_helpers = await sot_promise
         pod_helpers['sot'] = sot_helpers
         sot_ip, sot_port = await get_public_ip_and_port(sot_instance['id'], private_port=SOT_PRIVATE_PORT)
@@ -543,28 +628,73 @@ async def main():
         processes['sot'] = sot_instance
         logging.info(f"SOT service started on {sot_url}")
 
+        # Save SOT instance to state
+        state['pods']['sot'] = {
+            'pod_id': sot_instance['id'],
+            'private_key_path': sot_helpers['private_key_path'],
+            'log_file': SOT_LOG_FILE
+        }
+        state['sot_url'] = sot_url
+        save_state(state)
+
         # Wait for the SOT service to be available
-        if not wait_for_sot(sot_url):
+        if not await wait_for_sot(sot_url):
             logging.error("Error: SOT service did not become available within the timeout period.")
-            sot_instance.terminate()
             exit(1)
+    else:
+        logging.info("SOT instance already running. Reconnecting...")
+        sot_url = state['sot_url']
+        pod_id = state['pods']['sot']['pod_id']
+        pod = runpod.get_pod(pod_id)
+        if pod['desiredStatus'] != 'RUNNING':
+            logging.error("SOT pod is not running. Exiting.")
+            exit(1)
+        processes['sot'] = pod
+        # Reconnect to SOT instance
+        ssh_ip, ssh_port = await get_pod_ssh_ip_port(pod_id)
+        private_key_path = state['pods']['sot']['private_key_path']
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path)
+        pod_helpers['sot'] = {'ssh': ssh}
 
-        # Print worker initialization stage
-        logging.info("Starting worker processes...")
+    # Print worker initialization stage
+    logging.info("Starting worker processes...")
 
-        # Use asyncio.gather() to launch all workers concurrently
-        worker_tasks = [
-            launch_worker(
-                worker_idx,
-                subnet_addresses,
-                worker_wallets,
-                token_contract,
-                pool_address
+    # Use asyncio.gather() to launch all workers concurrently
+    worker_tasks = []
+    for worker_idx in range(args.worker_count):
+        worker_name = f'worker_{worker_idx}'
+        if worker_name not in state['pods']:
+            worker_tasks.append(
+                launch_worker(
+                    worker_idx,
+                    subnet_addresses,
+                    worker_wallets,
+                    token_contract,
+                    pool_address,
+                    state
+                )
             )
-            for worker_idx in range(args.worker_count)
-        ]
-        try:
-            # Print master initialization stage
+        else:
+            logging.info(f"Worker {worker_name} already running. Reconnecting...")
+            pod_id = state['pods'][worker_name]['pod_id']
+            pod = runpod.get_pod(pod_id)
+            if pod['desiredStatus'] != 'RUNNING':
+                logging.error(f"Worker pod {worker_name} is not running. Exiting.")
+                exit(1)
+            processes[worker_name] = pod
+            # Reconnect to worker instance
+            ssh_ip, ssh_port = await get_pod_ssh_ip_port(pod_id)
+            private_key_path = state['pods'][worker_name]['private_key_path']
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path)
+            pod_helpers[worker_name] = {'ssh': ssh}
+
+    try:
+        # Print master initialization stage
+        if 'master' not in state['pods']:
             logging.info("Starting master process...")
 
             env = {
@@ -579,9 +709,12 @@ async def main():
                 'MAX_CONCURRENT_ITERATIONS': MAX_CONCURRENT_ITERATIONS,
             }
 
+            if args.torch_compile:
+                env['TORCH_COMPILE'] = 'true'
+
             # Start master.py on a remote instance
             master_instance, master_helpers = await launch_instance_and_record_logs(
-                name="master_instance",
+                name="master",
                 gpu_count=0,
                 ports='',
                 log_file=os.path.join(LOG_DIR, 'master.log'),
@@ -593,8 +726,31 @@ async def main():
             pod_helpers['master'] = master_helpers
             processes['master'] = master_instance
             logging.info(f"Master process started on instance {master_instance['id']}")
-                
-                
+
+            # Save master instance to state
+            state['pods']['master'] = {
+                'pod_id': master_instance['id'],
+                'private_key_path': master_helpers['private_key_path'],
+                'log_file': os.path.join(LOG_DIR, 'master.log')
+            }
+            save_state(state)
+        else:
+            logging.info("Master instance already running. Reconnecting...")
+            pod_id = state['pods']['master']['pod_id']
+            pod = runpod.get_pod(pod_id)
+            if pod['desiredStatus'] != 'RUNNING':
+                logging.error("Master pod is not running. Exiting.")
+                exit(1)
+            processes['master'] = pod
+            # Reconnect to master instance
+            ssh_ip, ssh_port = await get_pod_ssh_ip_port(pod_id)
+            private_key_path = state['pods']['master']['private_key_path']
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path)
+            pod_helpers['master'] = {'ssh': ssh}
+
+        if worker_tasks:
             worker_results = await asyncio.gather(*worker_tasks)
 
             # Unpack worker results
@@ -602,19 +758,16 @@ async def main():
                 pod_helpers[worker_name] = worker_helpers
                 processes[worker_name] = worker_instance
 
+        # Start the curses interface in a new thread
+        curses_thread = threading.Thread(target=curses.wrapper, args=(monitor_processes, processes, pod_helpers, task_counts))
+        curses_thread.start()
 
-            # Start the curses interface in a new thread
-            curses_thread = threading.Thread(target=curses.wrapper, args=(monitor_processes, processes, pod_helpers, task_counts))
-            curses_thread.start()
-
-            # Run the task tracking in an asyncio loop
-            await track_tasks(web3, subnet_addresses, pool_contract, task_counts)
-
-        except Exception as e:
-            terminate_processes()
-            raise e
+        # Run the task tracking in an asyncio loop
+        await track_tasks(web3, subnet_addresses, pool_contract, task_counts)
 
     except Exception as e:
+        logging.error(f"An error occurred: {e}")
+        traceback.print_exc()
         terminate_processes()
         raise e
 

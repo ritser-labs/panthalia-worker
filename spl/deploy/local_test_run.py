@@ -421,7 +421,7 @@ async def main():
         processes['sot'] = sot_process
         logging.info(f"SOT service started with PID {sot_process.pid}")
 
-        if not wait_for_sot(args.sot_url):
+        if not await wait_for_sot(args.sot_url):
             logging.error("Error: SOT service did not become available within the timeout period.")
             sot_process.terminate()
             exit(1)

@@ -99,6 +99,7 @@ class LanguageDataLoader:
 class WikipediaDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len):
         super().__init__(model_config, buffer_size, max_seq_len)
+        print("Loading Wikipedia dataset...")
         self.dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
 
     async def _text_generator(self):
@@ -157,7 +158,8 @@ class LowercaseAlphabetDataLoader(LanguageDataLoader):
 
 class FineWebDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len):
-        self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True)
+        print("Loading FineWeb dataset...")
+        self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="test", streaming=True)
         super().__init__(model_config, buffer_size, max_seq_len)
 
     async def _text_generator(self):

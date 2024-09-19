@@ -25,11 +25,11 @@ async def generate_ssh_key_pair():
         str: The public key string.
     """
     private_key_path = os.path.expanduser("~/.ssh/id_rsa_runpod")
-    
+
     # Check if the private key file already exists
     if os.path.exists(private_key_path):
         logging.info(f"SSH private key already exists at {private_key_path}, skipping generation.")
-        
+
         # Load the existing key
         key = paramiko.RSAKey(filename=private_key_path)
         public_key_str = f"{key.get_name()} {key.get_base64()}"
@@ -48,7 +48,6 @@ async def generate_ssh_key_pair():
 
     logging.info(f"Generated new SSH private key at {private_key_path}")
     return private_key_path, public_key_str
-
 
 def generate_deploy_cpu_pod_mutation(
         name,
@@ -80,7 +79,7 @@ def generate_deploy_cpu_pod_mutation(
         input_fields.append(f'containerDiskInGb: {container_disk_in_gb}')
     if support_public_ip is not None:
         input_fields.append(f'supportPublicIp: {str(support_public_ip).lower()}')
-    
+
     input_string = ', '.join(input_fields)
     return f"""
     mutation {{
@@ -105,7 +104,7 @@ async def create_cpu_pod(
     mutation = generate_deploy_cpu_pod_mutation(
         name, image, instance_id, env, ports, template_id, container_disk_in_gb, support_public_ip, cloud_type
     )
-    
+
     # Run the blocking API call in a thread
     raw_response = await asyncio.get_event_loop().run_in_executor(executor, lambda: runpod.api.graphql.run_graphql_query(mutation))
     cleaned_response = raw_response["data"]["deployCpuPod"]
@@ -243,11 +242,9 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=1):
                     exit_status = stdout.channel.recv_exit_status()
                     
                     if exit_status == 0:
-                        logging.info(f"Successfully created a copy of {remote_path} at {temp_remote_path}")
-                        
+
                         # Copy the temporary file to the local system using SFTP
                         sftp.get(temp_remote_path, local_path)
-                        logging.info(f"Copied {temp_remote_path} to {local_path}")
 
                         # Optionally remove the temporary remote copy after successful download
                         sftp.remove(temp_remote_path)
@@ -280,7 +277,6 @@ async def async_exec_command(ssh, command):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, ssh.exec_command, command)
 
-
 async def launch_instance_and_record_logs(
     name,
     image=None,
@@ -303,12 +299,17 @@ async def launch_instance_and_record_logs(
         image (str): The Docker image to be used.
         gpu_type (str): The type of GPU required.
         gpu_count (int): The number of GPUs required.
-        ports (list): A list of ports to be exposed, example format - "8888/http,666/tcp"
+        ports (str): A string representing ports to be exposed, e.g., "8888/http,666/tcp".
         log_file (str): The file where logs will be recorded.
         timeout (int): Timeout in seconds to wait for the pod to be ready.
+        env (dict): Environment variables to set on the remote instance.
+        cmd (str): Command to execute on the remote instance.
+        template_id (str): Template ID for pod deployment.
+        container_disk_in_gb (int): Disk size for the container.
+        input_jsons (list): List of JSON objects to upload to the remote instance.
 
     Returns:
-        None
+        tuple: The new pod information and helper objects.
     """
 
     if ports:
@@ -352,21 +353,16 @@ async def launch_instance_and_record_logs(
         for i, input_json in enumerate(input_jsons):
             with sftp.file(INPUT_JSON_PATH + f'_{i}', 'w') as remote_file:
                 json.dump(input_json, remote_file)
-        remote_path = '/tmp/temp_script.sh'
+        remote_path = '/run_service.sh'
         with sftp.file(remote_path, 'w') as remote_file:
             remote_file.write(f'export {env_export}\n{cmd}')
         sftp.chmod(remote_path, 0o755)  # Make it executable
 
-        # Execute the temporary script file using bash
-        stdin, stdout, stderr = await async_exec_command(ssh, f'/bin/bash {remote_path}')
+        remote_log_path = f"/panthalia.log"
+        # Execute the temporary script file using bash with nohup
+        full_command = f'nohup /bin/bash {remote_path} > {remote_log_path} 2>&1 &'
+        stdin, stdout, stderr = await async_exec_command(ssh, full_command)
 
-        # Step 5: Write logs to file
-        pod_helpers = {}
-        pod_helpers['log'] = open(log_file, "w")
-        # Create separate threads for handling stdout and stderr streams
-        pod_helpers['stdout_thread'] = asyncio.create_task(stream_handler(stdout, pod_helpers['log']))
-        pod_helpers['stderr_thread'] = asyncio.create_task(stream_handler(stderr, pod_helpers['log']))
-        
         # Function to check if SSH session is still alive
         def is_ssh_session_alive():
             """
@@ -379,16 +375,23 @@ async def launch_instance_and_record_logs(
             return transport is not None and transport.is_active()
 
         # Add the is_ssh_session_alive function to pod_helpers
-        pod_helpers['is_ssh_session_alive'] = is_ssh_session_alive
+        pod_helpers = {
+            'private_key_path': private_key_path,
+            'log': open(log_file, "a"),  # Append mode to preserve logs
+            'is_ssh_session_alive': is_ssh_session_alive
+        }
 
-        # Step 6: Create a new thread to copy the file from remote to local every second
-        remote_file_path = "/app/spl/loss_plot.png"  # Path to the file on the remote system
+        # Step 6: Create a new task to copy the log file from remote to local every second
+        logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs")
+        if not os.path.exists(logs_dir):
+            os.makedirs(logs_dir)
+        local_log_path = os.path.join(logs_dir, f"{name}.log")
 
-        # Define the local path relative to the script
+        pod_helpers['sftp_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_log_path, local_log_path))
+
+        remote_loss_path = f"/app/spl/loss_plot.png"
         local_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "loss_plot.png")
-
-
-        pod_helpers['sftp_thread'] = asyncio.create_task(copy_file_from_remote(ssh, remote_file_path, local_file_path))
+        pod_helpers['log_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_loss_path, local_file_path))
         pod_helpers['sftp'] = sftp
         pod_helpers['ssh'] = ssh
 
@@ -396,6 +399,5 @@ async def launch_instance_and_record_logs(
 
     except Exception as e:
         runpod.terminate_pod(pod_id)
+        logging.error(f"Error launching instance {name}: {e}")
         raise e
-    finally:
-        print(f"Logs have been recorded in {log_file}")

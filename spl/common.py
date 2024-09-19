@@ -16,6 +16,7 @@ from hexbytes import HexBytes
 from eth_abi import decode
 from .plugin import exported_plugin
 import threading
+import aiohttp
 
 model_config = exported_plugin.model_config
 model_adapter = exported_plugin.model_adapter
@@ -51,20 +52,22 @@ abi_dir = os.path.join(current_dir, 'abis')
 # Global variables for transaction management by private key
 pending_transactions = {}
 
-def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
-    """Wait for the SOT service to be available."""
+async def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
+    """Wait for the SOT service to be available asynchronously."""
     start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(f"{sot_url}/health")
-            if response.status_code == 200:
-                logging.debug("SOT service is available.")
-                return True
-        except requests.ConnectionError as e:
-            logging.debug(f"Waiting for SOT service to be available... {e}")
-        time.sleep(2)
+    
+    async with aiohttp.ClientSession() as session:
+        while time.time() - start_time < timeout:
+            try:
+                async with session.get(f"{sot_url}/health") as response:
+                    if response.status == 200:
+                        logging.debug("SOT service is available.")
+                        return True
+            except aiohttp.ClientConnectionError as e:
+                logging.debug(f"Waiting for SOT service to be available... {e}")
+            await asyncio.sleep(2)
+    
     return False
-
 # Define Enums
 class TaskStatus(Enum):
     SelectingSolver = 0
