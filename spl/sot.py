@@ -491,50 +491,48 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if value < current_version_number:
             if os.path.exists(os.path.join(state_dir, f'{tensor_name}_{value}.pt')):
                 for f in f'{tensor_name}', f'{tensor_name}_adam_m':
-                    await asyncio.to_thread(shutil.copy,
+                    await asyncio.to_thread(os.rename,
                         os.path.join(state_dir, f'{f}_{value}.pt'),
                         os.path.join(state_dir, f'{f}_{current_version_number}.pt')
                     )
 
-            last_future_version_number[tensor_name] = get_current_version_number()
+            last_future_version_number[tensor_name] = current_version_number
             await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
 
     async def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
+        await update_timestamp_lock.acquire()
         future_version_number = get_future_version_number()
         old_block_timestamp = None
 
         await fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
 
         new_block_timestamp = last_future_version_number.get(tensor_name, 0)
-        # the cause might be that last_future_version_number is not updated
 
-        if new_block_timestamp < future_version_number and not update_timestamp_lock.locked():
-            if new_block_timestamp > block_timestamps.get(tensor_name, 0):
-                await update_timestamp_lock.acquire()
-                old_block_timestamp = block_timestamps.get(tensor_name, 0)
-                set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
-                await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+        if new_block_timestamp < future_version_number:
+            logging.info(f"Updating block timestamps for {tensor_name} to {future_version_number}")
+            old_block_timestamp = block_timestamps.get(tensor_name, 0)
+            set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
+            await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
 
-                for name in f'{tensor_name}', f'{tensor_name}_adam_m':
-                    if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
-                        await asyncio.to_thread(shutil.copy,
-                            os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), 
-                            os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')
-                        )
+            for name in f'{tensor_name}', f'{tensor_name}_adam_m':
+                if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
+                    await asyncio.to_thread(shutil.copy,
+                        os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), 
+                        os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')
+                    )
 
             set_dict_and_adam(num_updates, tensor_name, 0)
             await save_json(num_updates_file, num_updates, num_updates_file_lock)
 
             set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
             await save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
+            if last_future_version_number.get(tensor_name, 0) < future_version_number:
+                set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
+                await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
+        update_timestamp_lock.release()
         return old_block_timestamp
 
-    async def cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number):
-        future_version_number = get_future_version_number()
-        if last_future_version_number.get(tensor_name, 0) < future_version_number:
-            set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
-            await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
-
+    async def cleanup_old_timestamp(tensor_name, old_block_timestamp):
         if old_block_timestamp is not None:
             # Define the file paths
             file_paths = [
@@ -545,15 +543,13 @@ def create_app(public_keys_file, enable_memory_logging=False):
             # Remove each file if it exists
             for file_path in file_paths:
                 if os.path.exists(file_path):
-                    await asyncio.to_thread(os.remove, file_path)
+                    asyncio.to_thread(os.remove, file_path)
                 else:
                     logging.warning(f"File not found: {file_path}")
-        if update_timestamp_lock.locked():
-            update_timestamp_lock.release()
 
     async def update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         old_block_timestamp = await update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
-        await cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
+        await cleanup_old_timestamp(tensor_name, old_block_timestamp)
 
     def get_local_file_path(url, request):
         if not url.startswith(f"http://{request.host}/data/state/"):
@@ -661,7 +657,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             os.rename(future_tensor_temp_path, future_tensor_path)
             os.rename(future_tensor_adam_m_temp_path, future_tensor_adam_m_path)
 
-            await cleanup_old_timestamp(tensor_name, old_block_timestamp, last_future_version_number)
+            await cleanup_old_timestamp(tensor_name, old_block_timestamp)
             # Cleanup old accumulated grads tensors
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
