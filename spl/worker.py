@@ -466,12 +466,12 @@ async def initialize_tensor(tensor_name):
     valid_version = False
     max_iterations = 10  # Maximum number of attempts to prevent infinite loop
     iterations = 0
+    timeout = aiohttp.ClientTimeout(total=200)
 
     while not valid_version and iterations < max_iterations:
         iterations += 1
         logging.debug(f"Initialization loop iteration {iterations}")
         try:
-            timeout = aiohttp.ClientTimeout(total=200)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 logging.debug("Fetching current timestamp from SOT")
                 async with session.post(
