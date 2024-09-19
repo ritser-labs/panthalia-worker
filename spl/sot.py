@@ -501,35 +501,37 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     async def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         await update_timestamp_lock.acquire()
-        future_version_number = get_future_version_number()
-        old_block_timestamp = None
+        try:
+            future_version_number = get_future_version_number()
+            old_block_timestamp = None
 
-        await fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
+            await fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
 
-        new_block_timestamp = last_future_version_number.get(tensor_name, 0)
+            new_block_timestamp = last_future_version_number.get(tensor_name, 0)
 
-        if new_block_timestamp < future_version_number:
-            logging.info(f"Updating block timestamps for {tensor_name} to {future_version_number}")
-            old_block_timestamp = block_timestamps.get(tensor_name, 0)
-            set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
-            await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+            if new_block_timestamp < future_version_number:
+                logging.info(f"Updating block timestamps for {tensor_name} to {future_version_number}")
+                old_block_timestamp = block_timestamps.get(tensor_name, 0)
+                set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
+                await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
 
-            for name in f'{tensor_name}', f'{tensor_name}_adam_m':
-                if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
-                    await asyncio.to_thread(shutil.copy,
-                        os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), 
-                        os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')
-                    )
+                for name in f'{tensor_name}', f'{tensor_name}_adam_m':
+                    if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
+                        await asyncio.to_thread(shutil.copy,
+                            os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), 
+                            os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')
+                        )
 
-            set_dict_and_adam(num_updates, tensor_name, 0)
-            await save_json(num_updates_file, num_updates, num_updates_file_lock)
+                set_dict_and_adam(num_updates, tensor_name, 0)
+                await save_json(num_updates_file, num_updates, num_updates_file_lock)
 
-            set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
-            await save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
-            if last_future_version_number.get(tensor_name, 0) < future_version_number:
-                set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
-                await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
-        update_timestamp_lock.release()
+                set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
+                await save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
+                if last_future_version_number.get(tensor_name, 0) < future_version_number:
+                    set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
+                    await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
+        finally:
+            update_timestamp_lock.release()
         return old_block_timestamp
 
     async def cleanup_old_timestamp(tensor_name, old_block_timestamp):
