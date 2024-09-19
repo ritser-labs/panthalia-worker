@@ -513,12 +513,32 @@ async def initialize_tensor(tensor_name):
                 response.raise_for_status()
                 version_number = int(response.headers['version_number'])
 
+                # Get the total content length for progress calculation
+                total_size = int(response.headers.get('Content-Length', 0))
+                downloaded_size = 0
+                progress_threshold = 0.1  # 10% progress steps
+                next_progress = progress_threshold
+
+                tensor_bytes = BytesIO()
+
+                # Read in chunks and track progress
+                async for chunk in response.content.iter_chunked(1024 * 1024):  # 1 MB chunks
+                    tensor_bytes.write(chunk)
+                    downloaded_size += len(chunk)
+
+                    # Calculate progress
+                    progress = downloaded_size / total_size
+                    if progress >= next_progress:
+                        print(f"Downloaded {int(progress * 100)}%")
+                        next_progress += progress_threshold
+
+                tensor_bytes.seek(0)
                 tensor_fetch_time = time.time()
                 logging.debug(f"Fetched tensor {tensor_name} from {url}. Fetch duration: {tensor_fetch_time - fetch_start_time:.2f} seconds")
 
                 # Measure time to load tensor
                 tensor_load_start_time = time.time()
-                tensor = torch.load(BytesIO(await response.read()))
+                tensor = torch.load(tensor_bytes)
                 tensor_load_end_time = time.time()
                 logging.debug(f"Loaded tensor {tensor_name} with shape {tensor.shape}. Load duration: {tensor_load_end_time - tensor_load_start_time:.2f} seconds")
 

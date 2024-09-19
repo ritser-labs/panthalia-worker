@@ -690,7 +690,10 @@ def create_app(public_keys_file, enable_memory_logging=False):
     async def latest_state():
         logging.info("Accessing /latest_state endpoint")
         tensor_name = request.args.get('tensor_name')
+        logging.debug(f"Received tensor_name: '{tensor_name}'")
+        
         if not tensor_name:
+            logging.error("Missing tensor_name parameter")
             return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
         latest_version_number = request.args.get('version_number')
@@ -700,9 +703,12 @@ def create_app(public_keys_file, enable_memory_logging=False):
         else:
             latest_version_number = int(latest_version_number)
 
+        logging.debug(f"Determined latest_version_number: {latest_version_number} for tensor_name: '{tensor_name}'")
+
         state_file_path = os.path.join(state_dir, f'{tensor_name}_{latest_version_number}.pt')
 
         if not os.path.exists(state_file_path):
+            logging.error(f"Tensor file not found: {state_file_path}")
             return jsonify({'error': 'Tensor not found'}), 404
 
         try:
@@ -711,6 +717,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
                 response.headers['version_number'] = str(latest_version_number)
                 return response
 
+            logging.debug(f"Sending tensor file: {state_file_path}")
             return await send_file(state_file_path, mimetype='application/octet-stream')
 
         except Exception as e:
