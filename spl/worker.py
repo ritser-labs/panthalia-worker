@@ -6,13 +6,17 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from dataclasses import dataclass
-logging.getLogger('web3').setLevel(logging.ERROR)
 from web3 import AsyncWeb3
 from web3.exceptions import ContractCustomError
 from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from .device import device
-from .common import Task, TaskStatus, model_adapter, load_abi, upload_tensor, get_current_version_number, async_transact_with_contract_function, expected_worker_time, TENSOR_NAME, PoolState, approve_token_once, deposit_stake_without_approval, get_future_version_number
+from .common import (
+    Task, TaskStatus, model_adapter, load_abi, upload_tensor,
+    get_current_version_number, async_transact_with_contract_function,
+    expected_worker_time, TENSOR_NAME, PoolState, approve_token_once,
+    deposit_stake_without_approval, get_future_version_number
+)
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Optional, Tuple
 from io import BytesIO
@@ -20,12 +24,16 @@ import time
 import os
 from tqdm import tqdm
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import threading
 import torch._dynamo
 import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
-from .util.queued_lock import QueuedLock
+import heapq
+import itertools
+
+# Removed threading imports
+# from concurrent.futures import ThreadPoolExecutor
+# import threading
+from .util.queued_lock import AsyncQueuedLock
 
 # Define the maximum number of retries for task processing
 MAX_WORKER_TASK_RETRIES = 3
@@ -44,22 +52,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.addFilter(SuppressTracebackFilter())
 
-# Global counter for concurrent tasks
+
+# Initialize asyncio Locks
 concurrent_tasks_counter = 0
-concurrent_tasks_counter_lock = threading.Lock()  # Lock for concurrent_tasks_counter
+concurrent_tasks_counter_lock = asyncio.Lock()  # Lock for concurrent_tasks_counter
 
 # Global dictionary to store start times for task IDs
 task_start_times = {}
-task_start_times_lock = threading.Lock()  # Lock for task_start_times
+task_start_times_lock = asyncio.Lock()          # Lock for task_start_times
 
 # Global variable to store the last handle_event timestamp
 last_handle_event_timestamp = None
-last_handle_event_timestamp_lock = threading.Lock()  # Lock for last_handle_event_timestamp
+last_handle_event_timestamp_lock = asyncio.Lock()  # Lock for last_handle_event_timestamp
 
-# Lock to ensure only one task is processed at a time
-task_processing_lock = QueuedLock()
-
-upload_lock = QueuedLock()
+# Initialize AsyncQueuedLock instances
+task_processing_lock = AsyncQueuedLock()
+upload_lock = AsyncQueuedLock()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
@@ -114,18 +122,18 @@ class TaskQueue:
     def __init__(self):
         self.queue = []
         self.current_version = None
-        self.lock = threading.Lock()  # Add a lock for the queue
+        self.lock = asyncio.Lock()  # Use asyncio.Lock
         logging.debug("Initialized TaskQueue")
 
-    def add_task(self, task):
-        with self.lock:  # Ensure thread-safe access to the queue
+    async def add_task(self, task):
+        async with self.lock:  # Ensure thread-safe access to the queue
             self.queue.append(task)
             self.queue.sort(key=lambda t: t['time_status_changed'])
             how_old = int(time.time()) - task['time_status_changed']
             logging.debug(f"Added task: {task} that is {how_old} seconds old. Queue size is now {len(self.queue)}")
 
-    def get_next_task(self):
-        with self.lock:  # Ensure thread-safe access to the queue
+    async def get_next_task(self):
+        async with self.lock:  # Ensure thread-safe access to the queue
             if self.queue:
                 task = self.queue.pop(0)
                 logging.debug(f"Retrieved task: {task}. Queue size is now {len(self.queue)}")
@@ -133,8 +141,8 @@ class TaskQueue:
             logging.debug("No tasks in the queue.")
             return None
 
-    def queue_length(self):
-        with self.lock:
+    async def queue_length(self):
+        async with self.lock:
             return len(self.queue)
 
 task_queue = TaskQueue()
@@ -192,38 +200,53 @@ async def upload_tensor(tensor, tensor_name):
     loop = asyncio.get_event_loop()
 
     try:
-        response = await loop.run_in_executor(None, lambda: requests.post(f'{args.sot_url}/upload_tensor', data=monitor, headers=headers, timeout=300))
+        # Run the blocking request in a thread executor to avoid blocking the event loop
+        response = await loop.run_in_executor(
+            None,
+            lambda: requests.post(
+                f'{args.sot_url}/upload_tensor',
+                data=monitor,
+                headers=headers,
+                timeout=300
+            )
+        )
         pbar.close()
         logging.debug("Upload completed.")
     except requests.exceptions.Timeout:
         logging.error("Upload request timed out.")
         pbar.close()
         raise RuntimeError("Failed to upload tensor: request timed out")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Upload request failed: {e}")
+        pbar.close()
+        raise RuntimeError(f"Failed to upload tensor: {e}")
 
     if response.status_code == 200:
         return args.sot_url + response.json().get('tensor_url')
     else:
         raise RuntimeError(f"Failed to upload tensor: {response.text}")
 
-
 async def deposit_stake():
     global concurrent_tasks_counter
     # Do not deposit stakes if queued tasks exceed the limit
-    if (task_queue.queue_length() + concurrent_tasks_counter) > args.max_tasks_handling:
+    if (await task_queue.queue_length() + concurrent_tasks_counter) > args.max_tasks_handling:
         logging.debug("Too many tasks being processed. Not depositing any more stakes.")
         return
 
     wallets = zip(args.private_keys, subnet_ids, stake_amounts, token_contracts, pool_contracts, worker_addresses)
     
     for private_key, subnet_id, stake_amount, token_contract, pool_contract, worker_address in wallets:
-        await deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, args.group, worker_address, stake_amount, args.max_stakes)
+        await deposit_stake_without_approval(
+            web3, pool_contract, private_key, subnet_id,
+            args.group, worker_address, stake_amount, args.max_stakes
+        )
 
 async def handle_event(task_id, task, time_invoked, contract_index):
     global last_handle_event_timestamp
 
     current_time = time.time()
     logging.debug(f'Time since invocation: {current_time - time_invoked:.2f} seconds')
-    with last_handle_event_timestamp_lock:
+    async with last_handle_event_timestamp_lock:
         if last_handle_event_timestamp is not None:
             time_since_last_event = current_time - last_handle_event_timestamp
             logging.debug(f"Time since last handle_event call: {time_since_last_event:.2f} seconds")
@@ -242,19 +265,19 @@ async def handle_event(task_id, task, time_invoked, contract_index):
 
     logging.debug(f"Adding task to queue with ID: {task_id} and params: {task_params}")
 
-    task_queue.add_task({
+    await task_queue.add_task({
         'task_id': task_id,
         'task_params': task_params,
         'time_status_changed': task.timeStatusChanged,
         'contract_index': contract_index
     })
     
-    blockchain_timestamp = await web3.eth.get_block('latest')['timestamp']
+    blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
     
     time_since_change = blockchain_timestamp - task.timeStatusChanged
     logging.debug(f"Time since status change: {time_since_change} seconds")
     
-    with task_start_times_lock:
+    async with task_start_times_lock:
         task_start_times[task_id] = time.time()
     await process_tasks()
 
@@ -269,17 +292,17 @@ async def process_tasks():
     retry_attempt = 0  # Initialize retry counter
     task_success = False  # Track success status
     
-    if task_queue.queue_length() == 0:
+    if await task_queue.queue_length() == 0:
         logging.debug("No tasks in the queue to process.")
         return
 
     while retry_attempt < MAX_WORKER_TASK_RETRIES and not task_success:
-        with concurrent_tasks_counter_lock:
+        async with concurrent_tasks_counter_lock:
             # Increase the counter when a new task is started
             concurrent_tasks_counter += 1
         try:
             # Get the next task from the queue
-            next_task = task_queue.get_next_task()
+            next_task = await task_queue.get_next_task()
             if not next_task:
                 logging.debug("No tasks in the queue to process.")
                 return
@@ -300,35 +323,41 @@ async def process_tasks():
             targets = await download_file(task_params['targets_url'])
 
             try:
-                # Acquire the lock, passing the time_status_changed as the priority
-                task_processing_lock.acquire(priority=time_status_changed)
+                # Acquire the lock asynchronously with priority based on time_status_changed
+                await task_processing_lock.acquire(priority=time_status_changed)
+                try:
+                    # Process the task
+                    steps = task_params['steps']
+                    max_lr = task_params['max_lr']
+                    min_lr = task_params['min_lr']
+                    T_0 = task_params['T_0']
+                    weight_decay = task_params['weight_decay']
+                    logging.debug(f"{task_id}: Executing training task")
+                    time_synced = time.time()
+                    model, version_number = await sync_tensors(contract_index)
 
-                # Process the task
-                steps = task_params['steps']
-                max_lr = task_params['max_lr']
-                min_lr = task_params['min_lr']
-                T_0 = task_params['T_0']
-                weight_decay = task_params['weight_decay']
-                logging.debug(f"{task_id}: Executing training task")
-                time_synced = time.time()
-                model, version_number = await sync_tensors(contract_index)
-
-                updates, loss = model_adapter.train_task(model, batch, targets, steps, max_lr, min_lr, T_0, weight_decay)
-                logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
-
-            finally:
-                # Release the task_processing_lock
-                if task_processing_lock.locked():
-                    task_processing_lock.release()
+                    updates, loss = model_adapter.train_task(
+                        model, batch, targets, steps, max_lr, min_lr, T_0, weight_decay
+                    )
+                    logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
+                finally:
+                    await task_processing_lock.release()
             
+            except Exception as e:
+                logging.error(f"Error during task processing: {e}")
+                raise
+
             try:
-                # Upload the result
-                upload_lock.acquire(priority=time_status_changed)
-                result = await upload_results(version_number, updates, loss)
-                logging.info(f"{task_id}: Uploaded results for task {task_id}")
-            finally:
-                if upload_lock.locked():
-                    upload_lock.release()
+                # Upload the result asynchronously with priority based on time_status_changed
+                await upload_lock.acquire(priority=time_status_changed)
+                try:
+                    result = await upload_results(version_number, updates, loss)
+                    logging.info(f"{task_id}: Uploaded results for task {task_id}")
+                finally:
+                    await upload_lock.release()
+            except Exception as e:
+                logging.error(f"Error during uploading results: {e}")
+                raise
 
             # Submit the solution
             await submit_solution(task_id, result, contract_index)
@@ -336,7 +365,7 @@ async def process_tasks():
             processed_tasks.add((task_id, contract_index))
 
             # Log the time taken to process the task
-            with task_start_times_lock:
+            async with task_start_times_lock:
                 task_start_time = task_start_times.pop(task_id, None)
             if task_start_time:
                 total_time = time.time() - task_start_time
@@ -355,13 +384,12 @@ async def process_tasks():
                 logging.error(f"Max retries reached for task {task_id}.")
                 raise
             logging.info(f"Retrying task processing (attempt {retry_attempt + 1}/{MAX_WORKER_TASK_RETRIES})...")
-
+        
         finally:
             # Decrease the concurrent tasks counter when the task is done (whether successful or not)
             if retry_attempt >= MAX_WORKER_TASK_RETRIES or task_success:
-                with concurrent_tasks_counter_lock:
+                async with concurrent_tasks_counter_lock:
                     concurrent_tasks_counter -= 1
-
 
 async def reclaim_stakes():
     while True:
@@ -376,13 +404,17 @@ async def reclaim_stakes():
             
             if task_status == TaskStatus.SolutionSubmitted.value and time_elapsed >= max_dispute_times[contract_index]:
                 try:
-                    receipt = await async_transact_with_contract_function(web3, contract, 'resolveTask', args.private_keys[contract_index], task_id)
+                    receipt = await async_transact_with_contract_function(
+                        web3, contract, 'resolveTask',
+                        args.private_keys[contract_index], task_id
+                    )
                     logging.info(f"resolveTask transaction receipt: {receipt}")
                     processed_tasks.remove((task_id, contract_index))
                 except Exception as e:
                     logging.error(f"Error resolving task {task_id}: {e}")
-                    raise
-
+                    # Depending on requirements, you might want to continue instead of raising
+                    # raise
+    
         await asyncio.sleep(2)
 
 async def sync_tensors(contract_index):
@@ -392,7 +424,11 @@ async def sync_tensors(contract_index):
 async def submit_solution(task_id, result, contract_index):
     try:
         logging.info('Submitting solution')
-        receipt = await async_transact_with_contract_function(web3, contracts[contract_index], 'submitSolution', args.private_keys[contract_index], task_id, json.dumps(result).encode('utf-8'))
+        receipt = await async_transact_with_contract_function(
+            web3, contracts[contract_index], 'submitSolution',
+            args.private_keys[contract_index], task_id,
+            json.dumps(result).encode('utf-8')
+        )
         logging.info(f"submitSolution transaction receipt: {receipt}")
     except Exception as e:
         logging.error(f"Error submitting solution for task {task_id}: {e}")
@@ -428,28 +464,43 @@ async def initialize_tensor(tensor_name):
     init_start_time = time.time()
     
     valid_version = False
-    
-    while not valid_version:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{args.sot_url}/current_timestamp", params={'tensor_name': tensor_name}) as response:
-                version_number = (await response.json())['version_number']
+    max_iterations = 10  # Maximum number of attempts to prevent infinite loop
+    iterations = 0
+
+    while not valid_version and iterations < max_iterations:
+        iterations += 1
+        logging.debug(f"Initialization loop iteration {iterations}")
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)  # 30 seconds timeout
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                logging.debug("Fetching current timestamp from SOT")
+                async with session.post(
+                    f"{args.sot_url}/current_timestamp",
+                    params={'tensor_name': tensor_name}
+                ) as response:
+                    response.raise_for_status()
+                    version_number = (await response.json())['version_number']
+                    logging.debug(f"Received version_number: {version_number}")
+        except aiohttp.ClientError as e:
+            logging.error(f"Error fetching current_timestamp: {e}")
+            await asyncio.sleep(5)  # Wait before retrying
+            continue
 
         time_until_next = time_until_next_version()
-        
         logging.debug(f"Time until next version: {time_until_next} seconds")
         
         if time_until_next < expected_worker_time:
             time_to_sleep = time_until_next
-            logging.debug(f'Not enough time left waiting for {time_to_sleep} seconds.')
+            logging.debug(f'Not enough time left waiting for {time_to_sleep} seconds. Sleeping...')
             await asyncio.sleep(time_to_sleep)
         else:
             valid_version = True
-            
 
-    if latest_block_timestamps[tensor_name] == version_number:
-        logging.debug(f"Tensor {tensor_name} already initialized to version {version_number}. Skipping initialization.")
-        return latest_model, version_number
+    if not valid_version:
+        logging.error(f"Failed to get a valid version after {max_iterations} attempts.")
+        raise RuntimeError("initialize_tensor: failed to get a valid version")
 
+    # Proceed with tensor initialization
     try:
         url = f"{args.sot_url}/latest_state"
         logging.debug(f"Requesting tensor {tensor_name} from URL: {url}")
@@ -457,9 +508,9 @@ async def initialize_tensor(tensor_name):
         # Start measuring the time to fetch the tensor
         fetch_start_time = time.time()
 
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params={'tensor_name': tensor_name}) as response:
-                response.raise_for_status()  # Raise an error for bad status codes
+                response.raise_for_status()
                 version_number = int(response.headers['version_number'])
 
                 tensor_fetch_time = time.time()
@@ -494,7 +545,7 @@ async def initialize_tensor(tensor_name):
                 if latest_block_timestamps[tensor_name] == 0 or latest_block_timestamps[tensor_name] < version_number:
                     latest_model = model
                     latest_block_timestamps[tensor_name] = version_number
-                
+
                 # End measuring time for initialize_tensor
                 init_end_time = time.time()
                 logging.debug(f"Completed initialization for tensor: {tensor_name}. Total duration: {init_end_time - init_start_time:.2f} seconds")
@@ -504,7 +555,9 @@ async def initialize_tensor(tensor_name):
     except aiohttp.ClientError as e:
         logging.error(f"Failed to initialize tensor {tensor_name} due to request exception: {e}")
         raise
-
+    except Exception as e:
+        logging.error(f"Unexpected error during tensor initialization: {e}")
+        raise
 
 def get_relevant_tensor_for_task(task_type):
     return TENSOR_NAME
@@ -566,7 +619,10 @@ async def main():
 
     # Approve tokens once at the start
     for private_key, token_contract in zip(args.private_keys, token_contracts):
-        await approve_token_once(web3, token_contract, private_key, args.pool_address, 2**256 - 1)
+        await approve_token_once(
+            web3, token_contract, private_key,
+            args.pool_address, 2**256 - 1
+        )
 
     logging.info("Starting tensor synchronization...")
     relevant_tensors = []
@@ -584,7 +640,7 @@ async def main():
     last_loop_time = time.time()
 
     while True:
-        # Process tasks concurrently without using ThreadPoolExecutor
+        # Schedule processing tasks
         asyncio.create_task(process_tasks())
         logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
         last_loop_time = time.time()

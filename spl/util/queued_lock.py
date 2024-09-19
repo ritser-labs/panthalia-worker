@@ -2,51 +2,61 @@ import threading
 import queue
 import itertools
 import logging
+import asyncio
+import heapq
 
-class QueuedLock:
+
+# AsyncQueuedLock implementation
+class AsyncQueuedLock:
     def __init__(self):
-        self._queue = queue.PriorityQueue()  # PriorityQueue to store tasks with priority based on time_status_changed
-        self._lock = threading.Lock()  # Internal lock for synchronizing access to the shared resource
-        self._is_locked = False  # Track whether the lock is currently held
-        self._counter = itertools.count()  # Unique counter to ensure uniqueness in the priority queue
-
-    def acquire(self, priority):
+        self._queue = []
+        self._lock = asyncio.Lock()
+        self._is_locked = False
+        self._counter = itertools.count()
+    
+    async def acquire(self, priority):
         """
         Acquire the lock for a task with a given priority.
-        :param priority: The priority (lower values get higher priority, e.g., time_status_changed)
+        :param priority: The priority (lower values get higher priority)
         """
-        # Create an event for this thread and put it in the priority queue with a unique counter
-        event = threading.Event()
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
         count = next(self._counter)
-        self._queue.put((priority, count, event))  # Add tuple (priority, count, event)
+        async with self._lock:
+            heapq.heappush(self._queue, (priority, count, fut))
+            logging.debug(f"Task with priority {priority} added to the queue.")
+            if not self._is_locked and self._queue[0][2] == fut:
+                self._is_locked = True
+                fut.set_result(True)
+                logging.debug(f"Lock acquired immediately for priority {priority}.")
+        
+        await fut  # Wait until the future is set
+        logging.debug(f"Lock acquired for priority {priority}.")
 
-        # Only the thread with the highest priority (lowest time_status_changed) can acquire the lock
-        while True:
-            if self._queue.queue[0][2] == event:  # Check if the current thread is at the front (highest priority)
-                with self._lock:
-                    if not self._is_locked:
-                        self._is_locked = True
-                        logging.debug(f"Acquired lock for event: {self._queue.queue[0][0]}")
-                        return
-            event.wait()  # Wait until the event is set
-
-    def release(self):
+    async def release(self):
         """
         Release the lock, allowing the next task in the queue (based on priority) to proceed.
         """
-        with self._lock:
+        async with self._lock:
             if not self._is_locked:
-                raise RuntimeError("Cannot release an unlocked QueuedLock")
-            self._is_locked = False
-
-        # Remove the event from the front of the priority queue
-        priority, count, event = self._queue.get()
-        if not self._queue.empty():
-            # Notify the next thread in the queue (with the highest priority)
-            next_event = self._queue.queue[0][2]
-            next_event.set()
-            logging.debug(f"Notified next event: {self._queue.queue[0][0]}")
-
+                raise RuntimeError("Cannot release an unlocked AsyncQueuedLock")
+            
+            # Remove the current holder
+            if self._queue:
+                released_task = heapq.heappop(self._queue)
+                logging.debug(f"Lock released for priority {released_task[0]}.")
+            
+            # Assign the lock to the next task in the queue
+            if self._queue:
+                next_priority, next_count, next_fut = self._queue[0]
+                self._is_locked = True
+                if not next_fut.done():
+                    next_fut.set_result(True)
+                logging.debug(f"Lock passed to next task with priority {next_priority}.")
+            else:
+                self._is_locked = False
+                logging.debug("Lock is now free.")
+    
     def locked(self):
         """
         Check if the lock is currently held.
