@@ -47,12 +47,22 @@ class LanguageDataLoader:
             tokens = tokens[:max_seq_len]
         return tokens
 
-    def tokenize_and_split(self, text, max_seq_len):
+    async def tokenize_and_split(self, text, max_seq_len):
+        # Offload tokenization and splitting to a separate thread to avoid blocking
+        return await asyncio.to_thread(self._tokenize_and_split_sync, text, max_seq_len)
+
+    def _tokenize_and_split_sync(self, text, max_seq_len):
+        """Synchronous version of tokenize_and_split to run on a separate thread."""
+        tokenize_start = time.time()
         tokens = self.model_config.tokenizer.encode(text)
+        tokenize_end = time.time()
+        print(f"Tokenization time: {tokenize_end - tokenize_start}")
         token_pairs = []
 
         # Calculate how many chunks can be made based on the total length and max_seq_len
         num_chunks = (len(tokens) - max_seq_len) // max_seq_len
+
+        split_start = time.time()
 
         for _ in range(num_chunks):
             if len(tokens) < max_seq_len:
@@ -72,12 +82,16 @@ class LanguageDataLoader:
             # Append the pair to the list
             token_pairs.append((inputs, targets))
 
+        split_end = time.time()
+        print(f"Splitting time: {split_end - split_start}")
+
         return token_pairs
+
 
     async def fill_buffer_with_token_pairs(self, text_generator, max_seq_len):
         self.buffer = []  # Clear the buffer before refilling
         async for text in text_generator:
-            token_pairs = self.tokenize_and_split(text, max_seq_len)
+            token_pairs = await self.tokenize_and_split(text, max_seq_len)
             self.buffer.extend(token_pairs)
             if len(self.buffer) >= self.buffer_size:
                 break
