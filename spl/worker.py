@@ -218,7 +218,7 @@ async def deposit_stake():
     for private_key, subnet_id, stake_amount, token_contract, pool_contract, worker_address in wallets:
         await deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, args.group, worker_address, stake_amount, args.max_stakes)
 
-def handle_event(task_id, task, time_invoked, contract_index):
+async def handle_event(task_id, task, time_invoked, contract_index):
     global last_handle_event_timestamp
 
     current_time = time.time()
@@ -249,14 +249,14 @@ def handle_event(task_id, task, time_invoked, contract_index):
         'contract_index': contract_index
     })
     
-    blockchain_timestamp = asyncio.run(web3.eth.get_block('latest'))['timestamp']
+    blockchain_timestamp = await web3.eth.get_block('latest')['timestamp']
     
     time_since_change = blockchain_timestamp - task.timeStatusChanged
     logging.debug(f"Time since status change: {time_since_change} seconds")
     
     with task_start_times_lock:
         task_start_times[task_id] = time.time()
-    asyncio.run(process_tasks())
+    await process_tasks()
 
 def tensor_memory_size(tensor):
     # Calculate size in bytes and convert to megabytes
@@ -583,44 +583,46 @@ async def main():
     
     last_loop_time = time.time()
 
-    # Create a ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        while True:
-            executor.submit(asyncio.run, process_tasks())
-            logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
-            last_loop_time = time.time()
-            await deposit_stake()
-            
-            if not reported:
-                await report_sync_status()
-                reported = True
+    while True:
+        # Process tasks concurrently without using ThreadPoolExecutor
+        asyncio.create_task(process_tasks())
+        logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
+        last_loop_time = time.time()
+        await deposit_stake()
+        
+        if not reported:
+            await report_sync_status()
+            reported = True
 
-            # Gather all task fetching coroutines
-            all_task_ids, latest_task_ids = await get_all_task_ids(last_checked_task_ids)
-            all_task_ids.extend([(task_id, contract_index) for task_id, contract_index in pending_tasks])
-            fetch_tasks = [fetch_task(task_id, contract_index) for task_id, contract_index in all_task_ids]
-            fetched_tasks = await asyncio.gather(*fetch_tasks)
-            
-            if not fetched_tasks:
-                logging.debug("No tasks fetched. Sleeping...")
-            else:
-                logging.debug(f"Fetched {len(fetched_tasks)} tasks")
+        # Gather all task fetching coroutines
+        all_task_ids, latest_task_ids = await get_all_task_ids(last_checked_task_ids)
+        all_task_ids.extend([(task_id, contract_index) for task_id, contract_index in pending_tasks])
+        fetch_tasks = [fetch_task(task_id, contract_index) for task_id, contract_index in all_task_ids]
+        fetched_tasks = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+        
+        if not fetched_tasks:
+            logging.debug("No tasks fetched. Sleeping...")
+        else:
+            logging.debug(f"Fetched {len(fetched_tasks)} tasks")
 
-            # Clear pending tasks to update with new statuses
-            pending_tasks.clear()
+        # Clear pending tasks to update with new statuses
+        pending_tasks.clear()
 
-            # Handle events for tasks
-            for task_id, task in fetched_tasks:
-                contract_index = all_task_ids.pop(0)[1]
-                if task.solver == worker_addresses[contract_index] and task.status == TaskStatus.SolverSelected.value:
-                    executor.submit(handle_event, task_id, task, time.time(), contract_index)
-                elif task.status < TaskStatus.SolverSelected.value:
-                    pending_tasks.add((task_id, contract_index))  # Use tuple instead of dict
-            
-            # Update the last checked task ID
-            last_checked_task_ids = latest_task_ids
-            
-            await asyncio.sleep(args.poll_interval)
+        # Handle events for tasks
+        for idx, (task_id, task) in enumerate(fetched_tasks):
+            if isinstance(task, Exception):
+                logging.error(f"Error fetching task {all_task_ids[idx][0]}: {task}")
+                continue
+            contract_index = all_task_ids[idx][1]
+            if task.solver == worker_addresses[contract_index] and task.status == TaskStatus.SolverSelected.value:
+                asyncio.create_task(handle_event(task_id, task, time.time(), contract_index))
+            elif task.status < TaskStatus.SolverSelected.value:
+                pending_tasks.add((task_id, contract_index))  # Use tuple instead of dict
+        
+        # Update the last checked task ID
+        last_checked_task_ids = latest_task_ids
+        
+        await asyncio.sleep(args.poll_interval)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
