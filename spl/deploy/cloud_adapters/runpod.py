@@ -242,7 +242,8 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1):
                     exit_status = await asyncio.get_event_loop().run_in_executor(executor, stdout.channel.recv_exit_status)
 
                     if exit_status == 0:
-                        local_temp_path = local_path + ".tmp"
+                        # Create the local temporary file in /tmp/ directory
+                        local_temp_path = os.path.join("/tmp", os.path.basename(local_path) + ".tmp")
                         
                         # Perform SFTP get operation in a thread using the executor
                         await asyncio.get_event_loop().run_in_executor(executor, sftp.get, temp_remote_path, local_temp_path)
