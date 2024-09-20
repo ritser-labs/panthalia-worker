@@ -215,7 +215,7 @@ async def stream_handler(stream, log_file):
         log_file.write(line)
         log_file.flush()  # Ensure logs are written immediately
 
-async def copy_file_from_remote(ssh, remote_path, local_path, interval=1):
+async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1):
     """
     Copies a file from the remote server to the local system every `interval` seconds, 
     ensuring that the file exists and is not of zero size before copying. A copy of the file
