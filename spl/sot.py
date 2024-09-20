@@ -860,7 +860,7 @@ if __name__ == "__main__":
 
     def main():
         parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
-        parser.add_argument('--public_keys_file', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
+        parser.add_argument('--public_keys', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
         parser.add_argument('--enable_memory_logging', action='store_true', help="Enable memory logging")
 
         args = parser.parse_args()
