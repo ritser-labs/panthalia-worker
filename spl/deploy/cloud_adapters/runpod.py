@@ -240,8 +240,6 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1, copy
                 if copy_mode == 'stream':
                     # Stream updates: Copy only new content
                     if current_size > last_size:
-                        #logging.info(f"New content detected in {remote_path}. Fetching updates...")
-                        
                         # Open the remote file and seek to the last position
                         with sftp.file(remote_path, 'r') as remote_file:
                             remote_file.seek(last_size)
@@ -260,12 +258,12 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1, copy
                         last_size = current_size
 
                     else:
-                        #logging.info(f"No new updates in {remote_path}. Waiting...")
+                        # No new updates in the remote file
                         pass
 
                 elif copy_mode == 'full':
                     # Full file copy: Copy the entire file atomically
-                    #logging.info(f"Copying the entire file {remote_path} to {local_path} atomically...")
+                    logging.info(f"Copying the entire file {remote_path} to {local_path} atomically...")
 
                     # Generate a temporary file name on the remote side
                     remote_temp_path = remote_path + ".tmp"
@@ -307,11 +305,7 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1, copy
             except Exception as e:
                 logging.error(f"Error checking or copying file: {e}")
 
-            # Wait before the next check (only in streaming mode)
-            if copy_mode == 'stream':
-                await asyncio.sleep(interval)
-            else:
-                break  # For full copy mode, exit the loop after the first copy
+            await asyncio.sleep(interval)
 
     finally:
         # Close the SFTP connection to clean up resources
@@ -514,7 +508,7 @@ async def reconnect_and_initialize_existing_pod(pod_id, name, private_key_path, 
     # If the pod is the master, set up additional tasks for copying the loss file
     local_loss_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "loss_plot.png")
     if name == 'master':
-        pod_helpers['loss_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_loss_path, local_loss_file_path, interval=5))
+        pod_helpers['loss_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_loss_path, local_loss_file_path, interval=5, copy_mode='full'))
     
     pod_helpers['sftp'] = sftp
     pod_helpers['ssh'] = ssh
