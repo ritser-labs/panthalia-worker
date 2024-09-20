@@ -315,16 +315,38 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1, copy
 
 async def async_exec_command(ssh, command):
     """
-    Run the SSH command asynchronously using an executor.
+    Run the SSH command asynchronously using an executor and log the exit status and outputs.
+    
     Args:
         ssh (paramiko.SSHClient): The active SSH connection.
         command (str): The command to execute.
 
     Returns:
-        tuple: stdin, stdout, stderr as with paramiko exec_command.
+        tuple: stdin, stdout, stderr with command outputs.
     """
+    logging.info(f"Executing SSH command: {command}")
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, ssh.exec_command, command)
+    
+    # Execute the command
+    stdin, stdout, stderr = await loop.run_in_executor(None, ssh.exec_command, command)
+
+    # Wait for the command to complete and get the exit status
+    exit_status = await loop.run_in_executor(None, stdout.channel.recv_exit_status)
+    
+    # Read the outputs from stdout and stderr
+    stdout_output = await loop.run_in_executor(None, stdout.read)
+    stderr_output = await loop.run_in_executor(None, stderr.read)
+
+    # Log the results
+    if exit_status == 0:
+        logging.info(f"Command succeeded with exit status {exit_status}")
+        logging.info(f"STDOUT: {stdout_output.decode().strip()}")
+    else:
+        logging.error(f"Command failed with exit status {exit_status}")
+        logging.error(f"STDERR: {stderr_output.decode().strip()}")
+
+    return stdin, stdout, stderr
+
 
 async def launch_instance_and_record_logs(
     name,
@@ -410,13 +432,14 @@ async def launch_instance_and_record_logs(
         sftp.chmod(remote_path, 0o755)  # Make it executable
 
         remote_log_path = f"/panthalia.log"
-        # Execute the temporary script file using bash with nohup
-        full_command = f'''
-chmod +x {remote_path} && apt-get update && apt-get install -y tmux && tmux new-session -d -s mysession "/bin/bash {remote_path} > {remote_log_path} 2>&1"
-'''
-        logging.info(f"Executing command: {full_command}")
-
-        stdin, stdout, stderr = await async_exec_command(ssh, full_command)
+        
+        setup_cmd = f'chmod +x {remote_path} && apt-get update && apt-get install -y tmux'
+        
+        _, _, stderr = await async_exec_command(ssh, setup_cmd)
+        
+        script_cmd = f'tmux new-session -d -s mysession "/bin/bash {remote_path} > {remote_log_path} 2>&1"'
+        
+        stdin, stdout, stderr = await async_exec_command(ssh, script_cmd)
 
         # Function to check if SSH session is still alive
         def is_ssh_session_alive():
