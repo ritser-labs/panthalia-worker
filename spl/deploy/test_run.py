@@ -186,18 +186,24 @@ def signal_handler(signal_received, frame):
 signal.signal(signal.SIGINT, signal_handler)
 
 def reset_logs(log_dir):
-    """Delete all files in the log directory."""
+    """Delete all log files in the log directory except for the LOG_FILE, which is truncated (reset)."""
     if os.path.exists(log_dir):
         for file_name in os.listdir(log_dir):
             file_path = os.path.join(log_dir, file_name)
             try:
-                # Remove the file
-                os.remove(file_path)
-                logging.debug(f"Deleted log file: {file_path}")
+                if file_path == LOG_FILE:
+                    # Truncate LOG_FILE by opening it in write mode
+                    open(file_path, 'w').close()
+                    logging.debug(f"Reset log file: {file_path}")
+                else:
+                    # Remove other log files
+                    os.remove(file_path)
+                    logging.debug(f"Deleted log file: {file_path}")
             except Exception as e:
-                logging.debug(f"Error deleting log file {file_path}: {e}")
+                logging.debug(f"Error processing log file {file_path}: {e}")
     else:
         logging.debug(f"Log directory {log_dir} does not exist.")
+
 
 def fetch_latest_loss():
     global latest_loss_cache, sot_url

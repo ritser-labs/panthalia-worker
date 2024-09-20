@@ -34,14 +34,30 @@ LAST_FUTURE_VERSION_FILE = os.path.join(STATE_DIR, 'last_future_version_number.j
 
 DOCKER_IMAGE = 'zerogoliath/magnum:latest'
 
-# Configure logging to file and stdout
+# Configure logging
 os.makedirs(LOG_DIR, exist_ok=True)
-file_handler = logging.FileHandler(LOG_FILE)
-logging.basicConfig(level=logging.INFO)
-logging.getLogger().addHandler(file_handler)
+
+# Setup the logger
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+
+# Create a formatter
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-for handler in logging.getLogger().handlers:
-    handler.setFormatter(formatter)
+
+# Create file handler and add it to logger
+file_handler = logging.FileHandler(LOG_FILE)
+file_handler.setFormatter(formatter)
+
+# Avoid adding duplicate FileHandlers
+if not any(isinstance(handler, logging.FileHandler) for handler in logger.handlers):
+    logger.addHandler(file_handler)
+
+# Check if StreamHandler is already present and avoid duplicates
+if not any(isinstance(handler, logging.StreamHandler) for handler in logger.handlers):
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
 
 
 def parse_args():
@@ -146,18 +162,24 @@ def terminate_processes(processes):
             logging.error(f"Error terminating process {process_name}: {e}")
 
 def reset_logs(log_dir):
-    """Delete all files in the log directory."""
+    """Delete all log files in the log directory except for the LOG_FILE, which is truncated (reset)."""
     if os.path.exists(log_dir):
         for file_name in os.listdir(log_dir):
             file_path = os.path.join(log_dir, file_name)
             try:
-                # Remove the file
-                os.remove(file_path)
-                logging.debug(f"Deleted log file: {file_path}")
+                if file_path == LOG_FILE:
+                    # Truncate LOG_FILE by opening it in write mode
+                    open(file_path, 'w').close()
+                    logging.debug(f"Reset log file: {file_path}")
+                else:
+                    # Remove other log files
+                    os.remove(file_path)
+                    logging.debug(f"Deleted log file: {file_path}")
             except Exception as e:
-                logging.debug(f"Error deleting log file {file_path}: {e}")
+                logging.debug(f"Error processing log file {file_path}: {e}")
     else:
         logging.debug(f"Log directory {log_dir} does not exist.")
+
 
 def fetch_latest_loss(sot_url):
     global latest_loss_cache
