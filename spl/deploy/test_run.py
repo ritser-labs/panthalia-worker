@@ -446,17 +446,10 @@ async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_cont
 
 def load_state():
     if os.path.exists(STATE_FILE):
-        while True:
-            choice = input(f"State file {STATE_FILE} exists. Do you want to load it (L) or delete it (D)? [L/D]: ").strip().lower()
-            if choice == 'l':
-                return load_state()
-            elif choice == 'd':
-                os.remove(STATE_FILE)
-                logging.info(f"State file {STATE_FILE} deleted successfully.")
-                return {'pods': {}, 'deployscript_run': False}
-            else:
-                print("Invalid choice. Please enter 'L' to load or 'D' to delete.")
+        with open(STATE_FILE, 'r') as f:
+            return json.load(f)
     else:
+        logging.error(f"State file {STATE_FILE} does not exist.")
         return {'pods': {}, 'deployscript_run': False}
 
 def save_state(state):
