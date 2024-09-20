@@ -16,6 +16,41 @@ datasets_dir = os.path.join(parent_dir, 'datasets')
 executor = concurrent.futures.ProcessPoolExecutor()
 
 
+
+def truncate_tokens(self, tokens, max_seq_len, pad_token):
+    if len(tokens) < max_seq_len:
+        tokens += [pad_token] * (max_seq_len - len(tokens))
+    elif len(tokens) > max_seq_len:
+        tokens = tokens[:max_seq_len]
+    return tokens
+
+
+def _tokenize_and_split_sync(text, max_seq_len, tokenizer, pad_id):
+    """Synchronous tokenization function (runs in a separate process)."""
+    tokenize_start = time.time()
+    tokens = tokenizer.encode(text)
+    tokenize_end = time.time()
+    token_pairs = []
+
+    # Calculate how many chunks can be made based on the total length and max_seq_len
+    num_chunks = (len(tokens) - max_seq_len) // max_seq_len
+
+    for _ in range(num_chunks):
+        if len(tokens) < max_seq_len:
+            break
+
+        start_pos = random.randint(0, len(tokens) - max_seq_len - 1)
+        seq_len = max_seq_len
+        substr = tokens[start_pos:start_pos + seq_len]
+
+        inputs = truncate_tokens(substr[:-1], max_seq_len, pad_id)
+        targets = truncate_tokens(substr[1:], max_seq_len, pad_id)
+
+        token_pairs.append((inputs, targets))
+
+    return token_pairs
+
+
 class LanguageDataLoader:
     def __init__(self, model_config: BaseModelConfig, buffer_size: int, max_seq_len: int):
         self.max_seq_len = max_seq_len
@@ -43,43 +78,18 @@ class LanguageDataLoader:
 
         return token_pair
 
-    def truncate_tokens(self, tokens, max_seq_len, pad_token):
-        if len(tokens) < max_seq_len:
-            tokens += [pad_token] * (max_seq_len - len(tokens))
-        elif len(tokens) > max_seq_len:
-            tokens = tokens[:max_seq_len]
-        return tokens
-
-    async def tokenize_and_split(text, max_seq_len):
+    async def tokenize_and_split(self, text, max_seq_len):
         """Use ProcessPoolExecutor for CPU-bound tokenization."""
         loop = asyncio.get_event_loop()
         # Run the tokenization in a separate process
-        return await loop.run_in_executor(executor, _tokenize_and_split_sync, text, max_seq_len)
-
-    def _tokenize_and_split_sync(text, max_seq_len):
-        """Synchronous tokenization function (runs in a separate process)."""
-        tokenize_start = time.time()
-        tokens = self.model_config.tokenizer.encode(text)
-        tokenize_end = time.time()
-        token_pairs = []
-
-        # Calculate how many chunks can be made based on the total length and max_seq_len
-        num_chunks = (len(tokens) - max_seq_len) // max_seq_len
-
-        for _ in range(num_chunks):
-            if len(tokens) < max_seq_len:
-                break
-
-            start_pos = random.randint(0, len(tokens) - max_seq_len - 1)
-            seq_len = max_seq_len
-            substr = tokens[start_pos:start_pos + seq_len]
-
-            inputs = self.truncate_tokens(substr[:-1], max_seq_len, self.model_config.tokenizer.pad_id)
-            targets = self.truncate_tokens(substr[1:], max_seq_len, self.model_config.tokenizer.pad_id)
-
-            token_pairs.append((inputs, targets))
-
-        return token_pairs
+        return await loop.run_in_executor(
+            executor,
+            _tokenize_and_split_sync,
+            text,
+            max_seq_len,
+            self.model_config.tokenizer,
+            self.model_config.tokenizer.pad_id
+        )
 
 
     async def fill_buffer_with_token_pairs(self, text_generator, max_seq_len):
