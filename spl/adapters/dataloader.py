@@ -159,7 +159,7 @@ class LowercaseAlphabetDataLoader(LanguageDataLoader):
 class FineWebDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len):
         print("Loading FineWeb dataset...")
-        self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="test", streaming=True)
+        self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True)
         super().__init__(model_config, buffer_size, max_seq_len)
 
     async def _text_generator(self):
