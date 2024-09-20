@@ -412,9 +412,10 @@ async def launch_instance_and_record_logs(
         remote_log_path = f"/panthalia.log"
         # Execute the temporary script file using bash with nohup
         full_command = f'''
-apt-get update && apt-get install -y tmux && \
-tmux new-session -d -s mysession "/bin/bash {remote_path}" > {remote_log_path} 2>&1
+chmod +x {remote_path} && apt-get update && apt-get install -y tmux && \\ \n
+tmux new-session -d -s mysession "/bin/bash {remote_path} > {remote_log_path} 2>&1 &"
 '''
+        logging.info(f"Executing command: {full_command}")
 
         stdin, stdout, stderr = await async_exec_command(ssh, full_command)
 
