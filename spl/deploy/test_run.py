@@ -606,6 +606,11 @@ async def main():
         save_state(state)
     else:
         logging.info("Deployment script has already been run. Skipping deployment.")
+        with open(args.subnet_addresses, 'r') as file:
+            subnet_addresses = json.load(file)
+
+        with open(args.deployment_config, 'r') as file:
+            deployment_config = json.load(file)
         rpc_url = state['rpc_url']
         web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         pool_address = deployment_config['pool']
@@ -616,7 +621,7 @@ async def main():
         # Load worker wallets
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
 
-    # Launch SOT after deployment to maximize concurrency
+    # Reconnect or start SOT after deployment
     if 'sot' not in state['pods']:
         sot_instance, sot_helpers = await sot_promise
         pod_helpers['sot'] = sot_helpers
@@ -640,25 +645,15 @@ async def main():
             exit(1)
     else:
         logging.info("SOT instance already running. Reconnecting...")
-        sot_url = state['sot_url']
         pod_id = state['pods']['sot']['pod_id']
-        pod = runpod.get_pod(pod_id)
-        if pod['desiredStatus'] != 'RUNNING':
-            logging.error("SOT pod is not running. Exiting.")
-            exit(1)
-        processes['sot'] = pod
-        # Reconnect to SOT instance
-        ssh_ip, ssh_port = await get_pod_ssh_ip_port(pod_id)
-        private_key_path = state['pods']['sot']['private_key_path']
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path)
-        pod_helpers['sot'] = {'ssh': ssh}
+        pod_helpers['sot'] = await reconnect_and_initialize_existing_pod(
+            pod_id, 'sot', state['pods']['sot']['private_key_path'], log_file=SOT_LOG_FILE
+        )
+        processes['sot'] = runpod.get_pod(pod_id)
 
     # Print worker initialization stage
     logging.info("Starting worker processes...")
 
-    # Use asyncio.gather() to launch all workers concurrently
     worker_tasks = []
     for worker_idx in range(args.worker_count):
         worker_name = f'worker_{worker_idx}'
@@ -676,18 +671,10 @@ async def main():
         else:
             logging.info(f"Worker {worker_name} already running. Reconnecting...")
             pod_id = state['pods'][worker_name]['pod_id']
-            pod = runpod.get_pod(pod_id)
-            if pod['desiredStatus'] != 'RUNNING':
-                logging.error(f"Worker pod {worker_name} is not running. Exiting.")
-                exit(1)
-            processes[worker_name] = pod
-            # Reconnect to worker instance
-            ssh_ip, ssh_port = await get_pod_ssh_ip_port(pod_id)
-            private_key_path = state['pods'][worker_name]['private_key_path']
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path)
-            pod_helpers[worker_name] = {'ssh': ssh}
+            pod_helpers[worker_name] = await reconnect_and_initialize_existing_pod(
+                pod_id, worker_name, state['pods'][worker_name]['private_key_path'], log_file=state['pods'][worker_name]['log_file']
+            )
+            processes[worker_name] = runpod.get_pod(pod_id)
 
     try:
         # Print master initialization stage
@@ -734,18 +721,10 @@ async def main():
         else:
             logging.info("Master instance already running. Reconnecting...")
             pod_id = state['pods']['master']['pod_id']
-            pod = runpod.get_pod(pod_id)
-            if pod['desiredStatus'] != 'RUNNING':
-                logging.error("Master pod is not running. Exiting.")
-                exit(1)
-            processes['master'] = pod
-            # Reconnect to master instance
-            ssh_ip, ssh_port = await get_pod_ssh_ip_port(pod_id)
-            private_key_path = state['pods']['master']['private_key_path']
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path)
-            pod_helpers['master'] = {'ssh': ssh}
+            pod_helpers['master'] = await reconnect_and_initialize_existing_pod(
+                pod_id, 'master', state['pods']['master']['private_key_path'], log_file=state['pods']['master']['log_file']
+            )
+            processes['master'] = runpod.get_pod(pod_id)
 
         if worker_tasks:
             worker_results = await asyncio.gather(*worker_tasks)
@@ -770,3 +749,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

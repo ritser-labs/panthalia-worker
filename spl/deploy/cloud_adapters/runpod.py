@@ -413,3 +413,68 @@ async def launch_instance_and_record_logs(
         runpod.terminate_pod(pod_id)
         logging.error(f"Error launching instance {name}: {e}")
         raise e
+
+async def reconnect_and_initialize_existing_pod(pod_id, name, private_key_path, log_file="instance_logs.txt", remote_log_path="/panthalia.log", remote_loss_path="/app/spl/loss_plot.png"):
+    """
+    Reconnects to an existing pod and sets up necessary threads to handle file copying and SSH connection management.
+    
+    Args:
+        pod_id (str): The ID of the pod.
+        name (str): The name of the pod (used for logging purposes).
+        private_key_path (str): The path to the private key for SSH connection.
+        log_file (str): Path to the log file where local logs will be stored.
+        remote_log_path (str): Path to the remote log file on the instance.
+        remote_loss_path (str): Path to the remote loss file for master instance.
+    
+    Returns:
+        dict: A dictionary of helper objects, including the SSH and SFTP clients and threads for log copying.
+    """
+    logging.info(f"Reconnecting to pod {pod_id}...")
+    
+    # Get the public IP and SSH port of the pod
+    ssh_ip, ssh_port = await get_pod_ssh_ip_port(pod_id)
+    
+    while not is_port_open(ssh_ip, ssh_port):
+        logging.info(f"Waiting for port {ssh_port} on {ssh_ip} to open...")
+        await asyncio.sleep(1)
+    
+    # Connect to the pod via SSH
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path)
+    
+    # Function to check if SSH session is still alive
+    def is_ssh_session_alive():
+        transport = ssh.get_transport()
+        return transport is not None and transport.is_active()
+
+    # Set up the SFTP client
+    sftp = ssh.open_sftp()
+
+    # Initialize the helper structure
+    pod_helpers = {
+        'private_key_path': private_key_path,
+        'log': open(log_file, "a"),  # Append mode for logs
+        'is_ssh_session_alive': is_ssh_session_alive
+    }
+    
+    # Start the task to copy logs from the remote pod to the local machine
+    logs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs")
+    if not os.path.exists(logs_dir):
+        os.makedirs(logs_dir)
+    local_log_path = os.path.join(logs_dir, f"{name}.log")
+    
+    # Set up file copying tasks
+    pod_helpers['sftp_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_log_path, local_log_path))
+
+    # If the pod is the master, set up additional tasks for copying the loss file
+    local_loss_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "loss_plot.png")
+    if name == 'master':
+        pod_helpers['loss_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_loss_path, local_loss_file_path, interval=5))
+    
+    pod_helpers['sftp'] = sftp
+    pod_helpers['ssh'] = ssh
+    
+    logging.info(f"Reconnected and initialized pod {pod_id} successfully.")
+    
+    return pod_helpers
