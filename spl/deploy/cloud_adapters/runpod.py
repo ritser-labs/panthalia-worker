@@ -217,58 +217,62 @@ async def stream_handler(stream, log_file):
 
 async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1):
     """
-    Copies a file from the remote server to the local system every `interval` seconds, 
-    ensuring that the file exists and is not of zero size before copying. A copy of the file
-    is made on the remote server to avoid issues if the original file is modified during the transfer.
-    The file is first copied to a temporary location on the local system and then atomically renamed.
+    Asynchronous function to copy a file from a remote server to the local system
+    using Paramiko over SSH, with the blocking SFTP operations moved to an executor.
 
     Args:
         ssh (paramiko.SSHClient): The active SSH connection.
         remote_path (str): The path to the file on the remote server.
         local_path (str): The path to the file on the local system.
-        interval (int): The time in seconds between each copy attempt.
+        interval (float): The time in seconds between each copy attempt.
     """
     sftp = ssh.open_sftp()
+
     try:
         while True:
             try:
-                # Check if the file exists and is not zero size
-                file_stat = sftp.stat(remote_path)
+                # Use asyncio to offload blocking operations like file stat and SFTP operations to a thread
+                file_stat = await asyncio.get_event_loop().run_in_executor(executor, sftp.stat, remote_path)
                 if file_stat.st_size > 0:
-                    # Create a temporary copy of the file on the remote system using SSH command
                     temp_remote_path = remote_path + ".bak"  # Add a .bak suffix for the backup copy
                     copy_command = f"cp {remote_path} {temp_remote_path}"
                     
-                    stdin, stdout, stderr = ssh.exec_command(copy_command)
-                    exit_status = stdout.channel.recv_exit_status()
-                    
+                    # Run the command in an executor to avoid blocking the event loop
+                    stdin, stdout, stderr = await async_exec_command(ssh, copy_command)
+                    exit_status = await asyncio.get_event_loop().run_in_executor(executor, stdout.channel.recv_exit_status)
+
                     if exit_status == 0:
-                        # Use a temporary local file to ensure atomic rename after successful download
                         local_temp_path = local_path + ".tmp"
                         
-                        # Copy the temporary file to the local system using SFTP
-                        sftp.get(temp_remote_path, local_temp_path)
+                        # Perform SFTP get operation in a thread using the executor
+                        await asyncio.get_event_loop().run_in_executor(executor, sftp.get, temp_remote_path, local_temp_path)
 
-                        # Atomically rename the temporary file to the final destination
-                        os.rename(local_temp_path, local_path)
+                        # Perform the atomic rename operation in a thread as it involves blocking I/O
+                        await asyncio.get_event_loop().run_in_executor(executor, os.rename, local_temp_path, local_path)
 
-                        # Optionally remove the temporary remote copy after successful download
-                        sftp.remove(temp_remote_path)
+                        # Remove the temporary remote copy in a thread to avoid blocking
+                        await asyncio.get_event_loop().run_in_executor(executor, sftp.remove, temp_remote_path)
+
                     else:
                         logging.error(f"Failed to create copy on the remote server: {stderr.read().decode()}")
 
                 else:
                     logging.info(f"File {remote_path} is zero size. Waiting for update...")
+
             except FileNotFoundError:
-                pass
+                logging.info(f"File {remote_path} not found. Retrying...")
             except Exception as e:
                 logging.error(f"Error checking or copying file: {e}")
-                
+
+            # Sleep asynchronously to avoid blocking the event loop
             await asyncio.sleep(interval)
+
     except Exception as e:
         logging.error(f"Error copying file: {e}")
     finally:
-        sftp.close()
+        # Close the SFTP connection in the executor to avoid blocking the event loop
+        await asyncio.get_event_loop().run_in_executor(executor, sftp.close)
+
 
 async def async_exec_command(ssh, command):
     """
