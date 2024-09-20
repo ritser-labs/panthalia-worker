@@ -124,7 +124,7 @@ async def create_new_pod(
         'container_disk_in_gb': container_disk_in_gb
     }
     if gpu_type is None or gpu_count == 0:
-        new_pod = await create_cpu_pod(name, image, instance_id='cpu3c-4-8', **kwargs)
+        new_pod = await create_cpu_pod(name, image, instance_id='cpu3c-2-4', **kwargs)
     else:
         if image is None:
             raise ValueError("Image must be provided for GPU instances.")

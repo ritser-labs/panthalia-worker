@@ -507,7 +507,8 @@ async def main():
         # Start the SOT service on a remote instance
         sot_promise = launch_instance_and_record_logs(
             name="sot",
-            gpu_count=0,
+            gpu_type='NVIDIA RTX 2000 Ada Generation'
+            gpu_count=1,
             ports=f'{SOT_PRIVATE_PORT}/tcp',
             log_file=SOT_LOG_FILE,
             template_id=BASE_TEMPLATE_ID,
