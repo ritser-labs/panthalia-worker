@@ -608,6 +608,14 @@ async def main():
         state['deployscript_run'] = True
         save_state(state)
     else:
+        logging.info("Anvil instance already running. Reconnecting...")
+        pod_id = state['pods']['anvil']['pod_id']
+        pod_helpers['anvil'] = await reconnect_and_initialize_existing_pod(
+            pod_id, 'anvil', state['pods']['anvil']['private_key_path'], log_file=ANVIL_LOG_FILE
+        )
+        processes['anvil'] = runpod.get_pod(pod_id)
+        rpc_url = state['rpc_url']
+        logging.info(f"Reconnected to Anvil at {rpc_url}")
         logging.info("Deployment script has already been run. Skipping deployment.")
         subnet_addresses = state['subnet_addresses']
 
