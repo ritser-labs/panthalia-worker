@@ -545,7 +545,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             # Remove each file if it exists
             for file_path in file_paths:
                 if os.path.exists(file_path):
-                    asyncio.to_thread(os.remove, file_path)
+                    await asyncio.to_thread(os.remove, file_path)
                 else:
                     logging.warning(f"File not found: {file_path}")
 
@@ -710,13 +710,23 @@ def create_app(public_keys_file, enable_memory_logging=False):
             return jsonify({'error': 'Tensor not found'}), 404
 
         try:
-            @after_this_request
-            def add_header(response):
-                response.headers['version_number'] = str(latest_version_number)
-                return response
+            file_size = os.path.getsize(state_file_path)
+            logging.debug(f"File size for {tensor_name}: {file_size / (1024 * 1024):.2f} MB")
 
-            logging.debug(f"Sending tensor file: {state_file_path}")
-            return await send_file(state_file_path, mimetype='application/octet-stream')
+            async def stream_file(file_path):
+                async with aiofiles.open(file_path, 'rb') as f:
+                    while True:
+                        chunk = await f.read(1024 * 1024)  # Stream in 1MB chunks
+                        if not chunk:
+                            break
+                        yield chunk
+
+            headers = {
+                'Content-Length': str(file_size),
+                'version_number': str(latest_version_number)
+            }
+
+            return Response(stream_file(state_file_path), headers=headers, mimetype='application/octet-stream')
 
         except Exception as e:
             logging.error(f"Error in /latest_state: {e}", exc_info=True)
