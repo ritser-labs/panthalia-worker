@@ -782,6 +782,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     @app.route('/upload_tensor', methods=['POST'])
     async def upload_tensor():
+        request.timeout = 3600  # Set the timeout to 1 hour
         request_files = await request.files
         if 'tensor' not in request_files:
             return jsonify({'error': 'No tensor file provided'}), 400
