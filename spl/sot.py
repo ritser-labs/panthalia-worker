@@ -423,6 +423,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             if batch_filename is None and targets_filename is None:
                 # No more batches
                 return jsonify({'error': 'No more batches available'}), 404
+            logging.info(f"Sending batch: {batch_filename}, targets: {targets_filename}")
             return jsonify({
                 'batch_url': f'/data/state/temp/{batch_filename}',
                 'targets_url': f'/data/state/temp/{targets_filename}'
