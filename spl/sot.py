@@ -501,17 +501,17 @@ def create_app(public_keys_file, enable_memory_logging=False):
             new_block_timestamp = last_future_version_number.get(tensor_name, 0)
 
             if new_block_timestamp < future_version_number:
-                logging.info(f"Updating block timestamps for {tensor_name} to {future_version_number}")
                 old_block_timestamp = block_timestamps.get(tensor_name, 0)
-                set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
-                await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
-
+                logging.info(f"Updating block timestamps for {tensor_name} from {old_block_timestamp} to {new_block_timestamp}")
                 for name in f'{tensor_name}', f'{tensor_name}_adam_m':
                     if not os.path.exists(os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')):
                         await asyncio.to_thread(shutil.copy,
                             os.path.join(state_dir, f'{name}_{old_block_timestamp}.pt'), 
                             os.path.join(state_dir, f'{name}_{new_block_timestamp}.pt')
                         )
+
+                set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
+                await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
 
                 set_dict_and_adam(num_updates, tensor_name, 0)
                 await save_json(num_updates_file, num_updates, num_updates_file_lock)
