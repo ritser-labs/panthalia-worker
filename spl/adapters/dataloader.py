@@ -12,6 +12,8 @@ import aiofiles
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
+executor = concurrent.futures.ProcessPoolExecutor()
+
 
 class LanguageDataLoader:
     def __init__(self, model_config: BaseModelConfig, buffer_size: int, max_seq_len: int):
@@ -47,12 +49,14 @@ class LanguageDataLoader:
             tokens = tokens[:max_seq_len]
         return tokens
 
-    async def tokenize_and_split(self, text, max_seq_len):
-        # Offload tokenization and splitting to a separate thread to avoid blocking
-        return await asyncio.to_thread(self._tokenize_and_split_sync, text, max_seq_len)
+    async def tokenize_and_split(text, max_seq_len):
+        """Use ProcessPoolExecutor for CPU-bound tokenization."""
+        loop = asyncio.get_event_loop()
+        # Run the tokenization in a separate process
+        return await loop.run_in_executor(executor, _tokenize_and_split_sync, text, max_seq_len)
 
-    def _tokenize_and_split_sync(self, text, max_seq_len):
-        """Synchronous version of tokenize_and_split to run on a separate thread."""
+    def _tokenize_and_split_sync(text, max_seq_len):
+        """Synchronous tokenization function (runs in a separate process)."""
         tokenize_start = time.time()
         tokens = self.model_config.tokenizer.encode(text)
         tokenize_end = time.time()
@@ -61,27 +65,18 @@ class LanguageDataLoader:
         # Calculate how many chunks can be made based on the total length and max_seq_len
         num_chunks = (len(tokens) - max_seq_len) // max_seq_len
 
-        split_start = time.time()
-
         for _ in range(num_chunks):
             if len(tokens) < max_seq_len:
                 break
 
-            # Randomly pick a start position ensuring we have enough tokens for a sequence
             start_pos = random.randint(0, len(tokens) - max_seq_len - 1)
-
-            # Extract the sequence of tokens from the random start position
             seq_len = max_seq_len
             substr = tokens[start_pos:start_pos + seq_len]
 
-            # Create input-target pairs where targets are the next token shifted by one
             inputs = self.truncate_tokens(substr[:-1], max_seq_len, self.model_config.tokenizer.pad_id)
             targets = self.truncate_tokens(substr[1:], max_seq_len, self.model_config.tokenizer.pad_id)
 
-            # Append the pair to the list
             token_pairs.append((inputs, targets))
-
-        split_end = time.time()
 
         return token_pairs
 
