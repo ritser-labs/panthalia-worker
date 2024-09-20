@@ -111,7 +111,7 @@ async def create_cpu_pod(
     return cleaned_response
 
 async def create_new_pod(
-    name, image, gpu_type, gpu_count, support_public_ip, ports, env={}, template_id=None, container_disk_in_gb=10
+    name, image, gpu_type, cpu_type, gpu_count, support_public_ip, ports, env={}, template_id=None, container_disk_in_gb=10
 ):
     private_key_path, public_key_str = await generate_ssh_key_pair()
     env['PUBLIC_KEY'] = public_key_str  # Add public key here
@@ -124,7 +124,9 @@ async def create_new_pod(
         'container_disk_in_gb': container_disk_in_gb
     }
     if gpu_type is None or gpu_count == 0:
-        new_pod = await create_cpu_pod(name, image, instance_id='cpu3c-2-4', **kwargs)
+        if cpu_type is None:
+            cpu_type = 'cpu3c-2-4'
+        new_pod = await create_cpu_pod(name, image, instance_id=cpu_type, **kwargs)
     else:
         if image is None:
             raise ValueError("Image must be provided for GPU instances.")
@@ -328,6 +330,7 @@ async def launch_instance_and_record_logs(
     name,
     image=None,
     gpu_type=None,
+    cpu_type=None,
     gpu_count=0,
     ports='',
     log_file="instance_logs.txt",
@@ -368,6 +371,7 @@ async def launch_instance_and_record_logs(
         name,
         image,
         gpu_type,
+        cpu_type,
         gpu_count,
         support_public_ip=True,
         ports=ports,
