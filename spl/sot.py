@@ -30,12 +30,12 @@ from .common import (
     TENSOR_NAME,
     dataset,
     SOT_PRIVATE_PORT,
-    get_future_version_number
+    get_future_version_number,
+    PRELOAD_BATCH_COUNT
 )
 from .device import device
 
 # Constants for batch preloading
-PRELOAD_BATCH_COUNT = 3  # Number of batches to preload
 preloaded_batches_queue = asyncio.Queue(maxsize=PRELOAD_BATCH_COUNT)
 dataset_iterator = None
 dataset_lock = asyncio.Lock()

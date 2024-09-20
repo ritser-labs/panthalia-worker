@@ -29,6 +29,8 @@ expected_worker_time = exported_plugin.expected_worker_time
 
 MAX_CONCURRENT_ITERATIONS = exported_plugin.max_concurrent_iterations
 
+PRELOAD_BATCH_COUNT = exported_plugin.preload_batch_count
+
 SOT_PRIVATE_PORT = 5001
 
 # Define the new tokenizer and model arguments

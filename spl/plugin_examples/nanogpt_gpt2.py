@@ -46,5 +46,6 @@ exported_plugin = StandardPlugin(
     inner_max_lr=6e-4,
     inner_min_lr=6e-4,
     inner_T_0=200,
-    inner_weight_decay=0.1
+    inner_weight_decay=0.1,
+    preload_batch_count=4
 )
