@@ -8,6 +8,7 @@ from .model_config import BaseModelConfig, TransformerModelConfig
 import time
 import asyncio
 import aiofiles
+import concurrent.futures
 
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
