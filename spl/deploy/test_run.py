@@ -289,7 +289,7 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
             stdscr.addstr(task_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
 
         # Instructions
-        stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit and terminate pods, 'e' to exit without terminating.", curses.A_BOLD)
+        #stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit and terminate pods, 'e' to exit without terminating.", curses.A_BOLD)
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
         stdscr.refresh()
 
