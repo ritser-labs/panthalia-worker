@@ -730,5 +730,4 @@ async def main():
         await asyncio.sleep(args.poll_interval)
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
     asyncio.run(main())

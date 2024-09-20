@@ -245,17 +245,19 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1, copy
                             remote_file.seek(last_size)
 
                             # Read the new content from the remote file
-                            new_content = await asyncio.get_event_loop().run_in_executor(executor, remote_file.read)
+                            new_content = await asyncio.get_event_loop().run_in_executor(executor, remote_file.read, current_size - last_size)
 
-                            # Decode the content from bytes to a string (assuming it's text data, such as logs)
-                            new_content_str = new_content.decode('utf-8')
+                            # Check if any new content was read
+                            if new_content:
+                                # Decode the content from bytes to a string (assuming it's text data, such as logs)
+                                new_content_str = new_content.decode('utf-8')
 
-                            # Append the new content to the local file
-                            with open(local_path, 'a') as local_file:
-                                local_file.write(new_content_str)
+                                # Append the new content to the local file
+                                with open(local_path, 'a') as local_file:
+                                    local_file.write(new_content_str)
 
-                        # Update the last known size of the file
-                        last_size = current_size
+                                # Update the last known size of the file
+                                last_size = current_size
 
                     else:
                         # No new updates in the remote file
@@ -274,8 +276,6 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1, copy
                     exit_status = await asyncio.get_event_loop().run_in_executor(executor, stdout.channel.recv_exit_status)
 
                     if exit_status == 0:
-                        #logging.info(f"Remote copy successful: {remote_temp_path}")
-                        
                         # Generate a temporary file name on the local side
                         local_temp_path = local_path + ".tmp"
 
@@ -284,8 +284,6 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1, copy
 
                         # Perform the atomic rename operation locally
                         await asyncio.get_event_loop().run_in_executor(executor, os.rename, local_temp_path, local_path)
-
-                        #logging.info(f"Local file {local_temp_path} renamed to {local_path} successfully.")
 
                         # Clean up the temporary remote file
                         await asyncio.get_event_loop().run_in_executor(executor, sftp.remove, remote_temp_path)
