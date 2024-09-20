@@ -583,6 +583,9 @@ async def main():
 
         with open(args.deployment_config, 'r') as file:
             deployment_config = json.load(file)
+        
+        state['subnet_addresses'] = subnet_addresses
+        state['deployment_config'] = deployment_config
 
         distributor_contract_address = deployment_config['distributor']
         pool_address = deployment_config['pool']
@@ -606,11 +609,9 @@ async def main():
         save_state(state)
     else:
         logging.info("Deployment script has already been run. Skipping deployment.")
-        with open(args.subnet_addresses, 'r') as file:
-            subnet_addresses = json.load(file)
+        subnet_addresses = state['subnet_addresses']
 
-        with open(args.deployment_config, 'r') as file:
-            deployment_config = json.load(file)
+        deployment_config = state['deployment_config']
         rpc_url = state['rpc_url']
         web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         pool_address = deployment_config['pool']
