@@ -401,7 +401,8 @@ async def launch_instance_and_record_logs(
 
         remote_loss_path = f"/app/spl/loss_plot.png"
         local_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "loss_plot.png")
-        pod_helpers['loss_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_loss_path, local_file_path, interval=5))
+        if name == 'master':
+            pod_helpers['loss_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_loss_path, local_file_path, interval=5))
         pod_helpers['sftp'] = sftp
         pod_helpers['ssh'] = ssh
 
