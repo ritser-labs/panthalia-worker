@@ -548,6 +548,7 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
         logging.debug(f"Time until next version: {time_until_next} seconds")
 
         if time_until_next < expected_worker_time:
+            logging.debug(f'Not enough time left until next version. Waiting for {time_until_next} seconds.')
             await asyncio.sleep(time_until_next)
         else:
             valid_version = True
