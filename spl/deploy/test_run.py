@@ -626,7 +626,6 @@ async def main():
         subnet_addresses = state['subnet_addresses']
 
         deployment_config = state['deployment_config']
-        rpc_url = state['rpc_url']
         web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         pool_address = deployment_config['pool']
         pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
@@ -665,6 +664,7 @@ async def main():
             pod_id, 'sot', state['pods']['sot']['private_key_path'], log_file=SOT_LOG_FILE
         )
         processes['sot'] = runpod.get_pod(pod_id)
+        sot_url = state['sot_url']
 
     # Print worker initialization stage
     logging.info("Starting worker processes...")
