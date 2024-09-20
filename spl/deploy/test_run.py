@@ -265,7 +265,7 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
             with open(log_file, 'r') as f:
                 log_lines.extend(f.readlines())
 
-        for i, line in enumerate(log_lines[-(height):]):
+        for i, line in enumerate(log_lines[-(height - 1):]):
             stdscr.addstr(i, 0, line[:split_point - 2])
 
         # Draw the separator line
