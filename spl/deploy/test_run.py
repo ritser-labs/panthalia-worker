@@ -22,7 +22,7 @@ import signal
 from .util import is_port_open
 import paramiko
 import runpod
-from .cloud_adapters.runpod import get_pod_ssh_ip_port
+from .cloud_adapters.runpod import get_pod_ssh_ip_port, reconnect_and_initialize_existing_pod
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
