@@ -433,18 +433,18 @@ def create_app(public_keys_file, enable_memory_logging=False):
             logging.error(f"Error in /get_batch: {e}", exc_info=True)
             return jsonify({'error': 'Could not get batch'}), 500
 
-    async def apply_adamw(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
+    async def apply_optimizer(version_number, tensor_name, grads_flat, learning_rate, beta1, beta2, epsilon, weight_decay, t, clip_grad=1.0):
         tensor_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
         if not os.path.exists(tensor_path):
             raise FileNotFoundError(f"Tensor file for {tensor_name} not found at {tensor_path}")
 
-        tensor = torch.load(tensor_path, map_location=device)
+        # Load the tensor asynchronously using a separate thread
+        tensor = await asyncio.to_thread(torch.load, tensor_path, map_location=device)
 
         if tensor is None:
             raise ValueError(f"Failed to load tensor for {tensor_name}")
 
-        # Ensure tensor is on the correct device and convert to flat tensor if necessary
-        tensor = tensor.to(device)
+        tensor = tensor.to(device)  # Ensure tensor is on the correct device
 
         logging.debug(f"Tensor before AdamW: {tensor}")
         logging.debug(f"Flattened gradients: {grads_flat}")
@@ -455,29 +455,20 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         tensor_adam_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
 
-        adam_m = None
-
+        # Load the adam_m tensor asynchronously
         if os.path.exists(tensor_adam_m_path):
-            adam_m = torch.load(tensor_adam_m_path, map_location=device).to(device)
-
-        if adam_m is None:
+            adam_m = await asyncio.to_thread(torch.load, tensor_adam_m_path, map_location=device)
+            adam_m = adam_m.to(device)
+        else:
             logging.debug(f'adam_m not found for {tensor_name}, initializing to zeros')
             adam_m = torch.zeros_like(tensor, device=device)
 
         logging.debug(f"m before optimizer: {adam_m}")
 
-        clip_threshold = 1.0
-
-        # Get the StableAdamW updates
-        param_update, m_update = nag_update(
-            tensor,
-            grads_flat,
-            adam_m,
-            learning_rate,
-            weight_decay,
-            beta1,
-            epsilon,
-            t
+        # Use the NAG update function to calculate the updates asynchronously using a thread
+        param_update, m_update = await asyncio.to_thread(
+            nag_update,
+            tensor, grads_flat, adam_m, learning_rate, weight_decay, beta1, epsilon, t
         )
 
         logging.debug(f"Updates after applying optimizer: {param_update}")
@@ -635,7 +626,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
             learning_params = get_sot_learning_hyperparameters(iteration_number[tensor_name])
-            future_tensor, m_update = await apply_adamw(
+            future_tensor, m_update = await apply_optimizer(
                 current_version_number,
                 tensor_name,
                 averaged_grads,
