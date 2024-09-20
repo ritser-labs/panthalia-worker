@@ -866,7 +866,7 @@ if __name__ == "__main__":
         args = parser.parse_args()
 
         # Create the app with the memory logging flag
-        app = create_app(args.public_keys_file, enable_memory_logging=args.enable_memory_logging)
+        app = create_app(args.public_keys, enable_memory_logging=args.enable_memory_logging)
 
         logging.info("Starting SOT service...")
 
