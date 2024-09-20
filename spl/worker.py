@@ -182,27 +182,6 @@ async def download_file(url, retries=3, backoff=1):
 
     raise Exception(f"Failed to download file after {retries} attempts")
 
-async def download_json(url):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                response.raise_for_status()  # Raise an error for bad status codes
-                data = await response.json()  # Parse and return the JSON content
-                return torch.tensor(data, dtype=torch.long).to(device)  # Convert to tensor
-    except aiohttp.ClientError as e:
-        logging.error(f"Failed to download JSON from {url}: {e}")
-        raise
-
-async def get_json(url, params=None):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as response:
-                response.raise_for_status()  # Raise an error for bad status codes
-                return await response.json()  # Parse and return the JSON content
-    except aiohttp.ClientError as e:
-        logging.error(f"Failed to download JSON from {url}: {e}")
-        raise
-
 def create_callback(encoder, pbar):
     def callback(monitor):
         pbar.update(monitor.bytes_read - pbar.n)
