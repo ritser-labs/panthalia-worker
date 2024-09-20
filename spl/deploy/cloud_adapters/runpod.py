@@ -220,6 +220,7 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1):
     Copies a file from the remote server to the local system every `interval` seconds, 
     ensuring that the file exists and is not of zero size before copying. A copy of the file
     is made on the remote server to avoid issues if the original file is modified during the transfer.
+    The file is first copied to a temporary location on the local system and then atomically renamed.
 
     Args:
         ssh (paramiko.SSHClient): The active SSH connection.
@@ -242,9 +243,14 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1):
                     exit_status = stdout.channel.recv_exit_status()
                     
                     if exit_status == 0:
-
+                        # Use a temporary local file to ensure atomic rename after successful download
+                        local_temp_path = local_path + ".tmp"
+                        
                         # Copy the temporary file to the local system using SFTP
-                        sftp.get(temp_remote_path, local_path)
+                        sftp.get(temp_remote_path, local_temp_path)
+
+                        # Atomically rename the temporary file to the final destination
+                        os.rename(local_temp_path, local_path)
 
                         # Optionally remove the temporary remote copy after successful download
                         sftp.remove(temp_remote_path)
@@ -391,7 +397,7 @@ async def launch_instance_and_record_logs(
 
         remote_loss_path = f"/app/spl/loss_plot.png"
         local_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "loss_plot.png")
-        pod_helpers['log_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_loss_path, local_file_path))
+        pod_helpers['loss_task'] = asyncio.create_task(copy_file_from_remote(ssh, remote_loss_path, local_file_path, interval=5))
         pod_helpers['sftp'] = sftp
         pod_helpers['ssh'] = ssh
 
