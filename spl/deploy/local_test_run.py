@@ -146,15 +146,18 @@ def terminate_processes(processes):
             logging.error(f"Error terminating process {process_name}: {e}")
 
 def reset_logs(log_dir):
+    """Delete all files in the log directory."""
     if os.path.exists(log_dir):
         for file_name in os.listdir(log_dir):
             file_path = os.path.join(log_dir, file_name)
             try:
-                with open(file_path, 'w') as file:
-                    pass  # This will truncate the file to zero length
-                logging.debug(f"Erased log file: {file_path}")
+                # Remove the file
+                os.remove(file_path)
+                logging.debug(f"Deleted log file: {file_path}")
             except Exception as e:
-                logging.debug(f"Error erasing log file {file_path}: {e}")
+                logging.debug(f"Error deleting log file {file_path}: {e}")
+    else:
+        logging.debug(f"Log directory {log_dir} does not exist.")
 
 def fetch_latest_loss(sot_url):
     global latest_loss_cache
