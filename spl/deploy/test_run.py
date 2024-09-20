@@ -487,13 +487,6 @@ async def main():
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
 
-    # Load subnet_addresses and deployment_config
-    with open(args.subnet_addresses, 'r') as file:
-        subnet_addresses = json.load(file)
-
-    with open(args.deployment_config, 'r') as file:
-        deployment_config = json.load(file)
-
     sot_promise = None
     if 'sot' not in state['pods']:
         logging.info("Starting SOT instance...")
@@ -588,6 +581,13 @@ async def main():
 
         logging.info('JSONs loaded, parsing deployment config...')
 
+        # Load subnet_addresses and deployment_config
+        with open(args.subnet_addresses, 'r') as file:
+            subnet_addresses = json.load(file)
+
+        with open(args.deployment_config, 'r') as file:
+            deployment_config = json.load(file)
+
         distributor_contract_address = deployment_config['distributor']
         pool_address = deployment_config['pool']
 
@@ -600,6 +600,7 @@ async def main():
         logging.info('Generating wallets')
 
         await fund_wallets(web3, args.private_key, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
+        
 
         # Generate wallets for workers and fund them
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
