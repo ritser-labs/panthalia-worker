@@ -764,12 +764,18 @@ def create_app(public_keys_file, enable_memory_logging=False):
             return jsonify({'error': 'File not found'}), 404
 
         try:
+            async def stream_file(file_path):
+                async with aiofiles.open(file_path, 'rb') as f:
+                    while True:
+                        chunk = await f.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        yield chunk
+            headers = {
+                'Content-Length': str(os.path.getsize(file_path))
+            }
             # Use send_file to handle file streaming and headers
-            return await send_file(
-                file_path,
-                mimetype='application/octet-stream',
-                as_attachment=True
-            )
+            return Response(stream_file(file_path), headers=headers, mimetype='application/octet-stream')
         except Exception as e:
             logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
             return jsonify({'error': 'File not found or could not be read'}), 404

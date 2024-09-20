@@ -147,11 +147,40 @@ class TaskQueue:
 
 task_queue = TaskQueue()
 
-async def download_file(url):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            content = await response.read()
-            return torch.load(BytesIO(content))
+async def download_file(url, retries=3, backoff=1):
+    for attempt in range(1, retries + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    response.raise_for_status()
+
+                    # Create a buffer to accumulate the streamed chunks
+                    content = BytesIO()
+
+                    # Read and process the response in chunks (matching server chunk size of 1MB)
+                    async for chunk in response.content.iter_chunked(1024 * 1024):  # 1MB chunks
+                        if not chunk:
+                            break
+                        content.write(chunk)
+
+                    # Reset the buffer position to the start before loading
+                    content.seek(0)
+                    
+                    # Load the content as a torch tensor
+                    return torch.load(content)
+
+        except aiohttp.ClientPayloadError as e:
+            logging.error(f"Attempt {attempt}: Payload error: {e}")
+        except aiohttp.ClientError as e:
+            logging.error(f"Attempt {attempt}: Client error: {e}")
+        except Exception as e:
+            logging.error(f"Attempt {attempt}: Unexpected error: {e}")
+        
+        # Exponential backoff between retries
+        if attempt < retries:
+            await asyncio.sleep(backoff * attempt)
+
+    raise Exception(f"Failed to download file after {retries} attempts")
 
 async def download_json(url):
     try:
