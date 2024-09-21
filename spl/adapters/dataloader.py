@@ -17,7 +17,7 @@ executor = concurrent.futures.ProcessPoolExecutor()
 
 
 
-def truncate_tokens(self, tokens, max_seq_len, pad_token):
+def truncate_tokens(tokens, max_seq_len, pad_token):
     if len(tokens) < max_seq_len:
         tokens += [pad_token] * (max_seq_len - len(tokens))
     elif len(tokens) > max_seq_len:
