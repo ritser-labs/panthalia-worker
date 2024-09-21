@@ -55,6 +55,9 @@ class LanguageDataLoader:
         self.batch_size = batch_size
         self.buffer = []  # Buffer for tokenized data
         self.dataset_iterator = None  # Will be set by subclasses
+    
+    def init_dataset(self):
+        pass
 
     def __aiter__(self):
         return self
@@ -170,6 +173,8 @@ class WikipediaDataLoader(LanguageDataLoader):
         Inherits common functionality from LanguageDataLoader.
         """
         super().__init__(model_config, buffer_size, max_seq_len, batch_size)
+    
+    def init_dataset(self):
         self.dataset = load_dataset("wikipedia", "20220301.en", split="train", streaming=True)
         self.dataset_iterator = iter(self.dataset)
 
@@ -187,6 +192,8 @@ class FineWebDataLoader(LanguageDataLoader):
         Inherits common functionality from LanguageDataLoader.
         """
         super().__init__(model_config, buffer_size, max_seq_len, batch_size)
+    
+    def init_dataset(self):
         self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True)
         self.dataset_iterator = iter(self.dataset)
 
