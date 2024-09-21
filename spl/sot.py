@@ -215,6 +215,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             log_memory_diff(snapshot_before, snapshot_after, note='After initializing tensor')  # Log memory differences
 
         log_memory_usage('After initializing tensor')
+        logging.info(f'Tensor {name} initialized at version {sync_version_number}')
 
     async def initialize_all_tensors():
         logging.info("Initializing all tensors")
