@@ -442,7 +442,7 @@ async def main():
         logging.info("Starting SOT service...")
 
         sot_log = open(SOT_LOG_FILE, 'w')
-        sot_process = subprocess.Popen(['python', '-m', 'spl.sot', '--public_keys_file', MASTER_PUBLIC_KEYS_FILE], stdout=sot_log, stderr=sot_log, cwd=package_root_dir)
+        sot_process = subprocess.Popen(['python', '-m', 'spl.sot', '--public_keys', MASTER_PUBLIC_KEYS_FILE], stdout=sot_log, stderr=sot_log, cwd=package_root_dir)
         processes['sot'] = sot_process
         logging.info(f"SOT service started with PID {sot_process.pid}")
 
