@@ -9,11 +9,11 @@ import time
 import asyncio
 import aiofiles
 import concurrent.futures
-
+import multiprocessing
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
-executor = concurrent.futures.ProcessPoolExecutor()
+executor = concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count())
 
 
 
@@ -109,7 +109,7 @@ class WikipediaDataLoader(LanguageDataLoader):
         self.dataset = load_dataset("wikipedia", "20220301.en", split='train', streaming=True)
 
     async def _text_generator(self):
-        async for example in self.dataset:
+        for example in self.dataset:
             yield example['text']
 
 class ShakespeareDataLoader(LanguageDataLoader):
