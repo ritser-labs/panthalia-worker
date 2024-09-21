@@ -25,29 +25,21 @@ def truncate_tokens(tokens, max_seq_len, pad_token):
     return tokens
 
 
-def _tokenize_and_split_sync(text, max_seq_len, tokenizer, pad_id):
-    """Synchronous tokenization function (runs in a separate process)."""
-    tokenize_start = time.time()
-    tokens = tokenizer.encode(text)
-    tokenize_end = time.time()
+def _tokenize_and_split_sync_batch(texts, max_seq_len, tokenizer, pad_id):
+    """Synchronous batch tokenization function."""
     token_pairs = []
-
-    # Calculate how many chunks can be made based on the total length and max_seq_len
-    num_chunks = (len(tokens) - max_seq_len) // max_seq_len
-
-    for _ in range(num_chunks):
+    for text in texts:
+        tokens = tokenizer.encode(text)
+        # Truncate or pad tokens
         if len(tokens) < max_seq_len:
-            break
-
-        start_pos = random.randint(0, len(tokens) - max_seq_len - 1)
-        seq_len = max_seq_len
-        substr = tokens[start_pos:start_pos + seq_len]
-
-        inputs = truncate_tokens(substr[:-1], max_seq_len, pad_id)
-        targets = truncate_tokens(substr[1:], max_seq_len, pad_id)
-
+            tokens += [pad_id] * (max_seq_len - len(tokens))
+        else:
+            tokens = tokens[:max_seq_len]
+        
+        # Create input-target pairs
+        inputs = tokens[:-1]
+        targets = tokens[1:]
         token_pairs.append((inputs, targets))
-
     return token_pairs
 
 
@@ -78,29 +70,33 @@ class LanguageDataLoader:
 
         return token_pair
 
-    async def tokenize_and_split(self, text, max_seq_len):
-        """Use ProcessPoolExecutor for CPU-bound tokenization."""
+    async def tokenize_and_split(self, texts, max_seq_len):
+        """Use ProcessPoolExecutor for CPU-bound batch tokenization."""
         loop = asyncio.get_event_loop()
-        # Run the tokenization in a separate process
         return await loop.run_in_executor(
             executor,
-            _tokenize_and_split_sync,
-            text,
+            _tokenize_and_split_sync_batch,  # Use the batch function
+            texts,
             max_seq_len,
             self.model_config.tokenizer,
             self.model_config.tokenizer.pad_id
         )
 
-
     async def fill_buffer_with_token_pairs(self, text_generator, max_seq_len):
-        self.buffer = []  # Clear the buffer before refilling
+        self.buffer = []
+        batch = []
         async for text in text_generator:
-            token_pairs = await self.tokenize_and_split(text, max_seq_len)
+            batch.append(text)
+            if len(batch) == self.batch_size:
+                token_pairs = await self.tokenize_and_split(batch, max_seq_len)
+                self.buffer.extend(token_pairs)
+                batch = []
+                if len(self.buffer) >= self.buffer_size:
+                    break
+        if batch:
+            token_pairs = await self.tokenize_and_split(batch, max_seq_len)
             self.buffer.extend(token_pairs)
-            if len(self.buffer) >= self.buffer_size:
-                break
         random.shuffle(self.buffer)
-
 
 class WikipediaDataLoader(LanguageDataLoader):
     def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len):
