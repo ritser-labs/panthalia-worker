@@ -36,7 +36,6 @@ from .common import (
 from .device import device
 
 # Constants for batch preloading
-preloaded_batches_queue = asyncio.Queue(maxsize=PRELOAD_BATCH_COUNT)
 dataset_iterator = None
 dataset_lock = asyncio.Lock()
 
@@ -257,32 +256,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
         await asyncio.to_thread(torch.save, targets_tensor, os.path.join(temp_dir, targets_filename))
         return batch_filename, targets_filename
 
-
-    async def batch_preloader():
-        """Background task to preload batches and enqueue them."""
-        logging.info("Batch preloader started.")
-        try:
-            while True:
-                if preloaded_batches_queue.full():
-                    await asyncio.sleep(0.1)  # Wait until space is available
-                    continue
-                batch_filename, targets_filename = await load_next_batch()
-                if batch_filename is None:
-                    logging.info("No more batches to preload. Exiting batch preloader.")
-                    break
-                await preloaded_batches_queue.put((batch_filename, targets_filename))
-                logging.debug(f"Enqueued batch: {batch_filename}, {targets_filename}")
-                log_memory_usage('Batch preloaded')
-        except asyncio.CancelledError:
-            logging.info("Batch preloader received cancellation signal.")
-            # Perform any necessary cleanup here
-            raise
-        except Exception as e:
-            logging.error(f"Error preloading batch: {e}", exc_info=True)
-            await asyncio.sleep(1)  # Wait before retrying
-        finally:
-            logging.info("Batch preloader has stopped.")
-
     async def initialize_service():
         nonlocal master_public_keys
         logging.info("Initializing distributed environment and tensors")
@@ -301,10 +274,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
         """Hook to run before the app starts serving."""
         logging.info("App is starting to serve.")
         await initialize_service()  # Initialize asynchronously
-        # Initialize the background task if not already initialized
-        if not hasattr(app, 'preloader_task'):
-            app.preloader_task = asyncio.create_task(batch_preloader())
-            logging.debug("Batch preloader task started")
 
     @app.after_serving
     async def after_serving():
@@ -419,17 +388,39 @@ def create_app(public_keys_file, enable_memory_logging=False):
     async def get_batch():
         logging.info("Accessing /get_batch endpoint")
         try:
-            batch_filename, targets_filename = await preloaded_batches_queue.get()
-            if batch_filename is None and targets_filename is None:
-                # No more batches
+            # Retrieve the next batch of token pairs
+            token_pairs = await dataset.__anext__()  # This should return a list of token pairs
+
+            if not token_pairs:
+                logging.info("No more batches available in /get_batch.")
                 return jsonify({'error': 'No more batches available'}), 404
+
+            # Convert token pairs to tensors
+            inputs = [torch.tensor(pair[0], dtype=torch.long) for pair in token_pairs]
+            targets = [torch.tensor(pair[1], dtype=torch.long) for pair in token_pairs]
+
+            # Stack tensors to create batch tensors
+            batch_tensor = torch.stack(inputs)
+            targets_tensor = torch.stack(targets)
+
+            # Save tensors to temporary files asynchronously
+            timestamp = int(time.time())
+            random_suffix = random.randint(1000, 9999)
+            batch_filename = f'batch_{timestamp}_{random_suffix}.pt'
+            targets_filename = f'targets_{timestamp}_{random_suffix}.pt'
+
+            await asyncio.to_thread(torch.save, batch_tensor, os.path.join(temp_dir, batch_filename))
+            await asyncio.to_thread(torch.save, targets_tensor, os.path.join(temp_dir, targets_filename))
+
             logging.info(f"Sending batch: {batch_filename}, targets: {targets_filename}")
+
             return jsonify({
                 'batch_url': f'/data/state/temp/{batch_filename}',
                 'targets_url': f'/data/state/temp/{targets_filename}'
             })
-        except asyncio.CancelledError:
-            raise
+        except StopAsyncIteration:
+            logging.info("Dataset iterator exhausted during /get_batch.")
+            return jsonify({'error': 'No more batches available'}), 404
         except Exception as e:
             logging.error(f"Error in /get_batch: {e}", exc_info=True)
             return jsonify({'error': 'Could not get batch'}), 500
