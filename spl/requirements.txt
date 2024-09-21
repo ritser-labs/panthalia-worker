@@ -1,6 +1,6 @@
 torch
 fairscale
-tiktoken==0.4.0
+tiktoken
 fair
 blobfile
 eth-abi
