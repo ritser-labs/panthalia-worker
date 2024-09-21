@@ -53,21 +53,23 @@ class LanguageDataLoader:
     def __aiter__(self):
         return self
 
+    async def prefetch(self):
+        while True:
+            if len(self.buffer) < self.buffer_size:
+                await self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
+            await asyncio.sleep(0.1)  # Adjust sleep time as needed
+
     async def __anext__(self):
         if not hasattr(self, 'buffer_pos'):
             self.buffer_pos = 0
         if self.buffer_pos >= len(self.buffer):
-            # Buffer exhausted, refill
-            await self.fill_buffer_with_token_pairs(self._text_generator(), self.max_seq_len)
-
-            if not self.buffer:
+            # Wait until prefetching fills the buffer
+            await asyncio.sleep(0.1)
+            if self.buffer_pos >= len(self.buffer):
                 raise StopAsyncIteration
 
-            self.buffer_pos = 0  # Reset buffer position
-
         token_pair = self.buffer[self.buffer_pos]
-        self.buffer_pos += 1  # Move to the next pair
-
+        self.buffer_pos += 1
         return token_pair
 
     async def tokenize_and_split(self, texts, max_seq_len):
