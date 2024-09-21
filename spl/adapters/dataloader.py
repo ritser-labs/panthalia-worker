@@ -10,7 +10,6 @@ import asyncio
 import aiofiles
 import concurrent.futures
 import multiprocessing
-from ..plugin import exported_plugin
 
 dataloader_batch_size = 64
 
