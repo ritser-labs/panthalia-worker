@@ -166,12 +166,9 @@ class LanguageDataLoader:
         random.shuffle(self.buffer)
 
     async def tokenize_and_split(self, texts, max_seq_len):
-        """
-        Tokenize and split texts into tokenized input-target pairs asynchronously.
-        """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, self._tokenize_and_split_sync_batch, texts, max_seq_len
+            executor, self._tokenize_and_split_sync_batch, texts, max_seq_len
         )
 
     def _tokenize_and_split_sync_batch(self, texts, max_seq_len):
@@ -196,7 +193,6 @@ class WikipediaDataLoader(LanguageDataLoader):
         Inherits common functionality from LanguageDataLoader.
         """
         super().__init__(model_config, buffer_size, max_seq_len, batch_size)
-        logging.info("Loading Wikipedia dataset...")
         self.dataset = load_dataset("wikipedia", "20220301.en", split="train", streaming=True)
         self.dataset_iterator = iter(self.dataset)
 
@@ -214,7 +210,6 @@ class FineWebDataLoader(LanguageDataLoader):
         Inherits common functionality from LanguageDataLoader.
         """
         super().__init__(model_config, buffer_size, max_seq_len, batch_size)
-        logging.info("Loading FineWeb dataset...")
         self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True)
         self.dataset_iterator = iter(self.dataset)
 
