@@ -10,6 +10,7 @@ import asyncio
 import aiofiles
 import concurrent.futures
 import multiprocessing
+from common import batch_size
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
@@ -89,7 +90,7 @@ class LanguageDataLoader:
         batch = []
         async for text in text_generator:
             batch.append(text)
-            if len(batch) == self.batch_size:
+            if len(batch) == batch_size:
                 token_pairs = await self.tokenize_and_split(batch, max_seq_len)
                 self.buffer.extend(token_pairs)
                 batch = []
