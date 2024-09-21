@@ -19,23 +19,14 @@ datasets_dir = os.path.join(parent_dir, 'datasets')
 executor = concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count())
 
 
-
-def truncate_tokens(tokens, max_seq_len, pad_token):
-    if len(tokens) < max_seq_len:
-        tokens += [pad_token] * (max_seq_len - len(tokens))
-    elif len(tokens) > max_seq_len:
-        tokens = tokens[:max_seq_len]
-    return tokens
-
-
-def _tokenize_and_split_sync_batch(texts, max_seq_len, tokenizer, pad_id):
+def _tokenize_and_split_sync_batch(texts, max_seq_len, tokenizer):
     """Synchronous batch tokenization function."""
     token_pairs = []
     for text in texts:
         tokens = tokenizer.encode(text)
         # Truncate or pad tokens
         if len(tokens) < max_seq_len:
-            tokens += [pad_id] * (max_seq_len - len(tokens))
+            tokens += [tokenizer.pad_id] * (max_seq_len - len(tokens))
         else:
             tokens = tokens[:max_seq_len]
         
@@ -168,22 +159,8 @@ class LanguageDataLoader:
     async def tokenize_and_split(self, texts, max_seq_len):
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            executor, self._tokenize_and_split_sync_batch, texts, max_seq_len
+            executor, _tokenize_and_split_sync_batch, texts, max_seq_len, self.model_config.tokenizer
         )
-
-    def _tokenize_and_split_sync_batch(self, texts, max_seq_len):
-        """
-        Synchronous function to tokenize and split a batch of texts into input-target pairs.
-        """
-        token_pairs = []
-        for text in texts:
-            tokens = self.model_config.tokenizer.encode(text)
-            tokens = tokens[:max_seq_len] if len(tokens) > max_seq_len else tokens + [self.model_config.tokenizer.pad_id] * (max_seq_len - len(tokens))
-
-            inputs = tokens[:-1]
-            targets = tokens[1:]
-            token_pairs.append((inputs, targets))
-        return token_pairs
 
 
 class WikipediaDataLoader(LanguageDataLoader):
