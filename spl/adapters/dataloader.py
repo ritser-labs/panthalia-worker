@@ -12,7 +12,7 @@ import concurrent.futures
 import multiprocessing
 from ..plugin import exported_plugin
 
-batch_size = exported_plugin.batch_size
+dataloader_batch_size = 64
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
@@ -92,7 +92,7 @@ class LanguageDataLoader:
         batch = []
         async for text in text_generator:
             batch.append(text)
-            if len(batch) == batch_size:
+            if len(batch) == DATALOADERS_BATCH_SIZE:
                 token_pairs = await self.tokenize_and_split(batch, max_seq_len)
                 self.buffer.extend(token_pairs)
                 batch = []
