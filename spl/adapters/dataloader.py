@@ -10,7 +10,9 @@ import asyncio
 import aiofiles
 import concurrent.futures
 import multiprocessing
-from ..common import batch_size
+from ..plugin import exported_plugin
+
+batch_size = exported_plugin.batch_size
 
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
