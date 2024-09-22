@@ -36,7 +36,7 @@ def _tokenize_and_split_sync_batch(texts, max_seq_len, tokenizer):
 
 
 class LanguageDataLoader:
-    def __init__(self, model_config, buffer_size, max_seq_len, batch_size=64):
+    def __init__(self, model_config, buffer_size, max_seq_len, batch_size):
         """
         Generalized class for handling both streaming and file-based datasets.
         Handles tokenization, prefetching, and buffering of text data.
@@ -165,7 +165,7 @@ class LanguageDataLoader:
 
 
 class WikipediaDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size=64):
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size):
         """
         WikipediaDataLoader for loading the Wikipedia dataset.
         Inherits common functionality from LanguageDataLoader.
@@ -184,7 +184,7 @@ class WikipediaDataLoader(LanguageDataLoader):
             yield text
 
 class FineWebDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size=64):
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size):
         """
         FineWebDataLoader for loading the FineWeb dataset.
         Inherits common functionality from LanguageDataLoader.
@@ -204,7 +204,7 @@ class FineWebDataLoader(LanguageDataLoader):
 
 
 class ShakespeareDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, file_path=os.path.join(datasets_dir, 'shakespeare.txt'), block_size=124000, batch_size=64):
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size, file_path=os.path.join(datasets_dir, 'shakespeare.txt'), block_size=124000):
         """
         ShakespeareDataLoader for loading text data from a file.
         Inherits common functionality from LanguageDataLoader.
