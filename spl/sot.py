@@ -706,7 +706,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             # Use send_from_directory for reliable and efficient file serving
             return await send_from_directory(
                 directory=state_dir,
-                path=f'{tensor_name}_{latest_version_number}.pt',
+                file_name=f'{tensor_name}_{latest_version_number}.pt',
                 mimetype='application/octet-stream',
                 headers=headers,
                 as_attachment=True  # Optional: forces download
@@ -770,7 +770,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             # Use send_from_directory to handle file streaming and headers
             return await send_from_directory(
                 directory=temp_dir,
-                path=filename,
+                file_name=filename,
                 mimetype='application/octet-stream',
                 headers=headers,
                 as_attachment=True  # Optional: forces download
