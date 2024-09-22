@@ -265,7 +265,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             master_public_keys = json.loads(await f.read())
         model_adapter.initialize_environment('gloo')
         await initialize_all_tensors()
-        dataset.init_dataset()
+        dataset.initialize_dataset()
         logging.info(f'Loading initial batches for service')
 
         log_memory_usage('After initializing service')

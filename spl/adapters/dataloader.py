@@ -13,7 +13,6 @@ import logging
 # Initialize global variables
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
-executor = concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count())
 
 def _tokenize_and_split_sync_batch(text, max_seq_len, tokenizer):
     """
@@ -74,6 +73,7 @@ class LanguageDataLoader:
         self._stop_event = asyncio.Event()  # Event to signal stopping the buffer filler
         self._filler_task = None  # Background buffer filler task
         self._token_pair_buffer = []  # Temporary buffer to accumulate token pairs
+        self.executor = None  # Executor will be initialized later
 
     async def _buffer_filler(self):
         """
@@ -99,7 +99,6 @@ class LanguageDataLoader:
 
                     # Add token pairs to the temporary buffer
                     self._token_pair_buffer.extend(token_pairs)
-                    #logging.debug(f"Accumulated {len(token_pairs)} token pairs. Total in buffer: {len(self._token_pair_buffer)}")
 
                 # Form a batch from the accumulated token pairs
                 batch = self._token_pair_buffer[:self.batch_size]
@@ -122,7 +121,6 @@ class LanguageDataLoader:
         """
         try:
             text = await self._text_generator().__anext__()
-            #logging.debug("Fetched a new text from generator.")
             return text
         except StopAsyncIteration:
             logging.info("Text generator exhausted. Waiting for more data...")
@@ -218,15 +216,17 @@ class LanguageDataLoader:
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            executor, _tokenize_and_split_sync_batch, text, max_seq_len, self.model_config.tokenizer
+            self.executor, _tokenize_and_split_sync_batch, text, max_seq_len, self.model_config.tokenizer
         )
 
-    def init_dataset(self):
+    def initialize_dataset(self):
         """
-        Abstract method to initialize the dataset.
-        Should be implemented by subclasses.
+        Initializes the dataset and sets up the executor for processing.
+        To be implemented by subclasses.
         """
-        raise NotImplementedError("Subclasses should implement this method.")
+        if self.executor is None:
+            self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count())
+        self._filler_task = asyncio.create_task(self._buffer_filler())
 
     def stop(self):
         """
@@ -252,13 +252,13 @@ class WikipediaDataLoader(LanguageDataLoader):
         self.dataset = None
         self.dataset_iterator = None
 
-    def init_dataset(self):
+    def initialize_dataset(self):
         """
         Initialize the Wikipedia streaming dataset and its iterator.
         """
+        super().initialize_dataset()
         self.dataset = load_dataset("wikipedia", "20220301.en", split="train", streaming=True).shuffle()
         self.dataset_iterator = iter(self.dataset)
-        self._filler_task = asyncio.create_task(self._buffer_filler())
 
     async def _text_generator(self):
         """
@@ -283,13 +283,13 @@ class FineWebDataLoader(LanguageDataLoader):
         self.dataset = None
         self.dataset_iterator = None
 
-    def init_dataset(self):
+    def initialize_dataset(self):
         """
         Initialize the FineWeb streaming dataset and its iterator.
         """
+        super().initialize_dataset()
         self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True).shuffle()
         self.dataset_iterator = iter(self.dataset)
-        self._filler_task = asyncio.create_task(self._buffer_filler())
 
     async def _text_generator(self):
         """
