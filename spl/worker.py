@@ -540,7 +540,7 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
                     params={'tensor_name': tensor_name}
                 ) as response:
                     response.raise_for_status()
-                    version_number = (await response.json())['version_number']
+                    version_number = (await response.json())['X-Version-Number']
                     logging.debug(f"Received version_number: {version_number}")
         except aiohttp.ClientError as e:
             logging.error(f"Error fetching current_timestamp: {e}")
