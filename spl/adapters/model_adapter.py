@@ -268,6 +268,10 @@ class LlamaModelAdapter(TransformerModelAdapter, FairscaleModelAdapter):
 
 class NanoGPTModelAdapter(TransformerModelAdapter):
     def forward_and_loss(self, model, inputs, targets):
+        logging.debug(f'Inputs: {inputs}')
+        logging.debug(f'Targets: {targets}')
+        logging.debug(f'Shape of inputs: {inputs.shape}')
+        logging.debug(f'Shape of targets: {targets.shape}')
         return model.forward(inputs, targets)[1]
     
     def forward(self, model, inputs):

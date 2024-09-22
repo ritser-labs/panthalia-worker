@@ -77,6 +77,8 @@ class LanguageDataLoader:
         token_pairs = self.buffer[self.buffer_pos:self.buffer_pos + batch_size]
         self.buffer_pos += batch_size
 
+        logging.debug(f"Returning batch of size {len(token_pairs)}. Remaining buffer size: {len(self.buffer) - self.buffer_pos}")
+
         return token_pairs  # Returning a list of token pairs
 
     async def _text_generator(self):
