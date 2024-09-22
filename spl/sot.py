@@ -747,10 +747,17 @@ def create_app(public_keys_file, enable_memory_logging=False):
         size = tensor.numel()
         return jsonify({'size': size})
 
-    @app.route('/data/state/<path:filename>', methods=['GET'])
+    @app.route('/data/state/temp/<path:filename>', methods=['GET'])
     async def get_data_file(filename):
         logging.info(f"Accessing file: {filename}")
-        file_path = os.path.join(state_dir, filename)
+
+        # Build the full path including subdirectories within the temp directory
+        file_path = os.path.join(temp_dir, filename)
+
+        # Ensure the requested file is inside the temp directory to prevent directory traversal
+        if not os.path.abspath(file_path).startswith(os.path.abspath(temp_dir)):
+            logging.error(f"Attempted directory traversal attack with path: {file_path}")
+            return jsonify({'error': 'File not found or access denied'}), 403
 
         if not os.path.exists(file_path):
             logging.error(f"File not found: {file_path}")
@@ -762,7 +769,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             }
             # Use send_from_directory to handle file streaming and headers
             return await send_from_directory(
-                directory=state_dir,
+                directory=temp_dir,
                 path=filename,
                 mimetype='application/octet-stream',
                 headers=headers,
