@@ -24,11 +24,16 @@ model_config = NanoGPTConfig(tokenizer, model_params)
 
 model_adapter = NanoGPTModelAdapter(model_config)
 
-dataset = FineWebDataLoader(model_config, buffer_size=100, max_seq_len=model_params.block_size)
-
 NUM_STEPS = 500
 
 EXAMPLES_PER_STEP = 14
+
+dataset = FineWebDataLoader(
+    model_config,
+    buffer_size=100,
+    batch_size=NUM_STEPS * EXAMPLES_PER_STEP,
+    max_seq_len=model_params.block_size
+)
 
 exported_plugin = StandardPlugin(
     model_adapter,

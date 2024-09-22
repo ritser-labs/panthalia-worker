@@ -12,8 +12,6 @@ import concurrent.futures
 import multiprocessing
 import logging
 
-DATALOADER_BATCH_SIZE = 64
-
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
 executor = concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count())
