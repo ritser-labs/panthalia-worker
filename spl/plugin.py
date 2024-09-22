@@ -1,21 +1,21 @@
-from .adapters.dataloader import ShakespeareDataLoader
+from .adapters.dataloader import FineWebDataLoader
 from .adapters.model_config import NanoGPTConfig
 from .adapters.models.nanogpt import GPT, GPTConfig
 from .adapters.model_adapter import NanoGPTModelAdapter
 from .adapters.plugins import StandardPlugin
-from .tokenizer import CharacterLevelTokenizer
+from .tokenizer import GPT2Tokenizer
 import math
 import os
 
-tokenizer = CharacterLevelTokenizer()
+tokenizer = GPT2Tokenizer()
 
 model_params = GPTConfig(
-    block_size=256,
+    block_size=1024,
     vocab_size=tokenizer.get_vocab_size(),
-    n_layer=6,
-    n_head=6,
-    n_embd=384,
-    dropout=0.2,
+    n_layer=12,
+    n_head=12,
+    n_embd=768,
+    dropout=0.0,
     bias=False,
     pad_token_id=tokenizer.pad_id
 )
@@ -24,15 +24,15 @@ model_config = NanoGPTConfig(tokenizer, model_params)
 
 model_adapter = NanoGPTModelAdapter(model_config)
 
-NUM_STEPS = 285
+NUM_STEPS = 500
 
-EXAMPLES_PER_STEP = 64
+EXAMPLES_PER_STEP = 14
 
-dataset = ShakespeareDataLoader(
+dataset = FineWebDataLoader(
     model_config,
-    buffer_size=100_000,
-    max_seq_len=model_params.block_size,
-    batch_size=NUM_STEPS * EXAMPLES_PER_STEP
+    buffer_size=100,
+    batch_size=NUM_STEPS * EXAMPLES_PER_STEP,
+    max_seq_len=model_params.block_size
 )
 
 exported_plugin = StandardPlugin(
@@ -45,11 +45,12 @@ exported_plugin = StandardPlugin(
     outer_max_lr=1,
     outer_min_lr=1,
     outer_weight_decay=0.0,
-    tensor_version_interval=36,
-    expected_worker_time=31,
+    tensor_version_interval=250,
+    expected_worker_time=240,
     max_concurrent_iterations=4,
-    inner_max_lr=0.001,
-    inner_min_lr=0.0001,
+    inner_max_lr=6e-4,
+    inner_min_lr=6e-4,
     inner_T_0=200,
+    inner_weight_decay=0.1,
     preload_batch_count=4
 )
