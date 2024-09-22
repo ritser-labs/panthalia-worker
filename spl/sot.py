@@ -31,7 +31,8 @@ from .common import (
     dataset,
     SOT_PRIVATE_PORT,
     get_future_version_number,
-    PRELOAD_BATCH_COUNT
+    PRELOAD_BATCH_COUNT,
+    CHUNK_SIZE
 )
 from .device import device
 
@@ -696,12 +697,12 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         try:
             file_size = os.path.getsize(state_file_path)
-            logging.debug(f"File size for {tensor_name}: {file_size / (1024 * 1024):.2f} MB")
+            logging.debug(f"File size for {tensor_name}: {file_size / (CHUNK_SIZE):.2f} MB")
 
             async def stream_file(file_path):
                 async with aiofiles.open(file_path, 'rb') as f:
                     while True:
-                        chunk = await f.read(1024 * 1024)  # Stream in 1MB chunks
+                        chunk = await f.read(CHUNK_SIZE)  # Stream in 1MB chunks
                         if not chunk:
                             break
                         yield chunk

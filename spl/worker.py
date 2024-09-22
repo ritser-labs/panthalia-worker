@@ -15,7 +15,8 @@ from .common import (
     Task, TaskStatus, model_adapter, load_abi, upload_tensor,
     get_current_version_number, async_transact_with_contract_function,
     expected_worker_time, TENSOR_NAME, PoolState, approve_token_once,
-    deposit_stake_without_approval, get_future_version_number
+    deposit_stake_without_approval, get_future_version_number,
+    CHUNK_SIZE
 )
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 from typing import Optional, Tuple
@@ -570,7 +571,7 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
 
                     # Use the shared function to download with timeout
                     download_start_time = time.time()
-                    tensor_bytes = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout)
+                    tensor_bytes = await download_with_timeout(response, chunk_size=CHUNK_SIZE, chunk_timeout=chunk_timeout)
                     download_end_time = time.time()
                     logging.debug(f"Downloaded in {download_end_time - download_start_time:.2f} seconds")
 
