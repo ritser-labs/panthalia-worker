@@ -30,7 +30,7 @@ EXAMPLES_PER_STEP = 14
 
 dataset = FineWebDataLoader(
     model_config,
-    buffer_size=100,
+    buffer_size=16,
     batch_size=NUM_STEPS * EXAMPLES_PER_STEP,
     max_seq_len=model_params.block_size
 )
