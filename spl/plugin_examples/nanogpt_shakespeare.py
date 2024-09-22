@@ -30,7 +30,7 @@ EXAMPLES_PER_STEP = 64
 
 dataset = ShakespeareDataLoader(
     model_config,
-    buffer_size=100_000,
+    buffer_size=16,
     max_seq_len=model_params.block_size,
     batch_size=NUM_STEPS * EXAMPLES_PER_STEP
 )
