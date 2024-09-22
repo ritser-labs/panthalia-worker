@@ -3,7 +3,7 @@ from collections import defaultdict
 import os
 import json
 import logging
-from quart import Quart, request, jsonify, send_file, Response, after_this_request
+from quart import Quart, request, jsonify, send_file, Response, after_this_request, send_from_directory
 import torch
 from io import BytesIO
 import aiohttp
@@ -699,20 +699,18 @@ def create_app(public_keys_file, enable_memory_logging=False):
             file_size = os.path.getsize(state_file_path)
             logging.debug(f"File size for {tensor_name}: {file_size / (CHUNK_SIZE):.2f} MB")
 
-            async def stream_file(file_path):
-                async with aiofiles.open(file_path, 'rb') as f:
-                    while True:
-                        chunk = await f.read(CHUNK_SIZE)  # Stream in 1MB chunks
-                        if not chunk:
-                            break
-                        yield chunk
-
             headers = {
-                'Content-Length': str(file_size),
                 'version_number': str(latest_version_number)
             }
 
-            return Response(stream_file(state_file_path), headers=headers, mimetype='application/octet-stream')
+            # Use send_from_directory for reliable and efficient file serving
+            return await send_from_directory(
+                directory=state_dir,
+                path=f'{tensor_name}_{latest_version_number}.pt',
+                mimetype='application/octet-stream',
+                headers=headers,
+                as_attachment=True  # Optional: forces download
+            )
 
         except Exception as e:
             logging.error(f"Error in /latest_state: {e}", exc_info=True)
@@ -759,18 +757,17 @@ def create_app(public_keys_file, enable_memory_logging=False):
             return jsonify({'error': 'File not found'}), 404
 
         try:
-            async def stream_file(file_path):
-                async with aiofiles.open(file_path, 'rb') as f:
-                    while True:
-                        chunk = await f.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        yield chunk
             headers = {
                 'Content-Length': str(os.path.getsize(file_path))
             }
-            # Use send_file to handle file streaming and headers
-            return Response(stream_file(file_path), headers=headers, mimetype='application/octet-stream')
+            # Use send_from_directory to handle file streaming and headers
+            return await send_from_directory(
+                directory=state_dir,
+                path=filename,
+                mimetype='application/octet-stream',
+                headers=headers,
+                as_attachment=True  # Optional: forces download
+            )
         except Exception as e:
             logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
             return jsonify({'error': 'File not found or could not be read'}), 404
