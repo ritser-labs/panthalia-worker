@@ -294,8 +294,6 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1, copy
                     else:
                         logging.error(f"Failed to create remote copy: {stderr.read().decode()}")
 
-                    break  # Exit the loop after the first full copy
-
                 else:
                     logging.error(f"Invalid copy mode: {copy_mode}")
                     break
