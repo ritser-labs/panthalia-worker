@@ -256,7 +256,7 @@ class WikipediaDataLoader(LanguageDataLoader):
         """
         Initialize the Wikipedia streaming dataset and its iterator.
         """
-        self.dataset = load_dataset("wikipedia", "20220301.en", split="train", streaming=True)
+        self.dataset = load_dataset("wikipedia", "20220301.en", split="train", streaming=True).shuffle()
         self.dataset_iterator = iter(self.dataset)
         self._filler_task = asyncio.create_task(self._buffer_filler())
 
@@ -287,7 +287,7 @@ class FineWebDataLoader(LanguageDataLoader):
         """
         Initialize the FineWeb streaming dataset and its iterator.
         """
-        self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True)
+        self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True).shuffle()
         self.dataset_iterator = iter(self.dataset)
         self._filler_task = asyncio.create_task(self._buffer_filler())
 
