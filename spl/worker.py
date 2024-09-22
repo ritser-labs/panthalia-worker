@@ -349,8 +349,10 @@ async def process_tasks():
                 # Upload the result asynchronously with priority based on time_status_changed
                 await upload_lock.acquire(priority=time_status_changed)
                 try:
+                    upload_start_time = time.time()
                     result = await upload_results(version_number, updates, loss)
-                    logging.info(f"{task_id}: Uploaded results for task {task_id}")
+                    upload_end_time = time.time()
+                    logging.info(f"{task_id}: Uploaded results for task {task_id} in {upload_end_time - upload_start_time:.2f} seconds")
                 finally:
                     await upload_lock.release()
             except Exception as e:
@@ -567,7 +569,10 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
                     response.raise_for_status()
 
                     # Use the shared function to download with timeout
+                    download_start_time = time.time()
                     tensor_bytes = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout)
+                    download_end_time = time.time()
+                    logging.debug(f"Downloaded in {download_end_time - download_start_time:.2f} seconds")
 
                     tensor = torch.load(tensor_bytes)
                     model = model_adapter.tensor_to_model(tensor.detach(), latest_model)
