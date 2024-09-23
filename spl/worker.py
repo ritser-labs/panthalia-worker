@@ -568,7 +568,7 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url, params={'tensor_name': tensor_name}) as response:
                     response.raise_for_status()
-                    version_number = response.headers.get('X-Version-Number')
+                    version_number = int(response.headers.get('X-Version-Number'))
 
                     # Use the shared function to download with timeout
                     download_start_time = time.time()
