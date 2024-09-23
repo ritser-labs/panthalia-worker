@@ -663,7 +663,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     @app.route('/latest_state', methods=['GET'])
     async def latest_state():
-        response.timeout = SOT_TIMEOUT
+        request.timeout = SOT_TIMEOUT
         logging.info("Accessing /latest_state endpoint")
         tensor_name = request.args.get('tensor_name')
         logging.debug(f"Received tensor_name: '{tensor_name}'")
