@@ -31,21 +31,23 @@ def _tokenize_and_split_sync_batch(text, max_seq_len, tokenizer):
     total_tokens = len(tokens)
 
     # Calculate number of samples, ensure at least 1
-    num_samples = max(1, (total_tokens + max_seq_len - 1) // max_seq_len)
+    num_samples = max(1, total_tokens // max_seq_len)
+
+    # Define the desired length of the sample (max_seq_len + 1)
+    desired_sample_len = max_seq_len + 1
 
     for i in range(num_samples):
         start = i * max_seq_len
-        end = start + max_seq_len
+        end = start + desired_sample_len  # Ensure we get max_seq_len + 1 tokens
         sample_tokens = tokens[start:end]
 
-        # Ensure the sample has exactly max_seq_len tokens
-        if len(sample_tokens) < max_seq_len:
-            sample_tokens += [tokenizer.pad_id] * (max_seq_len - len(sample_tokens))
-        else:
-            sample_tokens = sample_tokens[:max_seq_len]
+        # Ensure the sample has exactly desired_sample_len tokens
+        if len(sample_tokens) < desired_sample_len:
+            sample_tokens += [tokenizer.pad_id] * (desired_sample_len - len(sample_tokens))
 
-        inputs = sample_tokens[:-1]
-        targets = sample_tokens[1:]
+        # Inputs are the first max_seq_len tokens, targets are the next max_seq_len tokens
+        inputs = sample_tokens[:max_seq_len]
+        targets = sample_tokens[1:desired_sample_len]
         token_pairs.append((inputs, targets))
 
     return token_pairs
