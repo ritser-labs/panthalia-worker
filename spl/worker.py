@@ -171,7 +171,7 @@ async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_typ
     for attempt in range(1, retries + 1):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params) as response:
+                async with session.get(url, params=params) as response:
                     response.raise_for_status()
 
                     if download_type == 'tensor':
