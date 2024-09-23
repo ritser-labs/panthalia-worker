@@ -61,7 +61,7 @@ used_nonces_file_lock = FileLock(os.path.join(state_dir, 'used_nonces.json.lock'
 # Initialize locks for thread safety
 latest_loss_lock = asyncio.Lock()
 
-SOT_FETCH_TIMEOUT = 300  # Timeout for fetching data from the SOT service
+SOT_TIMEOUT = 3600
 
 # Initialize logging
 logging.basicConfig(
@@ -296,18 +296,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
     async def health_check():
         log_memory_usage('Health check endpoint')
         return jsonify({'status': 'healthy'}), 200
-
-    async def fetch(session, url):
-        log_memory_usage('Before fetching URL')
-        try:
-            async with session.get(url, timeout=SOT_FETCH_TIMEOUT) as response:
-                response.raise_for_status()
-                return await response.read()
-        except aiohttp.ClientError as e:
-            logging.error(f"Error fetching {url}: {e}")
-            raise
-        finally:
-            log_memory_usage('After fetching URL')
 
     def verify_signature(message, signature):
         nonlocal master_public_keys
@@ -675,6 +663,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     @app.route('/latest_state', methods=['GET'])
     async def latest_state():
+        response.timeout = SOT_TIMEOUT
         logging.info("Accessing /latest_state endpoint")
         tensor_name = request.args.get('tensor_name')
         logging.debug(f"Received tensor_name: '{tensor_name}'")
@@ -711,6 +700,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             ))
 
             response.headers['X-Version-Number'] = str(latest_version_number)
+            response.timeout = SOT_TIMEOUT
 
             return response
 
@@ -751,6 +741,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     @app.route('/data/state/temp/<path:filename>', methods=['GET'])
     async def get_data_file(filename):
+        request.timeout = SOT_TIMEOUT
         logging.info(f"Accessing file: {filename}")
 
         # Build the full path including subdirectories within the temp directory
@@ -767,19 +758,21 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         try:
             # Use send_from_directory to handle file streaming and headers
-            return await send_from_directory(
+            response = await make_response(await send_from_directory(
                 directory=temp_dir,
                 file_name=filename,
                 mimetype='application/octet-stream',
                 as_attachment=True  # Optional: forces download
-            )
+            ))
+            response.timeout = SOT_TIMEOUT
+            return response
         except Exception as e:
             logging.error(f"Error accessing file {filename}: {e}", exc_info=True)
             return jsonify({'error': 'File not found or could not be read'}), 404
 
     @app.route('/upload_tensor', methods=['POST'])
     async def upload_tensor():
-        request.timeout = 3600  # Set the timeout to 1 hour
+        request.timeout = SOT_TIMEOUT
         request_files = await request.files
         if 'tensor' not in request_files:
             return jsonify({'error': 'No tensor file provided'}), 400
