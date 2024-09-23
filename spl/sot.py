@@ -521,6 +521,9 @@ def create_app(public_keys_file, enable_memory_logging=False):
         return old_block_timestamp
 
     async def cleanup_old_timestamp(tensor_name, old_block_timestamp):
+        new_block_timestamp = block_timestamps.get(tensor_name, 0)
+        if old_block_timestamp == new_block_timestamp:
+            return
         if old_block_timestamp is not None:
             # Define the file paths
             file_paths = [
