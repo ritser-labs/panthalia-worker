@@ -72,7 +72,8 @@ upload_lock = AsyncQueuedLock()
 # Initialize a lock to prioritize tensor downloads
 tensor_download_lock = asyncio.Lock()
 
-batch_download_lock = asyncio.Lock()
+# Initialize an event to signal tensor download in progress
+tensor_download_event = asyncio.Event()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
@@ -175,13 +176,18 @@ async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_typ
                     if download_type == 'tensor':
                         # Acquire tensor_download_lock to prioritize tensor downloads
                         async with tensor_download_lock:
-                            content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout)
+                            # Signal that a tensor download is in progress
+                            tensor_download_event.set()
+                            try:
+                                content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout, download_type=download_type)
+                            finally:
+                                # Clear the event after tensor download is complete
+                                tensor_download_event.clear()
                     elif download_type == 'batch_targets':
                         # Wait for any ongoing tensor download to finish
-                        async with batch_download_lock:
-                            async with tensor_download_lock:
-                                pass  # Simply wait until tensor_download_lock is free
-                            content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout)
+                        async with tensor_download_lock:
+                            pass  # Simply wait until tensor_download_lock is free
+                        content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout, download_type=download_type)
                     else:
                         raise ValueError("Invalid download_type specified.")
 
@@ -440,7 +446,7 @@ async def reclaim_stakes():
                     logging.error(f"Error resolving task {task_id}: {e}")
                     # Depending on requirements, you might want to continue instead of raising
                     # raise
-    
+
         await asyncio.sleep(2)
 
 async def sync_tensors(contract_index):
@@ -482,15 +488,17 @@ async def report_sync_status():
 def time_until_next_version():
     return get_future_version_number() - time.time()
 
-async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=5):
+async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=5, download_type='batch_targets'):
     """
     Downloads data from the response stream with a timeout for each chunk.
-    
+    Pauses if a tensor download is in progress.
+
     Args:
         response: The aiohttp response object.
         chunk_size: The size of each chunk to download.
         chunk_timeout: Timeout for each chunk in seconds.
-    
+        download_type: Type of download ('tensor' or 'batch_targets').
+
     Returns:
         A BytesIO object containing the downloaded data.
     """
@@ -516,11 +524,17 @@ async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=
         except asyncio.TimeoutError:
             logging.error(f"Chunk download timed out after {chunk_timeout} seconds")
             raise
-        
+
         if not chunk:
             # No more chunks left to download
             logging.debug("No more chunks to download. Download finished.")
             break
+
+        # If it's a batch_targets download, check if a tensor download is in progress
+        if download_type == 'batch_targets' and tensor_download_event.is_set():
+            logging.debug("Tensor download started. Pausing batch/targets download.")
+            await tensor_download_event.wait()  # Wait until tensor download is complete
+            logging.debug("Resuming batch/targets download.")
 
         content.write(chunk)
         downloaded_size += len(chunk)
