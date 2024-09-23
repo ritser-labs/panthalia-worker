@@ -520,7 +520,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             update_timestamp_lock.release()
         return old_block_timestamp
 
-    async def cleanup_old_timestamp(tensor_name, old_block_timestamp):
+    async def cleanup_old_timestamp(tensor_name, old_block_timestamp, block_timestamps):
         new_block_timestamp = block_timestamps.get(tensor_name, 0)
         if old_block_timestamp == new_block_timestamp:
             return
@@ -540,7 +540,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     async def update_cleanup_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         old_block_timestamp = await update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number)
-        await cleanup_old_timestamp(tensor_name, old_block_timestamp)
+        await cleanup_old_timestamp(tensor_name, old_block_timestamp, block_timestamps)
 
     def get_local_file_path(url, request):
         if not url.startswith(f"http://{request.host}/data/state/"):
@@ -648,7 +648,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             os.rename(future_tensor_temp_path, future_tensor_path)
             os.rename(future_tensor_adam_m_temp_path, future_tensor_adam_m_path)
 
-            await cleanup_old_timestamp(tensor_name, old_block_timestamp)
+            await cleanup_old_timestamp(tensor_name, old_block_timestamp, block_timestamps)
             # Cleanup old accumulated grads tensors
             for filename in os.listdir(state_dir):
                 if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
