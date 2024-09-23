@@ -153,7 +153,7 @@ class TaskQueue:
 
 task_queue = TaskQueue()
 
-async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_type='batch_targets'):
+async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_type='batch_targets', tensor_name=None):
     """
     Downloads a file with retry logic and prioritizes tensor downloads over batch/targets downloads.
     
@@ -167,10 +167,11 @@ async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_typ
     Returns:
         torch.Tensor: The downloaded tensor.
     """
+    params = {'tensor_name': tensor_name} if tensor_name else None
     for attempt in range(1, retries + 1):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
+                async with session.get(url, params) as response:
                     response.raise_for_status()
 
                     if download_type == 'tensor':
@@ -603,7 +604,7 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
             fetch_start_time = time.time()
 
             # Use the modified download_file with download_type='tensor'
-            tensor = await download_file(url, download_type='tensor')
+            tensor = await download_file(url, tensor_name=tensor_name, download_type='tensor')
             download_end_time = time.time()
             logging.debug(f"Downloaded in {download_end_time - fetch_start_time:.2f} seconds")
 
