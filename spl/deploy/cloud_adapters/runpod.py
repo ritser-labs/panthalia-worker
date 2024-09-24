@@ -9,6 +9,7 @@ from ..util import is_port_open
 import json
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 runpod.api_key = RUNPOD_API_KEY
 INPUT_JSON_PATH = '/tmp/input.json'
@@ -60,7 +61,31 @@ def generate_deploy_cpu_pod_mutation(
         support_public_ip=True,
         cloud_type='SECURE'
     ):
+    """
+    Generates a GraphQL mutation string for deploying a CPU pod with detailed configurations.
+
+    Args:
+        name (str): The name of the pod.
+        image (str): The Docker image to use.
+        instance_id (str): The CPU instance ID.
+        env (dict): Environment variables.
+        ports (str or None): Ports to expose, e.g., "8888/http,666/tcp".
+        template_id (str or None): Template ID for pod deployment.
+        container_disk_in_gb (int): Disk size for the container.
+        support_public_ip (bool): Whether to support a public IP.
+        cloud_type (str): Cloud type, e.g., "SECURE".
+        min_download (int): Minimum download bandwidth.
+        min_upload (int): Minimum upload bandwidth.
+        min_disk (int): Minimum disk size.
+        min_memory_in_gb (int): Minimum memory in GB.
+        min_vcpu_count (int): Minimum vCPU count.
+
+    Returns:
+        str: The GraphQL mutation string.
+    """
     input_fields = []
+
+    # Required Fields
     input_fields.append(f'name: "{name}"')
     if image is not None:
         input_fields.append(f'image: "{image}"')
@@ -97,44 +122,528 @@ def generate_deploy_cpu_pod_mutation(
         }}
     }}
     """
+    return mutation
+
+def generate_pod_deploy_mutation(
+        name,
+        image,
+        gpu_type_id,
+        gpu_count,
+        support_public_ip,
+        ports,
+        env,
+        template_id,
+        container_disk_in_gb,
+        cloud_type,
+        min_download,
+        min_upload,
+        min_disk,
+        min_memory_in_gb,
+        min_vcpu_count,
+        instance_ids=None,
+        start_ssh: bool = True,
+        volume_mount_path='/runpod-volume',
+        volume_in_gb=0
+    ):
+    """
+    Generates a GraphQL mutation string for deploying a GPU pod with detailed configurations.
+
+    Args:
+        name (str): The name of the pod.
+        image (str): The Docker image to use.
+        gpu_type_id (str): The GPU type ID.
+        gpu_count (int): Number of GPUs.
+        support_public_ip (bool): Whether to support a public IP.
+        ports (str or None): Ports to expose, e.g., "8888/http,666/tcp".
+        env (dict): Environment variables.
+        template_id (str or None): Template ID for pod deployment.
+        container_disk_in_gb (int): Disk size for the container.
+        cloud_type (str): Cloud type, e.g., "SECURE".
+        min_download (int): Minimum download bandwidth.
+        min_upload (int): Minimum upload bandwidth.
+        min_disk (int): Minimum disk size.
+        min_memory_in_gb (int): Minimum memory in GB.
+        min_vcpu_count (int): Minimum vCPU count.
+        instance_ids (list or None): List of CPU instance IDs (if applicable).
+
+    Returns:
+        str: The GraphQL mutation string.
+    """
+    input_fields = []
+
+    # Required Fields
+    input_fields.append(f'name: "{name}"')
+    input_fields.append(f'imageName: "{image}"')
+    input_fields.append(f'gpuTypeId: "{gpu_type_id}"')
+    input_fields.append(f'cloudType: {cloud_type}')
+    if start_ssh:
+        input_fields.append('startSsh: true')
+    input_fields.append(f'supportPublicIp: {str(support_public_ip).lower()}')
+    input_fields.append(f'gpuCount: {gpu_count}')
+    if volume_in_gb is not None:
+        input_fields.append(f"volumeInGb: {volume_in_gb}")
+
+    # Container Disk
+    if container_disk_in_gb is not None:
+        input_fields.append(f"containerDiskInGb: {container_disk_in_gb}")
+    # Ports
+    if ports:
+        ports = ports.replace(" ", "")
+        input_fields.append(f'ports: "{ports}"')
+    if volume_mount_path is not None:
+        input_fields.append(f'volumeMountPath: "{volume_mount_path}"')
+
+
+    # Environment Variables
+    if env is not None:
+        env_string = ", ".join(
+            [f'{{ key: "{key}", value: "{value}" }}' for key, value in env.items()])
+        input_fields.append(f"env: [{env_string}]")
+
+    # Template ID
+    if template_id:
+        input_fields.append(f'templateId: "{template_id}"')
+
+    # Instance IDs (if any)
+    if instance_ids:
+        instance_ids_str = ", ".join([f'"{iid}"' for iid in instance_ids])
+        input_fields.append(f'instanceIds: [{instance_ids_str}]')
+    
+    # Minimum Requirements
+    if min_download is not None:
+        input_fields.append(f"minDownload: {min_download}")
+    if min_upload is not None:
+        input_fields.append(f"minUpload: {min_upload}")
+    if min_disk is not None:
+        input_fields.append(f"minDisk: {min_disk}")
+    if min_memory_in_gb is not None:
+        input_fields.append(f"minMemoryInGb: {min_memory_in_gb}")
+    if min_vcpu_count is not None:
+        input_fields.append(f"minVcpuCount: {min_vcpu_count}")
+
+    # Assemble the input string
+    input_string = ", ".join(input_fields)
+
+    mutation = f"""
+    mutation {{
+      podFindAndDeployOnDemand(
+        input: {{
+          {input_string}
+        }}
+      ) {{
+        id
+        desiredStatus
+        imageName
+        env
+        machineId
+        machine {{
+          podHostId
+        }}
+      }}
+    }}
+    """
+    return mutation
 
 async def create_cpu_pod(
-    name, image, instance_id, env={}, ports=None, template_id=None, container_disk_in_gb=10, support_public_ip=True, cloud_type='SECURE'
+    name, image, instance_id, env={}, ports=None, template_id=None,
+    container_disk_in_gb=10, support_public_ip=True, cloud_type='SECURE'
 ):
+    """
+    Creates a CPU pod by sending the deployCpuPod mutation directly.
+
+    Args:
+        name (str): The name of the pod.
+        image (str): The Docker image to use.
+        instance_id (str): The CPU instance ID.
+        env (dict, optional): Environment variables. Defaults to {}.
+        ports (str, optional): Ports to expose. Defaults to None.
+        template_id (str, optional): Template ID for pod deployment. Defaults to None.
+        container_disk_in_gb (int, optional): Disk size for the container. Defaults to 10.
+        support_public_ip (bool, optional): Whether to support a public IP. Defaults to True.
+        cloud_type (str, optional): Cloud type. Defaults to 'SECURE'.
+        min_download (int, optional): Minimum download bandwidth. Defaults to 100.
+        min_upload (int, optional): Minimum upload bandwidth. Defaults to 100.
+        min_disk (int, optional): Minimum disk size. Defaults to 50.
+        min_memory_in_gb (int, optional): Minimum memory in GB. Defaults to 8.
+        min_vcpu_count (int, optional): Minimum vCPU count. Defaults to 2.
+
+    Returns:
+        dict: The newly created pod information.
+
+    Raises:
+        Exception: If the pod deployment fails.
+    """
+    private_key_path, public_key_str = await generate_ssh_key_pair()
+    env = env.copy()  # Avoid mutating the original env
+    env['PUBLIC_KEY'] = public_key_str  # Add public key to environment variables
+
+    # Generate the GraphQL mutation for CPU pod
     mutation = generate_deploy_cpu_pod_mutation(
-        name, image, instance_id, env, ports, template_id, container_disk_in_gb, support_public_ip, cloud_type
+        name=name,
+        image=image,
+        instance_id=instance_id,
+        env=env,
+        ports=ports,
+        template_id=template_id,
+        container_disk_in_gb=container_disk_in_gb,
+        support_public_ip=support_public_ip,
+        cloud_type=cloud_type
     )
 
-    # Run the blocking API call in a thread
-    raw_response = await asyncio.get_event_loop().run_in_executor(executor, lambda: runpod.api.graphql.run_graphql_query(mutation))
-    cleaned_response = raw_response["data"]["deployCpuPod"]
-    return cleaned_response
+    logging.info(f"Deploying CPU pod '{name}' with mutation:\n{mutation}")
+
+    try:
+        # Send the mutation using runpod's GraphQL API
+        raw_response = await asyncio.get_event_loop().run_in_executor(
+            executor,
+            lambda: runpod.api.graphql.run_graphql_query(mutation)
+        )
+
+        # Check for errors in the response
+        if 'errors' in raw_response:
+            error_messages = "; ".join([error['message'] for error in raw_response['errors']])
+            raise Exception(f"GraphQL Error: {error_messages}")
+
+        # Extract the pod information from the response
+        new_pod = raw_response["data"]["deployCpuPod"]
+        pod_id = new_pod['id']
+        logging.info(f"CPU Pod '{name}' created with ID: {pod_id}")
+
+        return new_pod, private_key_path
+
+    except Exception as e:
+        logging.error(f"Failed to deploy CPU pod '{name}': {e}")
+        # Optionally, terminate the pod if it was partially created
+        if 'pod_id' in locals():
+            try:
+                runpod.terminate_pod(pod_id)
+                logging.info(f"Terminated CPU pod '{name}' due to deployment failure.")
+            except Exception as terminate_error:
+                logging.error(f"Failed to terminate CPU pod '{name}': {terminate_error}")
+        raise e
+
+async def create_gpu_pod(
+    name, image, gpu_type_id, gpu_count, env={}, ports=None, template_id=None,
+    container_disk_in_gb=10, support_public_ip=True, cloud_type='SECURE',
+    min_download=100, min_upload=100, min_disk=50, min_memory_in_gb=8, min_vcpu_count=2,
+    volume_in_gb=0
+):
+    """
+    Creates a GPU pod by sending the podFindAndDeployOnDemand mutation directly.
+
+    Args:
+        name (str): The name of the pod.
+        image (str): The Docker image to use.
+        gpu_type_id (str): The GPU type ID.
+        gpu_count (int): Number of GPUs.
+        env (dict, optional): Environment variables. Defaults to {}.
+        ports (str, optional): Ports to expose. Defaults to None.
+        template_id (str, optional): Template ID for pod deployment. Defaults to None.
+        container_disk_in_gb (int, optional): Disk size for the container. Defaults to 10.
+        support_public_ip (bool, optional): Whether to support a public IP. Defaults to True.
+        cloud_type (str, optional): Cloud type. Defaults to 'COMMUNITY'.
+        min_download (int, optional): Minimum download bandwidth. Defaults to 100.
+        min_upload (int, optional): Minimum upload bandwidth. Defaults to 100.
+        min_disk (int, optional): Minimum disk size. Defaults to 20.
+        min_memory_in_gb (int, optional): Minimum memory in GB. Defaults to 8.
+        min_vcpu_count (int, optional): Minimum vCPU count. Defaults to 2.
+
+    Returns:
+        dict: The newly created pod information.
+
+    Raises:
+        Exception: If the pod deployment fails.
+    """
+    private_key_path, public_key_str = await generate_ssh_key_pair()
+    env = env.copy()  # Avoid mutating the original env
+    env['PUBLIC_KEY'] = public_key_str  # Add public key to environment variables
+    
+    runpod.api.ctl_commands.get_gpu(gpu_type_id)
+    
+    if cloud_type not in ['ALL', 'SECURE', 'COMMUNITY']:
+        raise ValueError(f"Invalid cloud type: {cloud_type}")
+    '''
+    sample_mutation = runpod.api.mutations.pods.generate_pod_deployment_mutation(
+        name=name,
+        image_name=image,
+        gpu_type_id=gpu_type_id,
+        gpu_count=gpu_count,
+        support_public_ip=support_public_ip,
+        ports=ports,
+        env=env,
+        template_id=template_id,
+        container_disk_in_gb=container_disk_in_gb,
+        cloud_type=cloud_type,
+        volume_mount_path='/runpod-volume',
+        volume_in_gb=volume_in_gb,
+    )
+    
+    print(f'Sample mutation: {sample_mutation}')
+    '''
+
+    # Generate the GraphQL mutation for GPU pod
+    mutation = generate_pod_deploy_mutation(
+        name=name,
+        image=image,
+        gpu_type_id=gpu_type_id,
+        gpu_count=gpu_count,
+        support_public_ip=support_public_ip,
+        ports=ports,
+        env=env,
+        template_id=template_id,
+        container_disk_in_gb=container_disk_in_gb,
+        cloud_type=cloud_type,
+        min_download=min_download,
+        min_upload=min_upload,
+        min_disk=min_disk,
+        min_memory_in_gb=min_memory_in_gb,
+        min_vcpu_count=min_vcpu_count
+    )
+
+    logging.info(f"Deploying GPU pod '{name}' with mutation:\n{mutation}")
+
+    try:
+        # Send the mutation using runpod's GraphQL API
+        raw_response = await asyncio.get_event_loop().run_in_executor(
+            executor,
+            lambda: runpod.api.graphql.run_graphql_query(mutation)
+        )
+
+        # Check for errors in the response
+        if 'errors' in raw_response:
+            error_messages = "; ".join([error['message'] for error in raw_response['errors']])
+            raise Exception(f"GraphQL Error: {error_messages}")
+
+        # Extract the pod information from the response
+        new_pod = raw_response["data"]["podFindAndDeployOnDemand"]
+        pod_id = new_pod['id']
+        logging.info(f"GPU Pod '{name}' created with ID: {pod_id}")
+
+        return new_pod, private_key_path
+
+    except Exception as e:
+        logging.error(f"Failed to deploy GPU pod '{name}': {e}")
+        # Optionally, terminate the pod if it was partially created
+        if 'pod_id' in locals():
+            try:
+                runpod.terminate_pod(pod_id)
+                logging.info(f"Terminated GPU pod '{name}' due to deployment failure.")
+            except Exception as terminate_error:
+                logging.error(f"Failed to terminate GPU pod '{name}': {terminate_error}")
+        raise e
 
 async def create_new_pod(
-    name, image, gpu_type, cpu_type, gpu_count, support_public_ip, ports, env={}, template_id=None, container_disk_in_gb=10
+    name: str,
+    image: str,
+    gpu_type: Optional[str] = None,
+    cpu_type: Optional[str] = None,
+    gpu_count: int = 0,
+    support_public_ip: bool = True,
+    ports: str = '',
+    env: dict = {},
+    template_id: Optional[str] = None,
+    container_disk_in_gb: int = 10,
+    min_download: int = 100,      # Example default value
+    min_upload: int = 100,        # Example default value
+    min_disk: int = 50,           # Example default value
+    min_memory_in_gb: int = 8,    # Example default value
+    min_vcpu_count: int = 2,      # Example default value
+    cloud_type: str = 'SECURE',
+    volume_in_gb: int = 0
 ):
-    private_key_path, public_key_str = await generate_ssh_key_pair()
-    env['PUBLIC_KEY'] = public_key_str  # Add public key here
-    kwargs = {
-        'support_public_ip': support_public_ip,
-        'ports': ports,
-        'env': env,
-        'template_id': template_id,
-        'cloud_type': 'SECURE',
-        'container_disk_in_gb': container_disk_in_gb
-    }
-    if gpu_type is None or gpu_count == 0:
-        if cpu_type is None:
-            cpu_type = 'cpu3c-2-4'
-        new_pod = await create_cpu_pod(name, image, instance_id=cpu_type, **kwargs)
+    """
+    Creates a new pod by directly sending the appropriate GraphQL mutation to RunPod's API.
+
+    This function determines whether to create a CPU or GPU pod based on the provided arguments
+    and sends the corresponding mutation with all necessary parameters.
+
+    Args:
+        name (str): The name of the pod.
+        image (str): The Docker image to use.
+        gpu_type (str, optional): The GPU type ID. If None, a CPU pod is created.
+        cpu_type (str, optional): The CPU instance ID for CPU pods.
+        gpu_count (int, optional): Number of GPUs. Defaults to 0.
+        support_public_ip (bool, optional): Whether to support a public IP. Defaults to True.
+        ports (str, optional): Ports to expose, e.g., "8888/http,666/tcp". Defaults to ''.
+        env (dict, optional): Environment variables. Defaults to {}.
+        template_id (str, optional): Template ID for pod deployment. Defaults to None.
+        container_disk_in_gb (int, optional): Disk size for the container. Defaults to 10.
+        min_download (int, optional): Minimum download bandwidth. Defaults to 100.
+        min_upload (int, optional): Minimum upload bandwidth. Defaults to 100.
+        min_disk (int, optional): Minimum disk size. Defaults to 50.
+        min_memory_in_gb (int, optional): Minimum memory in GB. Defaults to 8.
+        min_vcpu_count (int, optional): Minimum vCPU count. Defaults to 2.
+        cloud_type (str, optional): Cloud type, e.g., "SECURE". Defaults to 'SECURE'.
+
+    Returns:
+        tuple: A tuple containing the new pod information and the path to the private SSH key.
+
+    Raises:
+        ValueError: If required parameters for CPU pods are missing.
+        Exception: If the pod deployment fails.
+    """
+    if gpu_type and gpu_count > 0:
+        # GPU Pod
+        logging.info(f"Creating GPU pod '{name}' with GPU type '{gpu_type}' and count {gpu_count}.")
+        new_pod, private_key_path = await create_gpu_pod(
+            name=name,
+            image=image,
+            gpu_type_id=gpu_type,
+            gpu_count=gpu_count,
+            env=env,
+            ports=ports,
+            template_id=template_id,
+            container_disk_in_gb=container_disk_in_gb,
+            support_public_ip=support_public_ip,
+            cloud_type=cloud_type,
+            min_download=min_download,
+            min_upload=min_upload,
+            min_disk=min_disk,
+            min_memory_in_gb=min_memory_in_gb,
+            min_vcpu_count=min_vcpu_count,
+            volume_in_gb=volume_in_gb
+        )
     else:
-        if image is None:
-            raise ValueError("Image must be provided for GPU instances.")
-        kwargs['gpu_type_id'] = gpu_type
-        kwargs['gpu_count'] = gpu_count
-        # Run the blocking pod creation in a thread
-        new_pod = await asyncio.get_event_loop().run_in_executor(executor, lambda: runpod.create_pod(name, image, **kwargs))
+        # CPU Pod
+        if not cpu_type:
+            cpu_type = 'cpu3c-2-4'
+        logging.info(f"Creating CPU pod '{name}' with CPU instance '{cpu_type}'.")
+        new_pod, private_key_path = await create_cpu_pod(
+            name=name,
+            image=image,
+            instance_id=cpu_type,
+            env=env,
+            ports=ports,
+            template_id=template_id,
+            container_disk_in_gb=container_disk_in_gb,
+            support_public_ip=support_public_ip,
+            cloud_type=cloud_type,
+        )
+
     return new_pod, private_key_path
+
+async def get_pod_ssh_ip_port(pod_id, timeout=300):
+    """
+    Returns the IP and port for SSH access to a pod by calling the generic function.
+
+    Args:
+        pod_id (str): The ID of the pod.
+        timeout (int): Timeout in seconds to wait for the pod to be ready.
+
+    Returns:
+        tuple: A tuple containing the IP and port for SSH access.
+    """
+    return await get_public_ip_and_port(pod_id, private_port=22, timeout=timeout)
+
+def generate_deploy_pod_mutation(
+        name,
+        image,
+        gpu_type_id,
+        gpu_count,
+        support_public_ip,
+        ports,
+        env,
+        template_id,
+        container_disk_in_gb,
+        cloud_type,
+        min_download,
+        min_upload,
+        min_disk,
+        min_memory_in_gb,
+        min_vcpu_count,
+        instance_ids=None
+    ):
+    """
+    Generates a GraphQL mutation string for deploying a GPU pod with detailed configurations.
+
+    Args:
+        name (str): The name of the pod.
+        image (str): The Docker image to use.
+        gpu_type_id (str): The GPU type ID.
+        gpu_count (int): Number of GPUs.
+        support_public_ip (bool): Whether to support a public IP.
+        ports (str or None): Ports to expose, e.g., "8888/http,666/tcp".
+        env (dict): Environment variables.
+        template_id (str or None): Template ID for pod deployment.
+        container_disk_in_gb (int): Disk size for the container.
+        cloud_type (str): Cloud type, e.g., "SECURE".
+        min_download (int): Minimum download bandwidth.
+        min_upload (int): Minimum upload bandwidth.
+        min_disk (int): Minimum disk size.
+        min_memory_in_gb (int): Minimum memory in GB.
+        min_vcpu_count (int): Minimum vCPU count.
+        instance_ids (list or None): List of CPU instance IDs (if applicable).
+
+    Returns:
+        str: The GraphQL mutation string.
+    """
+    input_fields = []
+
+    # Required Fields
+    input_fields.append(f'name: "{name}"')
+    input_fields.append(f'imageName: "{image}"')
+    input_fields.append(f'gpuTypeId: "{gpu_type_id}"')
+    input_fields.append(f'gpuCount: {gpu_count}')
+    input_fields.append(f'cloudType: "{cloud_type}"')
+    input_fields.append(f'supportPublicIp: {str(support_public_ip).lower()}')
+
+    # Environment Variables
+    if env:
+        env_string = ", ".join(
+            [f'{{ key: "{key}", value: "{value}" }}' for key, value in env.items()]
+        )
+        input_fields.append(f"env: [{env_string}]")
+
+    # Ports
+    if ports:
+        ports = ports.replace(" ", "")
+        input_fields.append(f'ports: "{ports}"')
+
+    # Template ID
+    if template_id:
+        input_fields.append(f'templateId: "{template_id}"')
+
+    # Container Disk
+    if container_disk_in_gb is not None:
+        input_fields.append(f"containerDiskInGb: {container_disk_in_gb}")
+
+    # Instance IDs (if any)
+    if instance_ids:
+        instance_ids_str = ", ".join([f'"{iid}"' for iid in instance_ids])
+        input_fields.append(f'instanceIds: [{instance_ids_str}]')
+
+    # Minimum Requirements
+    input_fields.append(f"minDownload: {min_download}")
+    input_fields.append(f"minUpload: {min_upload}")
+    input_fields.append(f"minDisk: {min_disk}")
+    input_fields.append(f"minMemoryInGb: {min_memory_in_gb}")
+    input_fields.append(f"minVcpuCount: {min_vcpu_count}")
+
+    # Assemble the input string
+    input_string = ",\n          ".join(input_fields)
+
+    mutation = f"""
+    mutation {{
+      podFindAndDeployOnDemand(
+        input: {{
+          {input_string}
+        }}
+      ) {{
+        id
+        desiredStatus
+        imageName
+        env {{
+          key
+          value
+        }}
+        machineId
+        machine {{
+          podHostId
+        }}
+      }}
+    }}
+    """
+    return mutation
 
 async def get_public_ip_and_port(pod_id, private_port, timeout=300):
     """
@@ -178,19 +687,6 @@ async def get_public_ip_and_port(pod_id, private_port, timeout=300):
         raise TimeoutError(f"Pod {pod_id} did not provide the IP and port for private port {private_port} within {timeout} seconds.")
 
     return pod_ip, pod_port
-
-async def get_pod_ssh_ip_port(pod_id, timeout=300):
-    """
-    Returns the IP and port for SSH access to a pod by calling the generic function.
-
-    Args:
-        pod_id (str): The ID of the pod.
-        timeout (int): Timeout in seconds to wait for the pod to be ready.
-
-    Returns:
-        tuple: A tuple containing the IP and port for SSH access.
-    """
-    return await get_public_ip_and_port(pod_id, private_port=22, timeout=timeout)
 
 def terminate_all_pods():
     """
@@ -309,8 +805,6 @@ async def copy_file_from_remote(ssh, remote_path, local_path, interval=0.1, copy
         # Close the SFTP connection to clean up resources
         await asyncio.get_event_loop().run_in_executor(executor, sftp.close)
 
-
-
 async def async_exec_command(ssh, command):
     """
     Run the SSH command asynchronously using an executor and log the exit status and outputs.
@@ -330,7 +824,7 @@ async def async_exec_command(ssh, command):
 
     # Wait for the command to complete and get the exit status
     exit_status = await loop.run_in_executor(None, stdout.channel.recv_exit_status)
-    
+
     # Read the outputs from stdout and stderr
     stdout_output = await loop.run_in_executor(None, stdout.read)
     stderr_output = await loop.run_in_executor(None, stderr.read)
@@ -345,7 +839,6 @@ async def async_exec_command(ssh, command):
 
     return stdin, stdout, stderr
 
-
 async def launch_instance_and_record_logs(
     name,
     image=None,
@@ -359,7 +852,14 @@ async def launch_instance_and_record_logs(
     cmd='tail -f /var/log/syslog',
     template_id=None,
     container_disk_in_gb=10,
-    input_jsons=[]
+    input_jsons=[],
+    min_download=1000,
+    min_upload=1000,
+    min_disk=None,
+    min_memory_in_gb=1,
+    min_vcpu_count=1,
+    volume_in_gb=0,
+    cloud_type='COMMUNITY'
 ):
     """
     Launches a new instance, waits for it to be ready, SSH into it, and records the logs.
@@ -368,6 +868,7 @@ async def launch_instance_and_record_logs(
         name (str): The name of the pod.
         image (str): The Docker image to be used.
         gpu_type (str): The type of GPU required.
+        cpu_type (str): The type of CPU required.
         gpu_count (int): The number of GPUs required.
         ports (str): A string representing ports to be exposed, e.g., "8888/http,666/tcp".
         log_file (str): The file where logs will be recorded.
@@ -388,16 +889,23 @@ async def launch_instance_and_record_logs(
         ports = '22/tcp'
 
     new_pod, private_key_path = await create_new_pod(
-        name,
-        image,
-        gpu_type,
-        cpu_type,
-        gpu_count,
+        name=name,
+        image=image,
+        gpu_type=gpu_type,
+        cpu_type=cpu_type,
+        gpu_count=gpu_count,
         support_public_ip=True,
         ports=ports,
         env={},  # we will use our env vars for the cmd not initial env vars
         template_id=template_id,
-        container_disk_in_gb=container_disk_in_gb
+        container_disk_in_gb=container_disk_in_gb,
+        min_download=min_download,
+        min_upload=min_upload,
+        min_disk=min_disk,
+        min_memory_in_gb=min_memory_in_gb,
+        min_vcpu_count=min_vcpu_count,
+        volume_in_gb=volume_in_gb,
+        cloud_type=cloud_type
     )
     pod_id = new_pod['id']
     logging.info(f'Pod {name} created with id {pod_id}')
@@ -414,7 +922,7 @@ async def launch_instance_and_record_logs(
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
         # Use the generated key file
-        ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path)
+        ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path, banner_timeout=200)
 
         # Prepare environment variables to be set in the remote session
         env_export = " ".join([f'{key}="{value}"' for key, value in env.items()])
@@ -506,7 +1014,7 @@ async def reconnect_and_initialize_existing_pod(pod_id, name, private_key_path, 
     # Connect to the pod via SSH
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path)
+    ssh.connect(ssh_ip, port=ssh_port, username="root", key_filename=private_key_path, banner_timeout=200)
     
     # Function to check if SSH session is still alive
     def is_ssh_session_alive():
