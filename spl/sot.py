@@ -141,6 +141,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
     app = Quart(__name__)
 
     app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 * 1024  # 100 GB
+    app.config['BODY_TIMEOUT'] = SOT_TIMEOUT
 
     log_memory_usage('Before initializing or loading initial state')
 
