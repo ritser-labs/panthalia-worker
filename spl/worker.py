@@ -503,6 +503,7 @@ async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=
     Returns:
         A BytesIO object containing the downloaded data.
     """
+    start_time = time.time()
     content = BytesIO()
     
     # Get the content length from the header, if available
@@ -555,7 +556,8 @@ async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=
         logging.error(f"Downloaded size ({downloaded_size}) does not match expected size ({total_size}).")
         raise Exception(f"Incomplete download: expected {total_size} bytes but got {downloaded_size} bytes")
 
-    logging.info(f"Download completed successfully. Total size: {downloaded_size} bytes")
+    end_time = time.time()
+    logging.info(f"Download completed successfully in {start_time - end_time:.2f} seconds. Total size: {downloaded_size} bytes")
     return content
 
 async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
