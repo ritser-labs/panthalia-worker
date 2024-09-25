@@ -178,12 +178,12 @@ async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_typ
                         # Acquire tensor_download_lock to prioritize tensor downloads
                         async with tensor_download_lock:
                             # Signal that a tensor download is in progress
-                            tensor_download_event.set()
+                            tensor_download_event.clear()
                             try:
                                 content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout, download_type=download_type)
                             finally:
                                 # Clear the event after tensor download is complete
-                                tensor_download_event.clear()
+                                tensor_download_event.set()
                     elif download_type == 'batch_targets':
                         # Wait for any ongoing tensor download to finish
                         async with tensor_download_lock:
@@ -704,6 +704,8 @@ async def main():
     asyncio.create_task(reclaim_stakes())
     
     last_loop_time = time.time()
+    
+    tensor_download_event.set()
 
     while True:
         # Schedule processing tasks
