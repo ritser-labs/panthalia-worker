@@ -335,89 +335,90 @@ async def process_tasks():
         next_task = await task_queue.get_next_task()
                 
         while retry_attempt < MAX_WORKER_TASK_RETRIES and not task_success:
-            if not next_task:
-                logging.debug("No tasks in the queue to process.")
-                return
-
-            task_id = next_task['task_id']
-            task_params = next_task['task_params']
-            contract_index = next_task['contract_index']
-            time_status_changed = next_task['time_status_changed']  # Extract the time_status_changed
-
-            logging.debug(f"{task_id}: Processing task with params: {task_params} and contract_index: {contract_index}")
-
-            start_time = time.time()
-            # Downloading batch and targets (asynchronously)
-            logging.debug(f"{task_id}: Downloading batch from URL: {task_params['batch_url']}")
-            batch = await download_file(task_params['batch_url'], download_type='batch_targets')
-
-            logging.debug(f"{task_id}: Downloading targets from URL: {task_params['targets_url']}")
-            targets = await download_file(task_params['targets_url'], download_type='batch_targets')
-
             try:
-                # Acquire the lock asynchronously with priority based on time_status_changed
-                await task_processing_lock.acquire(priority=time_status_changed)
+                if not next_task:
+                    logging.debug("No tasks in the queue to process.")
+                    return
+
+                task_id = next_task['task_id']
+                task_params = next_task['task_params']
+                contract_index = next_task['contract_index']
+                time_status_changed = next_task['time_status_changed']  # Extract the time_status_changed
+
+                logging.debug(f"{task_id}: Processing task with params: {task_params} and contract_index: {contract_index}")
+
+                start_time = time.time()
+                # Downloading batch and targets (asynchronously)
+                logging.debug(f"{task_id}: Downloading batch from URL: {task_params['batch_url']}")
+                batch = await download_file(task_params['batch_url'], download_type='batch_targets')
+
+                logging.debug(f"{task_id}: Downloading targets from URL: {task_params['targets_url']}")
+                targets = await download_file(task_params['targets_url'], download_type='batch_targets')
+
                 try:
-                    # Process the task
-                    steps = task_params['steps']
-                    max_lr = task_params['max_lr']
-                    min_lr = task_params['min_lr']
-                    T_0 = task_params['T_0']
-                    weight_decay = task_params['weight_decay']
-                    logging.debug(f"{task_id}: Executing training task")
-                    time_synced = time.time()
-                    model, version_number = await sync_tensors(contract_index)
+                    # Acquire the lock asynchronously with priority based on time_status_changed
+                    await task_processing_lock.acquire(priority=time_status_changed)
+                    try:
+                        # Process the task
+                        steps = task_params['steps']
+                        max_lr = task_params['max_lr']
+                        min_lr = task_params['min_lr']
+                        T_0 = task_params['T_0']
+                        weight_decay = task_params['weight_decay']
+                        logging.debug(f"{task_id}: Executing training task")
+                        time_synced = time.time()
+                        model, version_number = await sync_tensors(contract_index)
 
-                    updates, loss = model_adapter.train_task(
-                        model, batch, targets, steps, max_lr, min_lr, T_0, weight_decay
-                    )
-                    logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
-                finally:
-                    await task_processing_lock.release()
-            
-            except Exception as e:
-                logging.error(f"Error during task processing: {e}")
-                raise
+                        updates, loss = model_adapter.train_task(
+                            model, batch, targets, steps, max_lr, min_lr, T_0, weight_decay
+                        )
+                        logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
+                    finally:
+                        await task_processing_lock.release()
+                
+                except Exception as e:
+                    logging.error(f"Error during task processing: {e}")
+                    raise
 
-            try:
-                # Upload the result asynchronously with priority based on time_status_changed
-                await upload_lock.acquire(priority=time_status_changed)
                 try:
-                    upload_start_time = time.time()
-                    result = await upload_results(version_number, updates, loss)
-                    upload_end_time = time.time()
-                    logging.info(f"{task_id}: Uploaded results for task {task_id} in {upload_end_time - upload_start_time:.2f} seconds")
-                finally:
-                    await upload_lock.release()
+                    # Upload the result asynchronously with priority based on time_status_changed
+                    await upload_lock.acquire(priority=time_status_changed)
+                    try:
+                        upload_start_time = time.time()
+                        result = await upload_results(version_number, updates, loss)
+                        upload_end_time = time.time()
+                        logging.info(f"{task_id}: Uploaded results for task {task_id} in {upload_end_time - upload_start_time:.2f} seconds")
+                    finally:
+                        await upload_lock.release()
+                except Exception as e:
+                    logging.error(f"Error during uploading results: {e}")
+                    raise
+
+                # Submit the solution
+                await submit_solution(task_id, result, contract_index)
+
+                processed_tasks.add((task_id, contract_index))
+
+                # Log the time taken to process the task
+                async with task_start_times_lock:
+                    task_start_time = task_start_times.pop(task_id, None)
+                if task_start_time:
+                    total_time = time.time() - task_start_time
+                    logging.info(f"{task_id}: Total time to process: {total_time:.2f} seconds")
+                    logging.info(f'{task_id}: Time since sync: {time.time() - time_synced:.2f} seconds')
+
+                end_time = time.time()
+                logging.info(f"{task_id}: process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
+
+                task_success = True  # Mark the task as successful if no exceptions occurred
+
             except Exception as e:
-                logging.error(f"Error during uploading results: {e}")
-                raise
-
-            # Submit the solution
-            await submit_solution(task_id, result, contract_index)
-
-            processed_tasks.add((task_id, contract_index))
-
-            # Log the time taken to process the task
-            async with task_start_times_lock:
-                task_start_time = task_start_times.pop(task_id, None)
-            if task_start_time:
-                total_time = time.time() - task_start_time
-                logging.info(f"{task_id}: Total time to process: {total_time:.2f} seconds")
-                logging.info(f'{task_id}: Time since sync: {time.time() - time_synced:.2f} seconds')
-
-            end_time = time.time()
-            logging.info(f"{task_id}: process_tasks() completed in {end_time - start_time:.2f} seconds. Concurrent tasks: {concurrent_tasks_counter}")
-
-            task_success = True  # Mark the task as successful if no exceptions occurred
-
-        except Exception as e:
-            retry_attempt += 1
-            logging.error(f"Error processing task (attempt {retry_attempt}): {e}", exc_info=True)
-            if retry_attempt >= MAX_WORKER_TASK_RETRIES:
-                logging.error(f"Max retries reached for task {task_id}.")
-                raise
-            logging.info(f"Retrying task processing (attempt {retry_attempt + 1}/{MAX_WORKER_TASK_RETRIES})...")
+                retry_attempt += 1
+                logging.error(f"Error processing task (attempt {retry_attempt}): {e}", exc_info=True)
+                if retry_attempt >= MAX_WORKER_TASK_RETRIES:
+                    logging.error(f"Max retries reached for task {task_id}.")
+                    raise
+                logging.info(f"Retrying task processing (attempt {retry_attempt + 1}/{MAX_WORKER_TASK_RETRIES})...")
         
     finally:
         async with concurrent_tasks_counter_lock:
