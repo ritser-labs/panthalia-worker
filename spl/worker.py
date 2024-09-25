@@ -90,7 +90,7 @@ def parse_args():
     parser.add_argument('--max_stakes', type=int, default=2, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
-    parser.add_argument('--max_tasks_handling', type=int, default=2, help="Maximum number of tasks allowed in the queue awaiting processing")
+    parser.add_argument('--max_tasks_handling', type=int, default=1, help="Maximum number of tasks allowed in the queue awaiting processing")
     return parser.parse_args()
 
 args = parse_args()
@@ -327,13 +327,14 @@ async def process_tasks():
         logging.debug("No tasks in the queue to process.")
         return
 
-    while retry_attempt < MAX_WORKER_TASK_RETRIES and not task_success:
-        async with concurrent_tasks_counter_lock:
-            # Increase the counter when a new task is started
-            concurrent_tasks_counter += 1
-        try:
-            # Get the next task from the queue
-            next_task = await task_queue.get_next_task()
+    async with concurrent_tasks_counter_lock:
+        # Increase the counter when a new task is started
+        concurrent_tasks_counter += 1
+    try:
+        # Get the next task from the queue
+        next_task = await task_queue.get_next_task()
+                
+        while retry_attempt < MAX_WORKER_TASK_RETRIES and not task_success:
             if not next_task:
                 logging.debug("No tasks in the queue to process.")
                 return
@@ -418,11 +419,9 @@ async def process_tasks():
                 raise
             logging.info(f"Retrying task processing (attempt {retry_attempt + 1}/{MAX_WORKER_TASK_RETRIES})...")
         
-        finally:
-            # Decrease the concurrent tasks counter when the task is done (whether successful or not)
-            if retry_attempt >= MAX_WORKER_TASK_RETRIES or task_success:
-                async with concurrent_tasks_counter_lock:
-                    concurrent_tasks_counter -= 1
+    finally:
+        async with concurrent_tasks_counter_lock:
+            concurrent_tasks_counter -= 1
 
 async def reclaim_stakes():
     while True:
