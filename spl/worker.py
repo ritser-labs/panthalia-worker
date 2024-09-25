@@ -532,11 +532,8 @@ async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=
             logging.debug("No more chunks to download. Download finished.")
             break
 
-        # If it's a batch_targets download, check if a tensor download is in progress
-        if download_type == 'batch_targets' and tensor_download_event.is_set():
-            logging.debug("Tensor download started. Pausing batch/targets download.")
-            await tensor_download_event.wait()  # Wait until tensor download is complete
-            logging.debug("Resuming batch/targets download.")
+        if download_type == 'batch_targets':
+            await tensor_download_event.wait()
 
         content.write(chunk)
         downloaded_size += len(chunk)
