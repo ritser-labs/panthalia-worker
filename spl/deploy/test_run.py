@@ -75,6 +75,7 @@ def parse_args():
     parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
     parser.add_argument('--worker_count', type=int, default=1, help="Number of workers to start")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
+    parser.add_argument('--terminate', action='store_true', help="Allow termination of all running pods")
     return parser.parse_args()
 
 args = parse_args()
@@ -155,6 +156,9 @@ def delete_directory_contents(directory):
 
 def terminate_processes():
     """Terminate all running pods and remove the state file."""
+    if not args.terminate:
+        logging.info("Pod termination disabled. Exiting without terminating pods.")
+        return
     terminate_all_pods()
     # Remove the state file upon termination
     if os.path.exists(STATE_FILE):
