@@ -8,15 +8,16 @@ model_config = NanoGPTConfig(tokenizer, model_params)
 
 model_adapter = NanoGPTModelAdapter(model_config)
 
-dataset = ShakespeareDataLoader(
-    model_config,
-    buffer_size=100_000,
-    max_seq_len=model_params.block_size
-)
-
 NUM_STEPS = 285
 
 EXAMPLES_PER_STEP = 64
+
+dataset = ShakespeareDataLoader(
+    model_config,
+    buffer_size=100_000,
+    batch_size=NUM_STEPS * EXAMPLES_PER_STEP,
+    max_seq_len=model_params.block_size
+)
 
 exported_plugin = StandardPlugin(
     model_adapter,
@@ -33,5 +34,6 @@ exported_plugin = StandardPlugin(
     max_concurrent_iterations=4,
     inner_max_lr=0.001,
     inner_min_lr=0.0001,
-    inner_T_0=200
+    inner_T_0=200,
+    preload_batch_count=4
 )

@@ -7,37 +7,15 @@ from ..adapters.dataloader import LanguageDataLoader, datasets_dir
 # Defining the data loader
 # This defines the training data we'll use
 class ShakespeareDataLoader(LanguageDataLoader):
-    def __init__(
-            self,
-            model_config: TransformerModelConfig,
-            buffer_size, max_seq_len,
-            file_path=os.path.join(
-                datasets_dir, 'shakespeare.txt'),
-            block_size=124000
-        ):
-        self.file_path = file_path
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size, file_path=None, block_size=124000):
+        self.file_path = file_path if file_path else os.path.join(datasets_dir, 'shakespeare.txt')
         self.block_size = block_size
+        super().__init__(model_config, buffer_size, max_seq_len, batch_size)
 
-        self.lines = self.load_lines()
+    def init_dataset(self):
+        # No dataset to initialize for file-based loading
+        self._filler_task = asyncio.create_task(self._buffer_filler())
 
-        super().__init__(model_config, buffer_size, max_seq_len)
-
-    def load_lines(self):
-        with open(self.file_path, 'r') as f:
-            return f.readlines()
-
-    def _text_generator(self):
-        num_lines = len(self.lines)
-        start_index = 0
-
-        while True:
-            end_index = start_index + self.block_size
-            if end_index > num_lines:
-                start_index = 0
-                end_index = self.block_size
-
-            yield ''.join(self.lines[start_index:end_index]).strip()
-            start_index = end_index
-
-            if start_index >= num_lines:
-                start_index = 0
+    async def _text_generator(self):
+        async for chunk in self._load_file_in_chunks(self.file_path, self.block_size):
+            yield chunk
