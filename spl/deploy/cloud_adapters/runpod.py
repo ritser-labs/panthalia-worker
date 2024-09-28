@@ -859,7 +859,7 @@ async def launch_instance_and_record_logs(
     min_memory_in_gb=1,
     min_vcpu_count=1,
     volume_in_gb=0,
-    cloud_type='COMMUNITY'
+    cloud_type='SECURE'
 ):
     """
     Launches a new instance, waits for it to be ready, SSH into it, and records the logs.
