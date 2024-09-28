@@ -47,13 +47,12 @@ def main():
 
     # Main prediction loop
     try:
-        print("Enter text to generate predictions (type 'exit' to quit):")
         for i in range(10):
-            user_input = '\n'
+            user_input = 'This product is'
             tokenized_user_input = tokenizer.encode(user_input)
             tokenized_user_input_tensor = torch.tensor(tokenized_user_input, dtype=torch.long).unsqueeze(0).to(device)
             tokenized_output = model_adapter.generate(model, tokenized_user_input_tensor, max_new_tokens=100, top_k=200, temperature=0.8)
-            output = tokenizer.decode(tokenized_output[0])
+            output = tokenizer.decode(tokenized_output[0].tolist())
             print(output)
             print('\n' * 3)
             print('-' * 80)
