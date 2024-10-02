@@ -1,6 +1,6 @@
 from .adapters.model_adapter import TransformerModelAdapter
 
-# Previous code
+# ... Previous code
 
 # Defining the Panthalia model adapter
 class NanoGPTModelAdapter(TransformerModelAdapter):

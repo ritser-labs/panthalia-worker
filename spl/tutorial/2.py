@@ -1,7 +1,7 @@
 from ..adapters.models.nanogpt import GPT
 from ..adapters.model_config import TransformerModelConfig
 
-# Previous code
+# ... Previous code
 
 tokenizer = CharacterLevelTokenizer()
 
