@@ -1,5 +1,4 @@
-make an LLM with a very high number of experts trained in an embarrassingly parallel way.
-
+panthalia repo
 
 https://arxiv.org/abs/2403.07816
 https://arxiv.org/abs/2312.07987
