@@ -46,6 +46,7 @@ class Master:
         sot_url,
         subnet_addresses,
         max_concurrent_iterations=2,
+        max_iterations=float('inf'),
         detailed_logs=False,
     ):
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
@@ -58,6 +59,8 @@ class Master:
         self.loss_queue = queue.Queue()
         self.load_wallets(wallets)
         self.current_wallet_index = 0
+        self.done = False
+        self.max_iterations = max_iterations
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
@@ -321,6 +324,10 @@ class Master:
             return None
 
     async def main_iteration(self, iteration_number):
+        if self.iteration > self.max_iterations:
+            self.done = True
+            return
+        self.iteration += 1
         logging.info(f"Starting iteration {iteration_number}")
 
         learning_params = get_master_learning_hyperparameters(iteration_number)
@@ -372,7 +379,6 @@ class Master:
             self.main_iteration(self.iteration)
         )
         self.tasks.append(task)
-        self.iteration += 1
 
         self.update_plot()
 
@@ -386,7 +392,6 @@ class Master:
                 self.main_iteration(self.iteration)
             )
             self.tasks.append(task)
-            self.iteration += 1
 
         # Dynamically await new tasks as they are added
         while True:
