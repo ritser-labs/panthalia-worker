@@ -54,7 +54,7 @@ class Master:
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
         self.max_concurrent_iterations = max_concurrent_iterations
-        self.iteration = 1  # Track the number of iterations
+        self.iteration = 0  # Track the number of iterations
         self.losses = []  # Initialize loss list
         self.loss_queue = queue.Queue()
         self.load_wallets(wallets)
