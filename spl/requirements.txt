@@ -12,3 +12,8 @@ runpod
 quart
 requests-toolbelt
 Hypercorn
+
+aiosqlite
+sqlalchemy
+sqlalchemy[asyncio]
+secimport

@@ -17,3 +17,5 @@ spl/data/master_public_keys.json
 spl/logs/*
 
 spl/deploy/cloud_adapters/runpod_config.py
+
+*.db

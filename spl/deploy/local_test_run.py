@@ -7,13 +7,17 @@ import requests
 import threading
 import curses
 from flask import Flask, jsonify, send_from_directory
-from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, wait_for_rpc_available, fund_wallets, MAX_CONCURRENT_ITERATIONS
+from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, wait_for_rpc_available, fund_wallets
+from ..db_adapter import db_adapter
+from ..models import init_db
+from ..plugin_manager import get_plugin
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
 import shutil
 import asyncio
 import logging
+import aiofiles
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
@@ -31,7 +35,7 @@ ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 LAST_FUTURE_VERSION_FILE = os.path.join(STATE_DIR, 'last_future_version_number.json')
-
+plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
 DOCKER_IMAGE = 'zerogoliath/magnum:latest'
 
 # Configure logging
@@ -420,6 +424,19 @@ async def main():
         pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
         token_address = await pool_contract.functions.token().call()
         token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
+        
+            
+        await init_db()
+        
+        async with aiofiles.open(plugin_file, mode='r') as f:
+            code = await f.read()
+        plugin_id = await db_adapter.create_plugin('plugin', code)
+        
+        subnet_id = await db_adapter.create_subnet(list(subnet_addresses.values())[0], args.rpc_url)
+        
+        job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
+        
+        plugin = await get_plugin(plugin_id)
 
         sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
 
@@ -442,7 +459,14 @@ async def main():
         logging.info("Starting SOT service...")
 
         sot_log = open(SOT_LOG_FILE, 'w')
-        sot_process = subprocess.Popen(['python', '-m', 'spl.sot', '--public_keys', MASTER_PUBLIC_KEYS_FILE], stdout=sot_log, stderr=sot_log, cwd=package_root_dir)
+        sot_process = subprocess.Popen(
+            [
+                'python', '-m', 'spl.sot',
+                '--public_keys', MASTER_PUBLIC_KEYS_FILE,
+                '--job_id', str(job_id),
+            ],
+            stdout=sot_log, stderr=sot_log, cwd=package_root_dir
+        )
         processes['sot'] = sot_process
         logging.info(f"SOT service started with PID {sot_process.pid}")
 
@@ -490,7 +514,8 @@ async def main():
                 '--wallets', MASTER_WALLETS_FILE,
                 '--sot_url', args.sot_url,
                 '--subnet_addresses', args.subnet_addresses,
-                '--max_concurrent_iterations', str(MAX_CONCURRENT_ITERATIONS),
+                '--max_concurrent_iterations', str(plugin.max_concurrent_iterations),
+                '--job_id', str(job_id),
             ]
             if args.detailed_logs:
                 master_command.append('--detailed_logs')

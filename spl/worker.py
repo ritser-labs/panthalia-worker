@@ -12,9 +12,9 @@ from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from .device import device
 from .common import (
-    Task, TaskStatus, model_adapter, load_abi, upload_tensor,
-    get_current_version_number, async_transact_with_contract_function,
-    expected_worker_time, TENSOR_NAME, PoolState, approve_token_once,
+    Task, TaskStatus, load_abi, upload_tensor,
+    async_transact_with_contract_function,
+    TENSOR_NAME, PoolState, approve_token_once,
     deposit_stake_without_approval, get_future_version_number,
     CHUNK_SIZE
 )
@@ -30,6 +30,8 @@ import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 import heapq
 import itertools
+from .db_adapter import db_adapter
+from .plugin_manager import get_plugin
 
 # Removed threading imports
 # from concurrent.futures import ThreadPoolExecutor
@@ -121,8 +123,6 @@ model_initialized = False
 embedding_initialized = False
 latest_block_timestamps = defaultdict(lambda: 0)  # To store the latest block timestamp processed for each tensor
 processed_tasks = set()
-
-latest_model = None
 
 class TaskQueue:
     def __init__(self):
@@ -295,13 +295,21 @@ async def handle_event(task_id, task, time_invoked, contract_index):
     task_params = json.loads(task_params_bytes.decode('utf-8'))
 
     logging.debug(f"Adding task to queue with ID: {task_id} and params: {task_params}")
-
-    await task_queue.add_task({
+    
+    task_db = await db_adapter.get_task(task_id)
+    
+    task_queue_obj = {
         'task_id': task_id,
+        'plugin_id': task_db.job.plugin_id,
+        'sot_url': task_db.job.sot_url,
         'task_params': task_params,
         'time_status_changed': task.timeStatusChanged,
         'contract_index': contract_index
-    })
+    }
+
+    await task_queue.add_task(task_queue_obj)
+    
+    get_plugin(task_queue_obj['plugin_id'])
     
     blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
     
@@ -343,6 +351,8 @@ async def process_tasks():
                 task_id = next_task['task_id']
                 task_params = next_task['task_params']
                 contract_index = next_task['contract_index']
+                plugin = get_plugin(next_task['plugin_id'])
+                sot_url = next_task['sot_url']
                 time_status_changed = next_task['time_status_changed']  # Extract the time_status_changed
 
                 logging.debug(f"{task_id}: Processing task with params: {task_params} and contract_index: {contract_index}")
@@ -367,9 +377,9 @@ async def process_tasks():
                         weight_decay = task_params['weight_decay']
                         logging.debug(f"{task_id}: Executing training task")
                         time_synced = time.time()
-                        model, version_number = await sync_tensors(contract_index)
+                        model, version_number = await initialize_tensor(TENSOR_NAME, plugin, sot_url)
 
-                        updates, loss = model_adapter.train_task(
+                        updates, loss = plugin.model_adapter.train_task(
                             model, batch, targets, steps, max_lr, min_lr, T_0, weight_decay
                         )
                         logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
@@ -450,10 +460,6 @@ async def reclaim_stakes():
 
         await asyncio.sleep(2)
 
-async def sync_tensors(contract_index):
-    relevant_tensor = get_relevant_tensor_for_task(args.task_types[contract_index])
-    return await initialize_tensor(relevant_tensor)
-
 async def submit_solution(task_id, result, contract_index):
     try:
         logging.info('Submitting solution')
@@ -486,8 +492,8 @@ async def report_sync_status():
     except aiohttp.ClientError as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-def time_until_next_version():
-    return get_future_version_number() - time.time()
+def time_until_next_version(tensor_version_interval):
+    return get_future_version_number(tensor_version_interval) - time.time()
 
 async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=5, download_type='batch_targets'):
     """
@@ -557,8 +563,7 @@ async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=
     logging.info(f"Download completed successfully in {start_time - end_time:.2f} seconds. Total size: {downloaded_size} bytes")
     return content
 
-async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
-    global latest_model
+async def initialize_tensor(tensor_name, plugin, sot_url, retries=3, backoff=1, chunk_timeout=5):
     logging.debug(f"Starting initialization for tensor: {tensor_name}")
 
     init_start_time = time.time()
@@ -573,7 +578,7 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
-                    f"{args.sot_url}/current_timestamp",
+                    f"{sot_url}/current_timestamp",
                     params={'tensor_name': tensor_name}
                 ) as response:
                     response.raise_for_status()
@@ -584,10 +589,10 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
             await asyncio.sleep(backoff * iterations)
             continue
 
-        time_until_next = time_until_next_version()
+        time_until_next = time_until_next_version(plugin.tensor_version_interval)
         logging.debug(f"Time until next version: {time_until_next} seconds")
 
-        if time_until_next < expected_worker_time:
+        if time_until_next < plugin.expected_worker_time:
             logging.debug(f'Not enough time left until next version. Waiting for {time_until_next} seconds.')
             await asyncio.sleep(time_until_next)
         else:
@@ -598,7 +603,7 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
 
     for attempt in range(1, retries + 1):
         try:
-            url = f"{args.sot_url}/latest_state"
+            url = f"{sot_url}/latest_state"
             logging.debug(f"Requesting tensor {tensor_name} from URL: {url}")
             fetch_start_time = time.time()
 
@@ -607,10 +612,9 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
             download_end_time = time.time()
             logging.debug(f"Downloaded in {download_end_time - fetch_start_time:.2f} seconds")
 
-            model = model_adapter.tensor_to_model(tensor.detach(), latest_model)
+            model = plugin.model_adapter.tensor_to_model(tensor.detach(), None)
             model.train()
 
-            latest_model = model if latest_block_timestamps[tensor_name] < version_number else latest_model
             return model, version_number
 
         except asyncio.TimeoutError:
@@ -621,9 +625,6 @@ async def initialize_tensor(tensor_name, retries=3, backoff=1, chunk_timeout=5):
             await asyncio.sleep(backoff * attempt)
 
     raise RuntimeError(f"initialize_tensor: Failed to initialize tensor {tensor_name} after {retries} attempts")
-
-def get_relevant_tensor_for_task(task_type):
-    return TENSOR_NAME
 
 async def fetch_task(task_id, contract_index):
     task_tuple = await contracts[contract_index].functions.getTask(task_id).call()
@@ -676,8 +677,6 @@ async def get_all_task_ids(last_checked_task_ids):
 async def main():
     logging.info("Starting main process")
     torch.set_default_device(device)
-    model_adapter.initialize_environment(args.backend)
-
     await initialize_contracts()
 
     # Approve tokens once at the start
@@ -688,10 +687,6 @@ async def main():
         )
 
     logging.info("Starting tensor synchronization...")
-    relevant_tensors = []
-    for task_type in args.task_types:
-        relevant_tensors.append(get_relevant_tensor_for_task(task_type))
-    relevant_tensors = list(set(relevant_tensors))
     reported = False
 
     # Initialize the last checked task ID and pending tasks

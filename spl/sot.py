@@ -23,18 +23,15 @@ import shutil
 
 # Import your custom modules
 from .common import (
-    get_sot_learning_hyperparameters,
-    model_adapter,
-    batch_size,
     get_current_version_number,
     TENSOR_NAME,
-    dataset,
     SOT_PRIVATE_PORT,
     get_future_version_number,
-    PRELOAD_BATCH_COUNT,
     CHUNK_SIZE
 )
 from .device import device
+from .plugin_manager import get_plugin
+from .db_adapter import db_adapter
 
 # Constants for batch preloading
 dataset_iterator = None
@@ -130,7 +127,7 @@ def nag_update(params, grads, m, lr=0.002, weight_decay=0.2, beta1=0.9, eps=1e-6
     return new_params, new_m
 
 
-def create_app(public_keys_file, enable_memory_logging=False):
+def create_app(public_keys_file, job_id, enable_memory_logging=False):
     """Create and configure the app."""
     global MEMORY_LOGGING_ENABLED
     MEMORY_LOGGING_ENABLED = enable_memory_logging
@@ -150,10 +147,12 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     logging.info("Initializing or loading initial state...")
     os.makedirs(state_dir, exist_ok=True)
-
     # Initialize variables
     update_timestamp_lock = asyncio.Lock()
     master_public_keys = None
+    
+    plugin_id = None
+    plugin = None
 
     async def save_json(file_path, data, file_lock):
         with file_lock:
@@ -194,7 +193,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
-                name, get_current_version_number())
+                name, get_current_version_number(plugin.tensor_version_interval))
 
         file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
         if os.path.exists(file_path):
@@ -204,7 +203,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if TENSOR_NAME not in name:
             raise ValueError(f"Unsupported tensor name: {name}")
 
-        tensor = model_adapter.init_tensor(zero_init)
+        tensor = plugin.model_adapter.init_tensor(zero_init)
 
         torch.save(tensor, file_path)
         block_timestamps[name] = sync_version_number
@@ -231,10 +230,10 @@ def create_app(public_keys_file, enable_memory_logging=False):
         global dataset_iterator
         async with dataset_lock:
             if dataset_iterator is None:
-                dataset_iterator = dataset.__aiter__()
+                dataset_iterator = plugin.dataset.__aiter__()
 
             try:
-                for _ in range(batch_size):
+                for _ in range(plugin.batch_size):
                     inputs, target_tokens = await dataset_iterator.__anext__()
                     if isinstance(inputs, list):
                         inputs = torch.tensor(inputs)
@@ -260,15 +259,21 @@ def create_app(public_keys_file, enable_memory_logging=False):
         return batch_filename, targets_filename
 
     async def initialize_service():
-        nonlocal master_public_keys
+        nonlocal master_public_keys, plugin_id, plugin
         logging.info("Initializing distributed environment and tensors")
 
+ 
+        plugin_id = (await db_adapter.get_job(job_id)).plugin_id
+        
+        plugin = await get_plugin(plugin_id)
+        
         async with aiofiles.open(public_keys_file, 'r') as f:
             master_public_keys = json.loads(await f.read())
-        model_adapter.initialize_environment('gloo')
+        plugin.model_adapter.initialize_environment('gloo')
         await initialize_all_tensors()
-        dataset.initialize_dataset()
+        plugin.dataset.initialize_dataset()
         logging.info(f'Loading initial batches for service')
+
 
         log_memory_usage('After initializing service')
         logging.info("Service initialized")
@@ -381,7 +386,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         logging.info("Accessing /get_batch endpoint")
         try:
             # Retrieve the next batch of token pairs
-            token_pairs = await dataset.__anext__()  # This should return a list of token pairs
+            token_pairs = await plugin.dataset.__anext__()  # This should return a list of token pairs
 
             if not token_pairs:
                 logging.info("No more batches available in /get_batch.")
@@ -462,7 +467,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     async def fix_outdated_last_future_version_number(tensor_name, last_future_version_number):
         value = last_future_version_number.get(tensor_name, 0)
-        current_version_number = get_current_version_number()
+        current_version_number = get_current_version_number(plugin.tensor_version_interval)
         if value < current_version_number:
             if os.path.exists(os.path.join(state_dir, f'{tensor_name}_{value}.pt')):
                 for f in f'{tensor_name}', f'{tensor_name}_adam_m':
@@ -477,7 +482,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
     async def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         await update_timestamp_lock.acquire()
         try:
-            future_version_number = get_future_version_number()
+            future_version_number = get_future_version_number(plugin.tensor_version_interval)
             old_block_timestamp = None
 
             await fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
@@ -558,7 +563,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         last_future_version_number = await load_json(last_future_version_file, {}, last_future_version_file_lock)
         iteration_number = await load_json(iteration_number_file, {}, iteration_number_file_lock)
 
-        future_version_number = get_future_version_number()
+        future_version_number = get_future_version_number(plugin.tensor_version_interval)
 
         if data['version_number'] != block_timestamps.get(tensor_name, 0):
             delta = block_timestamps.get(tensor_name, 0) - data['version_number']
@@ -612,7 +617,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             await save_json(num_updates_file, num_updates, num_updates_file_lock)
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
-            learning_params = get_sot_learning_hyperparameters(iteration_number[tensor_name])
+            learning_params = plugin.get_sot_learning_hyperparameters(iteration_number[tensor_name])
             future_tensor, m_update = await apply_optimizer(
                 current_version_number,
                 tensor_name,
@@ -852,11 +857,12 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
         parser.add_argument('--public_keys', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
         parser.add_argument('--enable_memory_logging', action='store_true', help="Enable memory logging")
+        parser.add_argument('--job_id', type=int, required=True, help="Job ID for the SOT service")
 
         args = parser.parse_args()
 
         # Create the app with the memory logging flag
-        app = create_app(args.public_keys, enable_memory_logging=args.enable_memory_logging)
+        app = create_app(args.public_keys, args.job_id, enable_memory_logging=args.enable_memory_logging)
 
         logging.info("Starting SOT service...")
 

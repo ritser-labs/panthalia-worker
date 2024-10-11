@@ -14,29 +14,13 @@ import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
-from .plugin import exported_plugin
 import threading
 import aiohttp
-
-model_config = exported_plugin.model_config
-model_adapter = exported_plugin.model_adapter
-dataset = exported_plugin.dataset
-tokenizer = exported_plugin.tokenizer
-get_sot_learning_hyperparameters = exported_plugin.get_sot_learning_hyperparameters
-get_master_learning_hyperparameters = exported_plugin.get_master_learning_hyperparameters
-batch_size = exported_plugin.batch_size
-expected_worker_time = exported_plugin.expected_worker_time
-
-MAX_CONCURRENT_ITERATIONS = exported_plugin.max_concurrent_iterations
-
-PRELOAD_BATCH_COUNT = exported_plugin.preload_batch_count
 
 SOT_PRIVATE_PORT = 5001
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
-TENSOR_VERSION_INTERVAL = exported_plugin.tensor_version_interval
 
 MAX_SUBMIT_TASK_RETRY_DURATION = 300
 
@@ -189,11 +173,11 @@ def download_file(url):
     response = requests.get(url)
     return torch.load(BytesIO(response.content))
 
-def get_future_version_number():
-    return (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
+def get_future_version_number(tensor_version_interval):
+    return (int(time.time()) // tensor_version_interval + 1) * tensor_version_interval
 
-def get_current_version_number():
-    return (int(time.time()) // TENSOR_VERSION_INTERVAL) * TENSOR_VERSION_INTERVAL
+def get_current_version_number(tensor_version_interval):
+    return (int(time.time()) // tensor_version_interval) * tensor_version_interval
 
 def process_trace(trace):
     if isinstance(trace, AttributeDict):

@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import time
-import datetime
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
@@ -18,9 +17,7 @@ from .common import (
     TaskStatus,
     PoolState,
     Task,
-    get_master_learning_hyperparameters,
     async_transact_with_contract_function,
-    TENSOR_VERSION_INTERVAL,
     wait_for_state_change,
     approve_token_once,
     MAX_SUBMIT_TASK_RETRY_DURATION,
@@ -32,6 +29,8 @@ import os
 from eth_account.messages import encode_defunct
 from eth_account import Account
 import uuid
+from .db_adapter import db_adapter
+from .plugin_manager import get_plugin
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -45,6 +44,7 @@ class Master:
         wallets,
         sot_url,
         subnet_addresses,
+        job_id,  # Add job_id to interact with the database
         max_concurrent_iterations=2,
         max_iterations=float('inf'),
         detailed_logs=False,
@@ -61,11 +61,12 @@ class Master:
         self.current_wallet_index = 0
         self.done = False
         self.max_iterations = max_iterations
+        self.job_id = job_id  # Track the job ID
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
         # Initialize contracts
-        asyncio.run(self.initialize_contracts())
+        asyncio.run(self.initialize())
 
         # Setup paths for loss data
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -116,7 +117,7 @@ class Master:
         ) % len(self.wallets)
         return wallet
 
-    async def initialize_contracts(self):
+    async def initialize(self):
         self.abis, self.contracts, self.error_selectors = load_contracts(
             self.web3, self.subnet_addresses
         )
@@ -138,6 +139,7 @@ class Master:
         self.pool = self.web3.eth.contract(
             address=self.pool_address, abi=self.abis["Pool"]
         )
+        self.plugin = get_plugin((await db_adapter.get_job(self.job_id)).plugin_id)
 
     async def approve_tokens_at_start(self):
         tasks = []
@@ -244,6 +246,9 @@ class Master:
                     f"Iteration {iteration_number} - Task submitted successfully. Task ID: {task_id}"
                 )
 
+                # Create a new task in the DB
+                await db_adapter.create_task(self.job_id, task_id, iteration_number, TaskStatus.SelectingSolver)
+
                 return task_id
             except Exception as e:
                 logging.error(
@@ -300,6 +305,7 @@ class Master:
                 await asyncio.sleep(0.5)
 
     async def get_task_result(self, task_type, task_id, iteration_number):
+        result = None
         try:
             task_tuple = await self.contracts[task_type].functions.getTask(
                 task_id
@@ -315,8 +321,10 @@ class Master:
                 task.status == TaskStatus.SolutionSubmitted.value
                 or task.status == TaskStatus.ResolvedCorrect.value
             ):
-                return json.loads(task.postedSolution.decode("utf-8"))
-            return None
+                result = json.loads(task.postedSolution.decode("utf-8"))
+            
+            await db_adapter.update_task_status(task_id, task.status, result)
+            return result
         except Exception as e:
             logging.error(
                 f"Error getting task result for {task_type} with task ID {task_id}: {e}"
@@ -330,7 +338,7 @@ class Master:
         self.iteration += 1
         logging.info(f"Starting iteration {iteration_number}")
 
-        learning_params = get_master_learning_hyperparameters(iteration_number)
+        learning_params = self.plugin.get_master_learning_hyperparameters(iteration_number)
         logging.info(
             f"Learning parameters for iteration {iteration_number}: {learning_params}"
         )
@@ -373,6 +381,9 @@ class Master:
             batch_url,
             targets_url,
         )
+
+        # Update the iteration count in the database
+        await db_adapter.update_job_iteration(self.job_id, self.iteration)
 
         # Schedule the next iteration
         task = asyncio.create_task(
@@ -551,6 +562,12 @@ if __name__ == "__main__":
         help="Path to subnet addresses JSON file",
     )
     parser.add_argument(
+        "--job_id",
+        type=int,
+        required=True,
+        help="Job ID for the task",
+    )
+    parser.add_argument(
         "--max_concurrent_iterations",
         type=int,
         default=4,
@@ -572,6 +589,7 @@ if __name__ == "__main__":
         args.wallets,
         args.sot_url,
         subnet_addresses,
+        args.job_id,
         max_concurrent_iterations=args.max_concurrent_iterations,
         detailed_logs=args.detailed_logs,
     )
