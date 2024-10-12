@@ -9,8 +9,8 @@ import curses
 from flask import Flask, jsonify, send_from_directory
 from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, wait_for_rpc_available, fund_wallets
 from ..db_adapter import db_adapter
-from ..models import init_db
-from ..plugin_manager import get_plugin
+from ..models import init_db, db_path
+from ..plugin_manager import get_plugin, global_plugin_dir
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
@@ -369,6 +369,11 @@ async def main():
     base_url = f"http://localhost:5002"
 
     reset_logs(LOG_DIR)
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    
+    if os.path.exists(global_plugin_dir):
+        shutil.rmtree(global_plugin_dir, ignore_errors=True)
 
     # Start anvil process
     logging.info("Starting anvil...")

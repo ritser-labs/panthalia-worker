@@ -77,6 +77,8 @@ tensor_download_lock = asyncio.Lock()
 # Initialize an event to signal tensor download in progress
 tensor_download_event = asyncio.Event()
 
+subnet_in_db = None
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
     parser.add_argument('--task_types', type=str, required=True, help="Types of tasks to process, separated by '+' if multiple")
@@ -296,7 +298,7 @@ async def handle_event(task_id, task, time_invoked, contract_index):
 
     logging.debug(f"Adding task to queue with ID: {task_id} and params: {task_params}")
     
-    task_db = await db_adapter.get_task(task_id)
+    task_db = await db_adapter.get_task(task_id, subnet_in_db.id)
     
     task_queue_obj = {
         'task_id': task_id,
@@ -309,7 +311,7 @@ async def handle_event(task_id, task, time_invoked, contract_index):
 
     await task_queue.add_task(task_queue_obj)
     
-    get_plugin(task_queue_obj['plugin_id'])
+    await get_plugin(task_queue_obj['plugin_id'])
     
     blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
     
@@ -351,7 +353,7 @@ async def process_tasks():
                 task_id = next_task['task_id']
                 task_params = next_task['task_params']
                 contract_index = next_task['contract_index']
-                plugin = get_plugin(next_task['plugin_id'])
+                plugin = await get_plugin(next_task['plugin_id'])
                 sot_url = next_task['sot_url']
                 time_status_changed = next_task['time_status_changed']  # Extract the time_status_changed
 
@@ -675,7 +677,10 @@ async def get_all_task_ids(last_checked_task_ids):
     return all_task_ids, latest_task_ids
 
 async def main():
+    global subnet_in_db
     logging.info("Starting main process")
+
+    subnet_in_db = await db_adapter.get_subnet_using_address(args.subnet_addresses[0])
     torch.set_default_device(device)
     await initialize_contracts()
 

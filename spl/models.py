@@ -56,12 +56,12 @@ class Task(TimestampMixin, Base):
     __tablename__ = 'tasks'
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
-    task_id = Column(Integer, nullable=False)
+    subnet_task_id = Column(Integer, nullable=False)
     job_iteration = Column(Integer, nullable=False)
     status = Column(Enum(TaskStatus), nullable=False)
     result = Column(JSON, nullable=True)
     
-    __table_args__ = (UniqueConstraint('job_id', 'task_id', name='_job_task_uc'),)
+    __table_args__ = (UniqueConstraint('job_id', 'subnet_task_id', name='_job_task_uc'),)
 
     job = relationship("Job", backref="tasks")
 

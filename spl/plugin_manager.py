@@ -9,14 +9,15 @@ logger = logging.getLogger(__name__)
 
 USE_SECIMPORT = False
 
+
 # Define a global directory for plugins
 global_plugin_dir = '/tmp/my_plugins'  # Or any directory of your choice
-if not os.path.exists(global_plugin_dir):
-    os.makedirs(global_plugin_dir)
 
-# Add the global plugin directory to sys.path if it's not already there
-if global_plugin_dir not in sys.path:
-    sys.path.append(global_plugin_dir)
+def setup_dir():
+    if not os.path.exists(global_plugin_dir):
+        os.makedirs(global_plugin_dir)
+    if global_plugin_dir not in sys.path:
+        sys.path.append(global_plugin_dir)
 
 last_plugin_id = None
 last_plugin = None
@@ -24,6 +25,7 @@ db_adapter = DBAdapter()
 
 async def get_plugin(plugin_id):
     global last_plugin_id, last_plugin
+    setup_dir()
     logger.info(f'Fetching plugin {plugin_id}')
     if plugin_id != last_plugin_id:
         # Create a subdirectory for the plugin (e.g., /tmp/my_plugins/plugin_5)

@@ -1,5 +1,6 @@
 from .models import AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet
 from sqlalchemy import select, update
+from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 import json
@@ -34,17 +35,17 @@ class DBAdapter:
             await session.commit()
             logging.info(f"Marked Job {job_id} as done.")
 
-    async def create_task(self, job_id: int, task_id: int, job_iteration: int, status: TaskStatus):
+    async def create_task(self, job_id: int, subnet_task_id: int, job_iteration: int, status: TaskStatus):
         async with AsyncSessionLocal() as session:
             new_task = Task(
                 job_id=job_id,
-                task_id=task_id,
+                subnet_task_id=subnet_task_id,
                 job_iteration=job_iteration,
                 status=status
             )
             session.add(new_task)
             await session.commit()
-            logging.debug(f"Created Task {task_id} for Job {job_id}, Iteration {job_iteration} with status {status}.")
+            logging.debug(f"Created Task {subnet_task_id} for Job {job_id}, Iteration {job_iteration} with status {status}.")
             return new_task.id
     
     async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int):
@@ -83,12 +84,12 @@ class DBAdapter:
             logging.debug(f"Created Plugin {name} with code {code}.")
             return new_plugin.id
 
-    async def update_task_status(self, task_id: int, status: TaskStatus, result=None):
+    async def update_task_status(self, subnet_task_id: int, status: TaskStatus, result=None):
         async with AsyncSessionLocal() as session:
-            stmt = update(Task).where(Task.task_id == task_id).values(status=status, result=result)
+            stmt = update(Task).where(Task.subnet_task_id == subnet_task_id).values(status=status, result=result)
             await session.execute(stmt)
             await session.commit()
-            logging.debug(f"Updated Task {task_id} to status {status} with result {result}.")
+            logging.debug(f"Updated Task {subnet_task_id} to status {status} with result {result}.")
     
     async def create_state_update(self, job_id: int, state_iteration: int):
         async with AsyncSessionLocal() as session:
@@ -111,15 +112,30 @@ class DBAdapter:
                 logging.error(f"Plugin with ID {plugin_id} not found.")
             return plugin.code
     
-    async def get_task(self, task_id: int):
+    async def get_subnet_using_address(self, address: str):
         async with AsyncSessionLocal() as session:
-            stmt = select(Task).filter_by(task_id=task_id)
+            stmt = select(Subnet).filter_by(address=address)
+            result = await session.execute(stmt)
+            subnet = result.scalar_one_or_none()
+            if subnet:
+                logging.debug(f"Retrieved Subnet: {subnet}")
+            else:
+                logging.error(f"Subnet with address {address} not found.")
+            return subnet
+    
+    async def get_task(self, subnet_task_id: int, subnet_id: int):
+        async with AsyncSessionLocal() as session:
+            # Eager load Job with joinedload
+            stmt = select(Task).options(joinedload(Task.job)).join(Task.job).join(Job.subnet).filter(
+                Task.subnet_task_id == subnet_task_id, 
+                Job.subnet_id == subnet_id
+            )
             result = await session.execute(stmt)
             task = result.scalar_one_or_none()
             if task:
                 logging.debug(f"Retrieved Task: {task}")
             else:
-                logging.error(f"Task with ID {task_id} not found.")
-            return task.job
-    
+                logging.error(f"Task with ID {subnet_task_id} not found or does not match Subnet ID {subnet_id}.")
+            return task
+
 db_adapter = DBAdapter()
