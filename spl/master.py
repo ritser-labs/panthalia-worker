@@ -329,7 +329,7 @@ class Master:
             ):
                 result = json.loads(task.postedSolution.decode("utf-8"))
             
-            await db_adapter.update_task_status(task_id, task.status, result)
+            await db_adapter.update_task_status(task_id, TaskStatus(task.status), result)
             return result
         except Exception as e:
             logger.error(
