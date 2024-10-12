@@ -85,7 +85,7 @@ class DBAdapter:
 
     async def update_task_status(self, task_id: int, status: TaskStatus, result=None):
         async with AsyncSessionLocal() as session:
-            stmt = update(Task).where(Task.id == task_id).values(status=status, result=result)
+            stmt = update(Task).where(Task.task_id == task_id).values(status=status, result=result)
             await session.execute(stmt)
             await session.commit()
             logging.debug(f"Updated Task {task_id} to status {status} with result {result}.")
@@ -113,7 +113,7 @@ class DBAdapter:
     
     async def get_task(self, task_id: int):
         async with AsyncSessionLocal() as session:
-            stmt = select(Task).filter_by(id=task_id)
+            stmt = select(Task).filter_by(task_id=task_id)
             result = await session.execute(stmt)
             task = result.scalar_one_or_none()
             if task:
