@@ -6,6 +6,8 @@ import sys
 import shutil  # For copying directories and files
 import logging
 
+USE_SECIMPORT = False
+
 # Define a global directory for plugins
 global_plugin_dir = '/tmp/my_plugins'  # Or any directory of your choice
 if not os.path.exists(global_plugin_dir):
@@ -71,8 +73,12 @@ async def get_plugin(plugin_id):
                 f.write('# This is the init file for plugin package\n')
 
         # Now use secimport to import the plugin as a package
-        last_plugin = secimport.secure_import(f'plugin_{plugin_id}.plugin_{plugin_id}')
-        last_plugin = getattr(last_plugin, f'plugin_{plugin_id}')
+        if USE_SECIMPORT:
+            last_plugin = secimport.secure_import(f'plugin_{plugin_id}.plugin_{plugin_id}')
+            last_plugin = getattr(last_plugin, f'plugin_{plugin_id}')
+        else:
+            import importlib
+            last_plugin = importlib.import_module(f'plugin_{plugin_id}.plugin_{plugin_id}')
         last_plugin = getattr(last_plugin, 'exported_plugin')
         logging.info(f'Imported plugin {plugin_id} as package: {last_plugin} with dir {dir(last_plugin)}')
         last_plugin_id = plugin_id
