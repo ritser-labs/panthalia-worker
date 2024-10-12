@@ -1,10 +1,11 @@
-import secimport
 from .db_adapter import DBAdapter
 import aiofiles
 import os
 import sys
 import shutil  # For copying directories and files
 import logging
+
+logger = logging.getLogger(__name__)
 
 USE_SECIMPORT = False
 
@@ -23,6 +24,7 @@ db_adapter = DBAdapter()
 
 async def get_plugin(plugin_id):
     global last_plugin_id, last_plugin
+    logger.info(f'Fetching plugin {plugin_id}')
     if plugin_id != last_plugin_id:
         # Create a subdirectory for the plugin (e.g., /tmp/my_plugins/plugin_5)
         plugin_package_dir = os.path.join(global_plugin_dir, f'plugin_{plugin_id}')
@@ -72,15 +74,16 @@ async def get_plugin(plugin_id):
             with open(init_file_path, 'w') as f:
                 f.write('# This is the init file for plugin package\n')
 
-        # Now use secimport to import the plugin as a package
+        logger.info(f'Plugin {plugin_id} code fetched and written to {plugin_path}')
         if USE_SECIMPORT:
+            import secimport
             last_plugin = secimport.secure_import(f'plugin_{plugin_id}.plugin_{plugin_id}')
             last_plugin = getattr(last_plugin, f'plugin_{plugin_id}')
         else:
             import importlib
             last_plugin = importlib.import_module(f'plugin_{plugin_id}.plugin_{plugin_id}')
         last_plugin = getattr(last_plugin, 'exported_plugin')
-        logging.info(f'Imported plugin {plugin_id} as package: {last_plugin} with dir {dir(last_plugin)}')
+        logger.info(f'Imported plugin {plugin_id} as package: {last_plugin} with dir {dir(last_plugin)}')
         last_plugin_id = plugin_id
         last_plugin.model_adapter.initialize_environment()
 

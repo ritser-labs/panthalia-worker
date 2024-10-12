@@ -1,7 +1,17 @@
+import logging
+
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+logger = logging.getLogger(__name__)
+
+
 import asyncio
 import json
-import logging
 import time
+import datetime
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
@@ -31,11 +41,6 @@ from eth_account import Account
 import uuid
 from .db_adapter import db_adapter
 from .plugin_manager import get_plugin
-
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
 
 class Master:
     def __init__(
@@ -79,17 +84,17 @@ class Master:
             try:
                 with open(self.plot_file, "r") as f:
                     self.losses = json.load(f)
-                logging.info(
+                logger.info(
                     f"Loaded {len(self.losses)} existing loss values from {self.plot_file}"
                 )
             except Exception as e:
-                logging.error(
+                logger.error(
                     f"Failed to load existing loss values from {self.plot_file}: {e}"
                 )
                 self.losses = []
         else:
             self.losses = []
-            logging.info(f"No existing plot.json found. Starting fresh.")
+            logger.info(f"No existing plot.json found. Starting fresh.")
 
         # Set up the plot
         self.fig, self.ax = plt.subplots()
@@ -139,7 +144,8 @@ class Master:
         self.pool = self.web3.eth.contract(
             address=self.pool_address, abi=self.abis["Pool"]
         )
-        self.plugin = get_plugin((await db_adapter.get_job(self.job_id)).plugin_id)
+        self.plugin = await get_plugin((await db_adapter.get_job(self.job_id)).plugin_id)
+        logger.info('Initialized contracts and plugin')
 
     async def approve_tokens_at_start(self):
         tasks = []
@@ -173,15 +179,15 @@ class Master:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, "loss_plot.png")
         self.fig.savefig(file_path)  # Save the figure after each update
-        logging.info(f"Saved updated plot to {file_path}")
+        logger.info(f"Saved updated plot to {file_path}")
 
         # Save the updated loss values to plot.json
         try:
             with open(self.plot_file, "w") as f:
                 json.dump(self.losses, f)
-            logging.debug(f"Saved {len(self.losses)} loss values to {self.plot_file}")
+            logger.debug(f"Saved {len(self.losses)} loss values to {self.plot_file}")
         except Exception as e:
-            logging.error(f"Failed to save loss values to {self.plot_file}: {e}")
+            logger.error(f"Failed to save loss values to {self.plot_file}: {e}")
 
     async def submit_task(self, task_type, params, iteration_number):
         max_duration = datetime.timedelta(
@@ -197,7 +203,7 @@ class Master:
             elapsed_time = current_time - start_time
 
             if elapsed_time >= max_duration:
-                logging.error(
+                logger.error(
                     f"Failed to select solver within {max_duration}"
                 )
                 raise RuntimeError(
@@ -210,7 +216,7 @@ class Master:
                         f"No contract loaded for task type {task_type}"
                     )
 
-                logging.info(
+                logger.info(
                     f"Submitting task of type {task_type} with params: {params}"
                 )
                 encoded_params = json.dumps(params).encode("utf-8")
@@ -229,7 +235,7 @@ class Master:
                     encoded_params,
                     attempts=1,
                 )
-                logging.info(
+                logger.info(
                     f"submitTaskRequest transaction receipt: {receipt}"
                 )
 
@@ -242,7 +248,7 @@ class Master:
                     )
 
                 task_id = logs[0]["args"]["taskId"]
-                logging.info(
+                logger.info(
                     f"Iteration {iteration_number} - Task submitted successfully. Task ID: {task_id}"
                 )
 
@@ -251,10 +257,10 @@ class Master:
 
                 return task_id
             except Exception as e:
-                logging.error(
+                logger.error(
                     f"Error submitting task on attempt {attempt}: {e}"
                 )
-                logging.error(f"Retrying in {retry_delay} seconds...")
+                logger.error(f"Retrying in {retry_delay} seconds...")
                 retry_delay = min(2 * retry_delay, 60)
                 await asyncio.sleep(retry_delay)
 
@@ -269,7 +275,7 @@ class Master:
             elapsed_time = current_time - start_time
 
             if elapsed_time >= max_duration:
-                logging.error(
+                logger.error(
                     f"Failed to select solver within {max_duration}"
                 )
                 raise RuntimeError(
@@ -277,7 +283,7 @@ class Master:
                 )
 
             try:
-                logging.info(f"Selecting solver for task ID: {task_id}")
+                logger.info(f"Selecting solver for task ID: {task_id}")
 
                 start_transact_time = time.time()
                 receipt = await async_transact_with_contract_function(
@@ -290,18 +296,18 @@ class Master:
                 )
                 end_transact_time = time.time()
 
-                logging.info(
+                logger.info(
                     f"Transaction duration: {end_transact_time - start_transact_time} seconds"
                 )
-                logging.info(
+                logger.info(
                     f"Iteration {iteration_number} - selectSolver transaction receipt: {receipt}"
                 )
                 return True
             except Exception as e:
-                logging.error(
+                logger.error(
                     f"Error selecting solver on attempt {attempt}: {e}"
                 )
-                logging.error(f"Retrying...")
+                logger.error(f"Retrying...")
                 await asyncio.sleep(0.5)
 
     async def get_task_result(self, task_type, task_id, iteration_number):
@@ -311,10 +317,10 @@ class Master:
                 task_id
             ).call()
             task = Task(*task_tuple)
-            logging.info(
+            logger.info(
                 f"Iteration {iteration_number} - {task_type} Task status: {task.status}"
             )
-            logging.info(
+            logger.info(
                 f"Expected status: {TaskStatus.SolutionSubmitted.value}"
             )
             if (
@@ -326,7 +332,7 @@ class Master:
             await db_adapter.update_task_status(task_id, task.status, result)
             return result
         except Exception as e:
-            logging.error(
+            logger.error(
                 f"Error getting task result for {task_type} with task ID {task_id}: {e}"
             )
             return None
@@ -336,15 +342,15 @@ class Master:
             self.done = True
             return
         self.iteration += 1
-        logging.info(f"Starting iteration {iteration_number}")
+        logger.info(f"Starting iteration {iteration_number}")
 
         learning_params = self.plugin.get_master_learning_hyperparameters(iteration_number)
-        logging.info(
+        logger.info(
             f"Learning parameters for iteration {iteration_number}: {learning_params}"
         )
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
-        logging.info(f"Iteration {iteration_number}: Starting training task")
+        logger.info(f"Iteration {iteration_number}: Starting training task")
         task_params = {
             "batch_url": batch_url,
             "targets_url": targets_url,
@@ -394,7 +400,7 @@ class Master:
         self.update_plot()
 
     async def run_main(self):
-        logging.info("Starting main process")
+        logger.info("Starting main process")
         await self.approve_tokens_at_start()
 
         # Start the initial set of iterations
@@ -465,11 +471,11 @@ class Master:
                 headers=headers,
             ) as response:
                 if response.status != 200:
-                    logging.error(
+                    logger.error(
                         f"Failed to update SOT for {tensor_name}: {await response.text()}"
                     )
                 else:
-                    logging.info(
+                    logger.info(
                         f"Updated SOT for {tensor_name} with result: {result}"
                     )
 
@@ -481,11 +487,11 @@ class Master:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload) as response:
                 if response.status != 200:
-                    logging.error(
+                    logger.error(
                         f"Failed to update loss value: {await response.text()}"
                     )
                 else:
-                    logging.info(
+                    logger.info(
                         f"Updated latest loss value to {loss_value}"
                     )
 
@@ -498,7 +504,7 @@ class Master:
         retries = 0
         while retries < max_retries:
             try:
-                logging.info(f"Retrieving batch and targets URL from {url}")
+                logger.info(f"Retrieving batch and targets URL from {url}")
                 message = json.dumps(
                     self.generate_message("get_batch"), sort_keys=True
                 )
@@ -515,11 +521,11 @@ class Master:
                                 self.sot_url + response_json["targets_url"],
                             )
                         else:
-                            logging.error(
+                            logger.error(
                                 f"Request failed with status code {response.status}"
                             )
             except Exception as e:
-                logging.error(
+                logger.error(
                     f"Request failed: {e}. Retrying in {retry_delay} seconds..."
                 )
 
