@@ -48,11 +48,11 @@ case $SERVICE_TYPE in
         eval $CMD
         ;;
     master)
-        python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES} --max_concurrent_iterations ${MAX_CONCURRENT_ITERATIONS}
+        python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES} --max_concurrent_iterations ${MAX_CONCURRENT_ITERATIONS} --job_id ${JOB_ID}
         ;;
     sot)
         #hypercorn "spl.sot:create_app('${PUBLIC_KEYS}')" --bind "0.0.0.0:${SOT_PRIVATE_PORT}"
-        python -m spl.sot --public_keys ${PUBLIC_KEYS}
+        python -m spl.sot --public_keys ${PUBLIC_KEYS} --job_id ${JOB_ID}
         ;;
     *)
         echo "Error: Unknown service type"

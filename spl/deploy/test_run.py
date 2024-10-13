@@ -7,6 +7,9 @@ import requests
 import threading
 import curses
 from ..common import load_abi, wait_for_rpc_available, wait_for_sot, SOT_PRIVATE_PORT, fund_wallets, MAX_CONCURRENT_ITERATIONS
+from ..db_adapter import db_adapter
+from ..models import init_db
+from ..plugin_manager import get_plugin
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 from .cloud_adapters.runpod import launch_instance_and_record_logs, terminate_all_pods, get_public_ip_and_port, INPUT_JSON_PATH
@@ -22,6 +25,7 @@ import signal
 from .util import is_port_open
 import paramiko
 import runpod
+import aiofiles
 from .cloud_adapters.runpod import get_pod_ssh_ip_port, reconnect_and_initialize_existing_pod
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -40,9 +44,11 @@ ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 STATE_FILE = os.path.join(STATE_DIR, 'state.json')  # State file to save/load state
-
+plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
 REMOTE_MODEL_FILE = '/app/spl/data/state/model.pt'
 LOCAL_MODEL_FILE = os.path.join(parent_dir, 'data', 'state', 'model.pt')
+
+GUESSED_JOB_ID = 0
 
 DOCKER_IMAGE = 'runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04'
 GPU_TYPE = 'NVIDIA GeForce RTX 4090'
@@ -80,7 +86,6 @@ def parse_args():
 
 args = parse_args()
 
-sync_status = {}
 latest_loss_cache = {
     'value': None,
     'last_fetched': 0
@@ -504,6 +509,7 @@ async def main():
             'WORLD_SIZE': '1',
             'PUBLIC_KEYS': INPUT_JSON_PATH + '_0',
             'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
+            'JOB_ID': str(GUESSED_JOB_ID),
         }
 
         logging.info(f'Environment variables for SOT: {env}')
@@ -609,6 +615,22 @@ async def main():
         token_address = await pool_contract.functions.token().call()
         token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
 
+
+        await init_db()
+        
+        async with aiofiles.open(plugin_file, mode='r') as f:
+            code = await f.read()
+        plugin_id = await db_adapter.create_plugin('plugin', code)
+        
+        subnet_id = await db_adapter.create_subnet(list(subnet_addresses.values())[0], args.rpc_url)
+        
+        job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
+        
+        plugin = await get_plugin(plugin_id)
+
+        assert job_id == GUESSED_JOB_ID, f"Expected job ID {GUESSED_JOB_ID}, got {job_id}"
+
+
         logging.info('Generating wallets')
 
         await fund_wallets(web3, args.private_key, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
@@ -713,6 +735,7 @@ async def main():
                 'SOT_URL': sot_url,
                 'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
                 'MAX_CONCURRENT_ITERATIONS': MAX_CONCURRENT_ITERATIONS,
+                'JOB_ID': str(GUESSED_JOB_ID),
             }
 
             if args.torch_compile:
