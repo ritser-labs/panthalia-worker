@@ -27,7 +27,6 @@ DATA_DIR = os.path.join(parent_dir, 'data')
 STATE_DIR = os.path.join(DATA_DIR, 'state')
 TEMP_DIR = os.path.join(STATE_DIR, 'temp')
 MASTER_WALLETS_FILE = os.path.join(DATA_DIR, 'master_wallets.json')
-MASTER_PUBLIC_KEYS_FILE = os.path.join(DATA_DIR, 'master_public_keys.json')
 DEPLOY_SCRIPT = os.path.join(parent_dir, 'script', 'Deploy.s.sol')
 LOG_DIR = os.path.join(parent_dir, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
@@ -440,6 +439,10 @@ async def main():
         subnet_id = await db_adapter.create_subnet(list(subnet_addresses.values())[0], args.rpc_url)
         
         job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
+
+        sot_id = await db_adapter.create_sot(job_id, args.sot_url)
+
+        sot_perm_id = (await db_adapter.get_sot(sot_id)).perm
         
         plugin = await get_plugin(plugin_id)
 
@@ -450,10 +453,10 @@ async def main():
 
         with open(MASTER_WALLETS_FILE, 'w') as f:
             json.dump(master_wallets, f)
-
-        master_public_keys = [wallet['address'] for wallet in master_wallets]
-        with open(MASTER_PUBLIC_KEYS_FILE, 'w') as f:
-            json.dump(master_public_keys, f)
+        
+        for wallet in master_wallets:
+            logging.info(f"Creating permission for wallet {wallet['address']} with perm_id {sot_perm_id}")
+            await db_adapter.create_perm(wallet['address'], sot_perm_id)
 
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
         await fund_wallets(web3, args.private_key, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
@@ -467,8 +470,7 @@ async def main():
         sot_process = subprocess.Popen(
             [
                 'python', '-m', 'spl.sot',
-                '--public_keys', MASTER_PUBLIC_KEYS_FILE,
-                '--job_id', str(job_id),
+                '--sot_id', str(sot_id),
             ],
             stdout=sot_log, stderr=sot_log, cwd=package_root_dir
         )

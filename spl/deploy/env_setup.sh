@@ -52,7 +52,7 @@ case $SERVICE_TYPE in
         ;;
     sot)
         #hypercorn "spl.sot:create_app('${PUBLIC_KEYS}')" --bind "0.0.0.0:${SOT_PRIVATE_PORT}"
-        python -m spl.sot --public_keys ${PUBLIC_KEYS} --job_id ${JOB_ID}
+        python -m spl.sot --sot_id ${SOT_ID}
         ;;
     *)
         echo "Error: Unknown service type"

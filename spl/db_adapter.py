@@ -1,4 +1,6 @@
-from .models import AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet
+from .models import (
+    AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet,
+    Perms, Sot, PermDescription, PermType)
 from sqlalchemy import select, update
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -137,5 +139,79 @@ class DBAdapter:
             else:
                 logging.error(f"Task with ID {subnet_task_id} not found or does not match Subnet ID {subnet_id}.")
             return task
+    
+    async def has_perm(self, address: str, perm: int):
+        async with AsyncSessionLocal() as session:
+            stmt = select(Perms).filter_by(address=address, perm=perm)
+
+            result = await session.execute(stmt)
+            perm = result.scalar_one_or_none()
+            return perm
+    async def set_last_nonce(self, address: str, perm: int, last_nonce: str):
+        async with AsyncSessionLocal() as session:
+            stmt = update(Perms).where(
+                Perms.address == address,
+                Perms.perm == perm
+            ).values(last_nonce=last_nonce)
+            await session.execute(stmt)
+            await session.commit()
+            logging.debug(f"Updated last nonce for address {address} to {last_nonce}")
+    
+    async def get_sot(self, id: int):
+        async with AsyncSessionLocal() as session:
+            stmt = select(Sot).filter_by(id=id)
+            result = await session.execute(stmt)
+            sot = result.scalar_one_or_none()
+            if sot:
+                logging.debug(f"Retrieved SOT: {sot}")
+            else:
+                logging.error(f"SOT with ID {id} not found.")
+            return sot
+    
+    async def create_perm(self, address: str, perm: int):
+        async with AsyncSessionLocal() as session:
+            new_perm = Perms(
+                address=address,
+                perm=perm
+            )
+            session.add(new_perm)
+            await session.commit()
+            logging.debug(f"Created Perm for address {address} with perm {perm}.")
+            return new_perm.id
+    
+    async def create_perm_description(self, perm_type: PermType):
+        async with AsyncSessionLocal() as session:
+            new_perm_description = PermDescription(
+                perm_type=perm_type
+            )
+            session.add(new_perm_description)
+            await session.commit()
+            perm_id = new_perm_description.id
+            logging.debug(f"Created Perm Description with type {perm_type} and id {perm_id}.")
+            return perm_id
+    
+    async def create_sot(self, job_id: int, url: str):
+        async with AsyncSessionLocal() as session:
+            perm = await self.create_perm_description(perm_type=PermType.ModifySot)
+            new_sot = Sot(
+                job_id=job_id,
+                perm=perm,
+                url=url
+            )
+            session.add(new_sot)
+            await session.commit()
+            logging.debug(f"Created SOT for Job {job_id} with perm {perm}.")
+            return new_sot.id
+    
+    async def get_sot(self, job_id: int):
+        async with AsyncSessionLocal() as session:
+            stmt = select(Sot).filter_by(job_id=job_id)
+            result = await session.execute(stmt)
+            sot = result.scalar_one_or_none()
+            if sot:
+                logging.debug(f"Retrieved SOT: {sot}")
+            else:
+                logging.error(f"SOT for Job {job_id} not found.")
+            return sot
 
 db_adapter = DBAdapter()

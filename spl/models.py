@@ -5,6 +5,7 @@ from datetime import datetime
 from .common import TaskStatus
 import os
 import asyncio
+import enum
 
 # Get the directory of the script
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -22,23 +23,25 @@ engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
-class Plugin(Base):
+class PermType(enum.Enum):
+    ModifyDb = 0
+    ModifySot = 1
+
+class TimestampMixin:
+    last_updated = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+class Plugin(TimestampMixin, Base):
     __tablename__ = 'plugins'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     code = Column(Text, nullable=False)
-    last_updated = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class Subnet(Base):
     __tablename__ = 'subnets'
     id = Column(Integer, primary_key=True, index=True)
     address = Column(String, nullable=False)
     rpc_url = Column(String, nullable=False)
-
-class TimestampMixin:
-    last_updated = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
-    submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
 class Job(TimestampMixin, Base):
     __tablename__ = 'jobs'
     id = Column(Integer, primary_key=True, index=True)
@@ -73,6 +76,27 @@ class StateUpdate(Base):
     data = Column(JSON, nullable=False)
 
     job = relationship("Job", backref="state_updates")
+
+class Perms(Base):
+    __tablename__ = 'perms'
+    id = Column(Integer, primary_key=True, index=True)
+    address = Column(String, nullable=False, index=True)
+    perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
+    last_nonce = Column(String, nullable=False, default=0)
+
+class Sot(Base):
+    __tablename__ = 'sots'
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
+    perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
+    url = Column(String, nullable=False)
+
+    job = relationship("Job", backref="sots")
+
+class PermDescription(Base):
+    __tablename__ = 'perm_descriptions'
+    id = Column(Integer, primary_key=True, index=True)
+    perm_type = Column(Enum(PermType), nullable=False)
 
 async def init_db():
     async with engine.begin() as conn:

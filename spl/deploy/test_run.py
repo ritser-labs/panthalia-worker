@@ -48,7 +48,8 @@ plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
 REMOTE_MODEL_FILE = '/app/spl/data/state/model.pt'
 LOCAL_MODEL_FILE = os.path.join(parent_dir, 'data', 'state', 'model.pt')
 
-GUESSED_JOB_ID = 0
+GUESSED_SUBNET_ID = 1
+GUESSED_PLUGIN_ID = 1
 
 DOCKER_IMAGE = 'runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04'
 GPU_TYPE = 'NVIDIA GeForce RTX 4090'
@@ -475,6 +476,11 @@ def save_state(state):
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f)
 
+def check_guessed_ids(guessed_id, actual_id, name):
+    if guessed_id != actual_id:
+        logging.error(f"Expected {name} ID {actual_id}, got {guessed_id}")
+        exit(1)
+
 async def main():
     global sot_url, rpc_url
     processes = {}
@@ -493,7 +499,6 @@ async def main():
     # Reset logs
     reset_logs(LOG_DIR)
     master_wallets = generate_wallets(args.num_master_wallets)
-    master_public_keys = [wallet['address'] for wallet in master_wallets]
 
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
@@ -502,17 +507,21 @@ async def main():
     if 'sot' not in state['pods']:
         logging.info("Starting SOT instance...")
 
+
+        job_id = await db_adapter.create_job('test_job', GUESSED_PLUGIN_ID, GUESSED_SUBNET_ID, args.sot_url, 0)
+        sot_id = await db_adapter.create_sot(job_id, args.sot_url)
+
         env = {
             'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
             'SERVICE_TYPE': 'sot',
             'RANK': '0',
             'WORLD_SIZE': '1',
-            'PUBLIC_KEYS': INPUT_JSON_PATH + '_0',
             'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
-            'JOB_ID': str(GUESSED_JOB_ID),
+            'SOT_ID': str(sot_id),
         }
 
         logging.info(f'Environment variables for SOT: {env}')
+
 
         # Start the SOT service on a remote instance
         sot_promise = launch_instance_and_record_logs(
@@ -525,8 +534,7 @@ async def main():
             log_file=SOT_LOG_FILE,
             template_id=BASE_TEMPLATE_ID,
             cmd=DOCKER_CMD,
-            env=env,
-            input_jsons=[master_public_keys]
+            env=env
         )
     if 'anvil' not in state['pods']:
         logging.info("Starting Anvil instance...")
@@ -623,12 +631,16 @@ async def main():
         plugin_id = await db_adapter.create_plugin('plugin', code)
         
         subnet_id = await db_adapter.create_subnet(list(subnet_addresses.values())[0], args.rpc_url)
-        
-        job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
-        
+    
         plugin = await get_plugin(plugin_id)
 
-        assert job_id == GUESSED_JOB_ID, f"Expected job ID {GUESSED_JOB_ID}, got {job_id}"
+        check_guessed_ids(subnet_id, GUESSED_SUBNET_ID, 'Subnet')
+        check_guessed_ids(plugin_id, GUESSED_PLUGIN_ID, 'Plugin')
+
+
+        sot_perm_id = (await db_adapter.get_sot(sot_id)).perm
+        for wallet in master_wallets:
+            await db_adapter.create_perm(wallet['address'], sot_perm_id)
 
 
         logging.info('Generating wallets')
@@ -735,7 +747,7 @@ async def main():
                 'SOT_URL': sot_url,
                 'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
                 'MAX_CONCURRENT_ITERATIONS': MAX_CONCURRENT_ITERATIONS,
-                'JOB_ID': str(GUESSED_JOB_ID),
+                'JOB_ID': str(job_id),
             }
 
             if args.torch_compile:

@@ -11,8 +11,6 @@ import time
 import random
 from werkzeug.utils import secure_filename
 from tqdm import tqdm
-from eth_account import Account
-from eth_account.messages import encode_defunct
 from web3 import Web3
 import functools
 from filelock import FileLock
@@ -20,6 +18,7 @@ import psutil
 import tracemalloc
 import aiofiles
 import shutil
+from .api_auth import load_json, save_json, requires_authentication
 
 # Import your custom modules
 from .common import (
@@ -53,7 +52,6 @@ block_timestamps_file_lock = FileLock(os.path.join(state_dir, 'block_timestamps.
 num_updates_file_lock = FileLock(os.path.join(state_dir, 'num_updates.json.lock'))
 last_future_version_file_lock = FileLock(os.path.join(state_dir, 'last_future_version_number.json.lock'))
 iteration_number_file_lock = FileLock(os.path.join(state_dir, 'iteration_number.json.lock'))
-used_nonces_file_lock = FileLock(os.path.join(state_dir, 'used_nonces.json.lock'))
 
 # Initialize locks for thread safety
 latest_loss_lock = asyncio.Lock()
@@ -73,7 +71,6 @@ logging.getLogger('.adapters.dataloader').setLevel(logging.INFO)
 
 # Add a global variable to control memory logging
 MEMORY_LOGGING_ENABLED = False
-
 
 def log_memory_usage(note=''):
     """Log the current memory usage of the process if enabled."""
@@ -127,7 +124,7 @@ def nag_update(params, grads, m, lr=0.002, weight_decay=0.2, beta1=0.9, eps=1e-6
     return new_params, new_m
 
 
-def create_app(public_keys_file, job_id, enable_memory_logging=False):
+def create_app(sot_id, enable_memory_logging=False):
     """Create and configure the app."""
     global MEMORY_LOGGING_ENABLED
     MEMORY_LOGGING_ENABLED = enable_memory_logging
@@ -149,34 +146,23 @@ def create_app(public_keys_file, job_id, enable_memory_logging=False):
     os.makedirs(state_dir, exist_ok=True)
     # Initialize variables
     update_timestamp_lock = asyncio.Lock()
-    master_public_keys = None
     
     plugin_id = None
     plugin = None
 
-    async def save_json(file_path, data, file_lock):
-        with file_lock:
-            async with aiofiles.open(file_path, 'w') as f:
-                await f.write(json.dumps(data))
+    sot_db_obj = None
+    job_id = None
+    perm_db = None
 
-    async def load_json(file_path, default, file_lock):
-        with file_lock:
-            if os.path.exists(file_path):
-                async with aiofiles.open(file_path, 'r') as f:
-                    content = await f.read()
-                    if not content.strip():  # Check if the file is empty
-                        logging.error(f"The file {file_path} is empty. Returning default value.")
-                        return default
-                    try:
-                        return json.loads(content)  # Try loading the JSON content
-                    except json.JSONDecodeError as e:
-                        logging.error(f"JSONDecodeError in file {file_path}: {e}. Returning default value.")
-                        async with aiofiles.open(file_path, 'w') as f:
-                            await f.write(json.dumps(default))
-                        return default
-            else:
-                logging.info(f"The file {file_path} does not exist. Saving default value.")
-                return default
+    def requires_auth(f):
+        def get_perm_db():
+            nonlocal perm_db
+            return perm_db
+
+        return requires_authentication(
+            get_perm_db
+        )(f)
+
 
     def set_dict_and_adam(dict_obj, tensor_name, value):
         dict_obj[tensor_name] = value
@@ -259,16 +245,23 @@ def create_app(public_keys_file, job_id, enable_memory_logging=False):
         return batch_filename, targets_filename
 
     async def initialize_service():
-        nonlocal master_public_keys, plugin_id, plugin
+        nonlocal plugin_id, plugin, sot_db_obj, job_id, perm_db
         logging.info("Initializing distributed environment and tensors")
 
+
+
+        sot_db_obj = await db_adapter.get_sot(sot_id)
+
+        job_id = sot_db_obj.job_id
+        perm_db = sot_db_obj.perm
  
         plugin_id = (await db_adapter.get_job(job_id)).plugin_id
         
         plugin = await get_plugin(plugin_id)
+
+        logging.info(
+            f"Initializing service for SOT {sot_id}, job {job_id}, plugin {plugin_id}, perm {perm_db}")
         
-        async with aiofiles.open(public_keys_file, 'r') as f:
-            master_public_keys = json.loads(await f.read())
         plugin.model_adapter.initialize_environment('gloo')
         await initialize_all_tensors()
         plugin.dataset.initialize_dataset()
@@ -303,70 +296,6 @@ def create_app(public_keys_file, job_id, enable_memory_logging=False):
         log_memory_usage('Health check endpoint')
         return jsonify({'status': 'healthy'}), 200
 
-    def verify_signature(message, signature):
-        nonlocal master_public_keys
-        snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Take snapshot before the operation
-
-        message = encode_defunct(text=message)
-        recovered_address = Account.recover_message(message, signature=signature)
-
-        if MEMORY_LOGGING_ENABLED:
-            snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
-            log_memory_diff(snapshot_before, snapshot_after, note='After verifying signature')  # Log memory differences
-
-        logging.debug(f"Recovered address: {recovered_address}, Expected addresses: {master_public_keys}")
-        return recovered_address.lower() in [key.lower() for key in master_public_keys]
-
-    def requires_authentication(f):
-        @functools.wraps(f)
-        async def decorated_function(*args, **kwargs):
-            auth_header = request.headers.get('Authorization')
-            logging.debug(f"Authorization header: {auth_header}")
-            if not auth_header:
-                logging.error("Authorization header missing")
-                return jsonify({'error': 'Authorization header missing'}), 401
-
-            try:
-                message, signature = auth_header.rsplit(':', 1)
-            except ValueError:
-                logging.error("Invalid Authorization header format")
-                return jsonify({'error': 'Invalid Authorization header format'}), 401
-
-            if not verify_signature(message, signature):
-                logging.error("Invalid signature")
-                return jsonify({'error': 'Invalid signature'}), 403
-
-            # Parse the message to extract the nonce and timestamp
-            try:
-                message_data = json.loads(message)
-                nonce = message_data['nonce']
-                timestamp = message_data['timestamp']
-                logging.debug(f"Message nonce: {nonce}, timestamp: {timestamp}")
-            except (KeyError, json.JSONDecodeError):
-                logging.error("Invalid message format")
-                return jsonify({'error': 'Invalid message format'}), 401
-
-            # Load the used nonces from file
-            used_nonces = await load_json(os.path.join(state_dir, 'used_nonces.json'), {}, used_nonces_file_lock)
-
-            # Check if the nonce has been used before
-            if nonce in used_nonces:
-                logging.error("Nonce already used")
-                return jsonify({'error': 'Nonce already used'}), 403
-
-            # Check if the message has expired (validity period of 5 minutes)
-            current_time = int(time.time())
-            if current_time - timestamp > 300:
-                logging.error("Message expired")
-                return jsonify({'error': 'Message expired'}), 403
-
-            # Store the nonce to prevent reuse
-            used_nonces[nonce] = True
-            await save_json(os.path.join(state_dir, 'used_nonces.json'), used_nonces, used_nonces_file_lock)
-
-            return await f(*args, **kwargs)
-        return decorated_function
-
     synced_workers = 0
 
     @app.route('/report_sync', methods=['POST'])
@@ -381,7 +310,7 @@ def create_app(public_keys_file, job_id, enable_memory_logging=False):
         return jsonify(synced_workers)
 
     @app.route('/get_batch', methods=['POST'])
-    @requires_authentication
+    @requires_auth
     async def get_batch():
         logging.info("Accessing /get_batch endpoint")
         try:
@@ -544,7 +473,7 @@ def create_app(public_keys_file, job_id, enable_memory_logging=False):
         return os.path.join(state_dir, path_relative_to_state)
 
     @app.route('/update_state', methods=['POST'])
-    @requires_authentication
+    @requires_auth
     async def update_state():
         logging.info("Accessing /update_state endpoint")
         data = await request.get_json()
@@ -855,14 +784,13 @@ if __name__ == "__main__":
 
     def main():
         parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
-        parser.add_argument('--public_keys', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
         parser.add_argument('--enable_memory_logging', action='store_true', help="Enable memory logging")
-        parser.add_argument('--job_id', type=int, required=True, help="Job ID for the SOT service")
+        parser.add_argument('--sot_id', type=int, required=True, help="ID for the SOT service")
 
         args = parser.parse_args()
 
         # Create the app with the memory logging flag
-        app = create_app(args.public_keys, args.job_id, enable_memory_logging=args.enable_memory_logging)
+        app = create_app(args.sot_id, enable_memory_logging=args.enable_memory_logging)
 
         logging.info("Starting SOT service...")
 
