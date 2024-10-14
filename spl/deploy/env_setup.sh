@@ -37,7 +37,7 @@ cd ..
 case $SERVICE_TYPE in
     worker)
         # Build the command for the worker service
-        CMD="python -m spl.worker --task_types ${TASK_TYPES} --subnet_addresses ${SUBNET_ADDRESSES} --private_keys ${PRIVATE_KEYS} --rpc_url ${RPC_URL} --sot_url ${SOT_URL} --pool_address ${POOL_ADDRESS} --group ${GROUP} --backend ${BACKEND}"
+        CMD="python -m spl.worker --task_types ${TASK_TYPES} --subnet_addresses ${SUBNET_ADDRESSES} --private_keys ${PRIVATE_KEYS} --rpc_url ${RPC_URL} --sot_url ${SOT_URL} --pool_address ${POOL_ADDRESS} --group ${GROUP} --backend ${BACKEND} --db_url ${DB_URL}"
 
         # Append --torch_compile if TORCH_COMPILE is set to true
         if [ "$TORCH_COMPILE" = "true" ]; then
@@ -48,11 +48,11 @@ case $SERVICE_TYPE in
         eval $CMD
         ;;
     master)
-        python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES} --max_concurrent_iterations ${MAX_CONCURRENT_ITERATIONS} --job_id ${JOB_ID}
+        python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES} --max_concurrent_iterations ${MAX_CONCURRENT_ITERATIONS} --job_id ${JOB_ID} --db_url ${DB_URL}
         ;;
     sot)
         #hypercorn "spl.sot:create_app('${PUBLIC_KEYS}')" --bind "0.0.0.0:${SOT_PRIVATE_PORT}"
-        python -m spl.sot --sot_id ${SOT_ID}
+        python -m spl.sot --sot_id ${SOT_ID} --db_url ${DB_URL} --private_key ${PRIVATE_KEY}
         ;;
     *)
         echo "Error: Unknown service type"

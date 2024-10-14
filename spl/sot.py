@@ -19,6 +19,7 @@ import tracemalloc
 import aiofiles
 import shutil
 from .api_auth import load_json, save_json, requires_authentication
+from .db.db_adapter_client import DBAdapterClient
 
 # Import your custom modules
 from .common import (
@@ -30,7 +31,6 @@ from .common import (
 )
 from .device import device
 from .plugin_manager import get_plugin
-from .db_adapter import db_adapter
 
 # Constants for batch preloading
 dataset_iterator = None
@@ -124,7 +124,7 @@ def nag_update(params, grads, m, lr=0.002, weight_decay=0.2, beta1=0.9, eps=1e-6
     return new_params, new_m
 
 
-def create_app(sot_id, enable_memory_logging=False):
+def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
     """Create and configure the app."""
     global MEMORY_LOGGING_ENABLED
     MEMORY_LOGGING_ENABLED = enable_memory_logging
@@ -153,13 +153,19 @@ def create_app(sot_id, enable_memory_logging=False):
     sot_db_obj = None
     job_id = None
     perm_db = None
+    db_adapter = None
 
     def requires_auth(f):
+        def get_db_adapter():
+            nonlocal db_adapter
+            return db_adapter
+
         def get_perm_db():
             nonlocal perm_db
             return perm_db
 
         return requires_authentication(
+            get_db_adapter,
             get_perm_db
         )(f)
 
@@ -273,8 +279,13 @@ def create_app(sot_id, enable_memory_logging=False):
 
     @app.before_serving
     async def before_serving():
+        nonlocal db_adapter
         """Hook to run before the app starts serving."""
         logging.info("App is starting to serve.")
+        db_adapter = DBAdapterClient(
+            db_url,
+            private_key
+        )
         await initialize_service()  # Initialize asynchronously
 
     @app.after_serving
@@ -786,6 +797,9 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
         parser.add_argument('--enable_memory_logging', action='store_true', help="Enable memory logging")
         parser.add_argument('--sot_id', type=int, required=True, help="ID for the SOT service")
+        parser.add_argument('--db_url', type=str, required=True, help="URL for the database")
+        parser.add_argument('--private_key', type=str, required=True, help="Private key for the database")
+
 
         args = parser.parse_args()
 

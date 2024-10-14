@@ -39,7 +39,7 @@ import os
 from eth_account.messages import encode_defunct
 from eth_account import Account
 import uuid
-from .db_adapter import db_adapter
+from .db.db_adapter_client import DBAdapterClient
 from .plugin_manager import get_plugin
 
 class Master:
@@ -50,6 +50,7 @@ class Master:
         sot_url,
         subnet_addresses,
         job_id,  # Add job_id to interact with the database
+        db_url,
         max_concurrent_iterations=2,
         max_iterations=float('inf'),
         detailed_logs=False,
@@ -67,6 +68,7 @@ class Master:
         self.done = False
         self.max_iterations = max_iterations
         self.job_id = job_id  # Track the job ID
+        self.db_adapter = DBAdapterClient(db_url, self.wallets[0]["private_key"])
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
@@ -144,7 +146,7 @@ class Master:
         self.pool = self.web3.eth.contract(
             address=self.pool_address, abi=self.abis["Pool"]
         )
-        self.plugin = await get_plugin((await db_adapter.get_job(self.job_id)).plugin_id)
+        self.plugin = await get_plugin((await self.db_adapter.get_job(self.job_id)).plugin_id)
         logger.info('Initialized contracts and plugin')
 
     async def approve_tokens_at_start(self):
@@ -253,7 +255,7 @@ class Master:
                 )
 
                 # Create a new task in the DB
-                await db_adapter.create_task(self.job_id, task_id, iteration_number, TaskStatus.SelectingSolver)
+                await self.db_adapter.create_task(self.job_id, task_id, iteration_number, TaskStatus.SelectingSolver)
 
                 return task_id
             except Exception as e:
@@ -329,7 +331,7 @@ class Master:
             ):
                 result = json.loads(task.postedSolution.decode("utf-8"))
             
-            await db_adapter.update_task_status(task_id, TaskStatus(task.status), result)
+            await self.db_adapter.update_task_status(task_id, TaskStatus(task.status), result)
             return result
         except Exception as e:
             logger.error(
@@ -389,7 +391,7 @@ class Master:
         )
 
         # Update the iteration count in the database
-        await db_adapter.update_job_iteration(self.job_id, self.iteration)
+        await self.db_adapter.update_job_iteration(self.job_id, self.iteration)
 
         # Schedule the next iteration
         task = asyncio.create_task(
@@ -420,9 +422,9 @@ class Master:
             else:
                 await asyncio.sleep(1)  # Prevent tight loop
 
-    def sign_message(self, message, wallet):
+    def sign_message(self, message):
         message = encode_defunct(text=message)
-        account = self.web3.eth.account.from_key(wallet["private_key"])
+        account = self.web3.eth.account.from_key(self.wallets[0]["private_key"])
         signed_message = account.sign_message(message)
         return signed_message.signature.hex()
 
@@ -457,11 +459,10 @@ class Master:
             **learning_params,
         }
 
-        wallet = self.get_next_wallet()
         message = json.dumps(
             self.generate_message("update_state"), sort_keys=True
         )
-        signature = self.sign_message(message, wallet)
+        signature = self.sign_message(message)
         headers = {"Authorization": f"{message}:{signature}"}
 
         async with aiohttp.ClientSession() as session:
@@ -496,7 +497,6 @@ class Master:
                     )
 
     async def get_batch_and_targets_url(self):
-        wallet = self.get_next_wallet()
         url = os.path.join(self.sot_url, "get_batch")
 
         retry_delay = 1
@@ -508,7 +508,7 @@ class Master:
                 message = json.dumps(
                     self.generate_message("get_batch"), sort_keys=True
                 )
-                signature = self.sign_message(message, wallet)
+                signature = self.sign_message(message)
                 headers = {"Authorization": f"{message}:{signature}"}
                 async with aiohttp.ClientSession() as session:
                     async with session.post(

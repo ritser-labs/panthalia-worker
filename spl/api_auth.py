@@ -7,7 +7,7 @@ import logging
 from quart import request, jsonify
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from .db_adapter import db_adapter
+from .db.db_adapter_client import DBAdapterClient
 import aiofiles
 
 EXPIRY_TIME = 10
@@ -37,7 +37,7 @@ async def load_json(file_path, default, file_lock):
             return default
 
 
-async def verify_signature(message, signature, perm_db_column):
+async def verify_signature(db_adapter, message, signature, perm_db_column):
     message = encode_defunct(text=message)
     recovered_address = Account.recover_message(message, signature=signature)
 
@@ -47,7 +47,7 @@ async def verify_signature(message, signature, perm_db_column):
     return await db_adapter.has_perm(recovered_address, perm_db_column)
 
 
-def requires_authentication(get_perm_db):
+def requires_authentication(get_db_adapter, get_perm_db):
     def decorator(f):
         @functools.wraps(f)
         async def decorated_function(*args, **kwargs):
@@ -64,7 +64,9 @@ def requires_authentication(get_perm_db):
                 return jsonify({'error': 'Invalid Authorization header format'}), 401
 
             perm_db_column = get_perm_db()
-            perm = await verify_signature(message, signature, perm_db_column)
+            db_adapter = get_db_adapter()
+            perm = await verify_signature(
+                db_adapter, message, signature, perm_db_column)
             if not perm:
                 logging.error("Invalid signature")
                 return jsonify({'error': 'Invalid signature'}), 403

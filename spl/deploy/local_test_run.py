@@ -7,9 +7,9 @@ import requests
 import threading
 import curses
 from flask import Flask, jsonify, send_from_directory
-from ..common import load_abi, async_transact_with_contract_function, wait_for_sot, wait_for_rpc_available, fund_wallets
-from ..db_adapter import db_adapter
-from ..models import init_db, db_path
+from ..common import load_abi, wait_for_sot, wait_for_rpc_available, fund_wallets
+from ..db.db_adapter_client import DBAdapterClient
+from ..models import init_db, db_path, PermType
 from ..plugin_manager import get_plugin, global_plugin_dir
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
@@ -431,6 +431,11 @@ async def main():
         
             
         await init_db()
+
+        our_wallet = generate_wallets(1)[0]
+
+        db_adapter = DBAdapterClient(db_url, our_wallet['private_key'])
+        
         
         async with aiofiles.open(plugin_file, mode='r') as f:
             code = await f.read()
@@ -440,13 +445,13 @@ async def main():
         
         job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
 
+        db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb)
+
         sot_id = await db_adapter.create_sot(job_id, args.sot_url)
 
         sot_perm_id = (await db_adapter.get_sot(sot_id)).perm
         
         plugin = await get_plugin(plugin_id)
-
-        sync_status = {f"{task_type}_{subnet_address}" if 'layer' in task_type else task_type: 'unsynced' for task_type, subnet_address in subnet_addresses.items()}
 
         master_wallets = generate_wallets(args.num_master_wallets)
         await fund_wallets(web3, args.private_key, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
@@ -454,9 +459,10 @@ async def main():
         with open(MASTER_WALLETS_FILE, 'w') as f:
             json.dump(master_wallets, f)
         
-        for wallet in master_wallets:
-            logging.info(f"Creating permission for wallet {wallet['address']} with perm_id {sot_perm_id}")
-            await db_adapter.create_perm(wallet['address'], sot_perm_id)
+        authorized_master_wallet = master_wallets[0]
+        logging.info(f"Creating permission for wallet {authorized_master_wallet['address']} with perm_id {sot_perm_id}")
+        await db_adapter.create_perm(authorized_master_wallet['address'], sot_perm_id)
+        await db_adapter.create_perm(authorized_master_wallet['address'], db_perm_id)
 
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
         await fund_wallets(web3, args.private_key, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
@@ -466,11 +472,17 @@ async def main():
 
         logging.info("Starting SOT service...")
 
+        sot_wallet = generate_wallets(1)[0]
+
+        await db_adapter.create_perm(sot_wallet['address'], db_perm_id)
+
         sot_log = open(SOT_LOG_FILE, 'w')
         sot_process = subprocess.Popen(
             [
                 'python', '-m', 'spl.sot',
                 '--sot_id', str(sot_id),
+                '--db_url', db_url,
+                '--private_key', sot_wallet['private_key'],
             ],
             stdout=sot_log, stderr=sot_log, cwd=package_root_dir
         )
@@ -496,6 +508,7 @@ async def main():
                 '--pool_address', pool_address,
                 '--group', str(args.group),
                 '--backend', args.backend,
+                '--db_url', db_url,
             ]
             if args.torch_compile:
                 command.append('--torch_compile')
@@ -523,6 +536,7 @@ async def main():
                 '--subnet_addresses', args.subnet_addresses,
                 '--max_concurrent_iterations', str(plugin.max_concurrent_iterations),
                 '--job_id', str(job_id),
+                '--db_url', db_url,
             ]
             if args.detailed_logs:
                 master_command.append('--detailed_logs')

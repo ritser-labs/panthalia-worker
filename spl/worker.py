@@ -30,7 +30,7 @@ import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 import heapq
 import itertools
-from .db_adapter import db_adapter
+from .db.db_adapter_client import DBAdapterClients
 from .plugin_manager import get_plugin
 
 # Removed threading imports
@@ -95,6 +95,7 @@ def parse_args():
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
     parser.add_argument('--max_tasks_handling', type=int, default=1, help="Maximum number of tasks allowed in the queue awaiting processing")
+    parser.add_argument('--db_url', type=str, required=True, help="URL of the database server")
     return parser.parse_args()
 
 args = parse_args()
@@ -125,6 +126,8 @@ model_initialized = False
 embedding_initialized = False
 latest_block_timestamps = defaultdict(lambda: 0)  # To store the latest block timestamp processed for each tensor
 processed_tasks = set()
+
+db_adapter = DBAdapterClients(args.db_url)
 
 class TaskQueue:
     def __init__(self):

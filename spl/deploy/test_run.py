@@ -7,8 +7,8 @@ import requests
 import threading
 import curses
 from ..common import load_abi, wait_for_rpc_available, wait_for_sot, SOT_PRIVATE_PORT, fund_wallets, MAX_CONCURRENT_ITERATIONS
-from ..db_adapter import db_adapter
-from ..models import init_db
+from ..db.db_adapter_client import DBAdapterClient
+from ..models import init_db, PermType
 from ..plugin_manager import get_plugin
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
@@ -412,7 +412,7 @@ async def set_interval_mining(web3, interval):
     """Set the mining interval on the Ethereum node."""
     await web3.provider.make_request('evm_setIntervalMining', [interval])
 
-async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_contract, pool_address, state):
+async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_contract, pool_address, state, db_url):
     global sot_url, rpc_url
     # Define environment variables for the worker
     this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
@@ -430,7 +430,8 @@ async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_cont
         'POOL_ADDRESS': pool_address,
         'GROUP': str(args.group),
         'LOCAL_STORAGE_DIR': args.local_storage_dir,
-        'BACKEND': args.backend
+        'BACKEND': args.backend,
+        'DB_URL': db_url,
     }
 
     if args.torch_compile:
@@ -486,6 +487,13 @@ async def main():
     processes = {}
     task_counts = {}  # Dictionary to store task counts
     pod_helpers = {}
+
+    our_wallet = generate_wallets(1)[0]
+
+    db_adapter = DBAdapterClient(
+        db_url,
+        our_wallet['private_key'],
+    )
     
     # Use the new function to load state or prompt to delete
     state = load_or_prompt_state()
@@ -509,7 +517,11 @@ async def main():
 
 
         job_id = await db_adapter.create_job('test_job', GUESSED_PLUGIN_ID, GUESSED_SUBNET_ID, args.sot_url, 0)
+        db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb)
         sot_id = await db_adapter.create_sot(job_id, args.sot_url)
+        sot_wallet = generate_wallets(1)[0]
+
+        await db_adapter.create_perm(sot_wallet['address'], db_perm_id)
 
         env = {
             'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
@@ -518,6 +530,8 @@ async def main():
             'WORLD_SIZE': '1',
             'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
             'SOT_ID': str(sot_id),
+            'DB_URL': db_url,
+            'PRIVATE_KEY': sot_wallet['private_key'],
         }
 
         logging.info(f'Environment variables for SOT: {env}')
@@ -639,8 +653,9 @@ async def main():
 
 
         sot_perm_id = (await db_adapter.get_sot(sot_id)).perm
-        for wallet in master_wallets:
-            await db_adapter.create_perm(wallet['address'], sot_perm_id)
+        authorized_master_wallet = master_wallets[0]
+        await db_adapter.create_perm(authorized_master_wallet['address'], sot_perm_id)
+        await db_adapter.create_perm(authorized_master_wallet['address'], db_perm_id)
 
 
         logging.info('Generating wallets')
@@ -721,7 +736,8 @@ async def main():
                     worker_wallets,
                     token_contract,
                     pool_address,
-                    state
+                    state,
+                    db_url
                 )
             )
         else:
@@ -748,6 +764,7 @@ async def main():
                 'SUBNET_ADDRESSES': INPUT_JSON_PATH + '_1',
                 'MAX_CONCURRENT_ITERATIONS': MAX_CONCURRENT_ITERATIONS,
                 'JOB_ID': str(job_id),
+                'DB_URL': db_url,
             }
 
             if args.torch_compile:
