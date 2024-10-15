@@ -212,7 +212,7 @@ class DBAdapterClient:
 
     async def create_perm_description(self, perm_type: str):
         data = {
-            'perm_type': perm_type
+            'perm_type': perm_type.name
         }
         return (await self.authenticated_request('POST', '/create_perm_description', data=data))['perm_description_id']
 

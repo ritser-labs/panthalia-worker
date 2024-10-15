@@ -6,6 +6,7 @@ import logging
 from .db_adapter_server import db_adapter_server
 from ..api_auth import requires_authentication
 from eth_account.messages import encode_defunct
+from ..models import PermType
 import os
 
 logging.basicConfig(
@@ -233,13 +234,17 @@ async def create_perm():
 @requires_auth
 async def create_perm_description():
     data = await request.get_json()
-    perm_type = data.get('perm_type')
-    if perm_type is None:
+    perm_type_str = data.get('perm_type')
+    
+    if perm_type_str is None:
         return jsonify({'error': 'Missing perm_type parameter'}), 400
+
     try:
-        perm_type_enum = PermType(perm_type)
-    except ValueError:
+        # Convert the string back to Enum
+        perm_type_enum = PermType[perm_type_str]
+    except KeyError:
         return jsonify({'error': 'Invalid perm_type value'}), 400
+
     perm_description_id = await db_adapter_server.create_perm_description(perm_type_enum)
     return jsonify({'perm_description_id': perm_description_id}), 200
 
