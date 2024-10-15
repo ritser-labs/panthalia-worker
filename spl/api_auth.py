@@ -21,7 +21,7 @@ async def verify_signature(db_adapter, message, signature, perm_db_column):
     logger.debug(f"Recovered address: {recovered_address}")
     logger.debug(f"Perm DB column: {perm_db_column}")
 
-    return await db_adapter.has_perm(recovered_address, perm_db_column)
+    return await db_adapter.get_perm(recovered_address, perm_db_column)
 
 
 def requires_authentication(get_db_adapter, get_perm_db):

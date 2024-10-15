@@ -84,7 +84,7 @@ class StateUpdate(Serializable):
 
     job = relationship("Job", backref="state_updates")
 
-class Perms(Serializable):
+class Perm(Serializable):
     __tablename__ = 'perms'
     id = Column(Integer, primary_key=True, index=True)
     address = Column(String, nullable=False, index=True)

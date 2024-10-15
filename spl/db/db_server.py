@@ -184,13 +184,13 @@ async def get_task():
     else:
         return jsonify({'error': 'Task not found'}), 404
 
-@app.route('/has_perm', methods=['GET'])
-async def has_perm():
+@app.route('/get_perm', methods=['GET'])
+async def get_perm():
     address = request.args.get('address')
     perm = request.args.get('perm', type=int)
     if address is None or perm is None:
         return jsonify({'error': 'Missing parameters'}), 400
-    perm = await db_adapter_server.has_perm(address, perm)
+    perm = await db_adapter_server.get_perm(address, perm)
     if perm:
         return jsonify({'perm': perm.as_dict()}), 200
     else:

@@ -2,7 +2,7 @@
 
 from ..models import (
     AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet,
-    Perms, Sot, PermDescription, PermType, Base, init_db
+    Perm, Sot, PermDescription, PermType, Base, init_db
 )
 from sqlalchemy import select, update
 from sqlalchemy.orm import joinedload
@@ -145,18 +145,18 @@ class DBAdapterServer:
                 logger.error(f"Task with ID {subnet_task_id} not found or does not match Subnet ID {subnet_id}.")
             return task
 
-    async def has_perm(self, address: str, perm: int):
+    async def get_perm(self, address: str, perm: int):
         async with AsyncSessionLocal() as session:
-            stmt = select(Perms).filter_by(address=address, perm=perm)
+            stmt = select(Perm).filter_by(address=address, perm=perm)
             result = await session.execute(stmt)
             perm_obj = result.scalar_one_or_none()
             return perm_obj
 
     async def set_last_nonce(self, address: str, perm: int, last_nonce: str):
         async with AsyncSessionLocal() as session:
-            stmt = update(Perms).where(
-                Perms.address == address,
-                Perms.perm == perm
+            stmt = update(Perm).where(
+                Perm.address == address,
+                Perm.perm == perm
             ).values(last_nonce=last_nonce)
             await session.execute(stmt)
             await session.commit()
@@ -175,7 +175,7 @@ class DBAdapterServer:
 
     async def create_perm(self, address: str, perm: int):
         async with AsyncSessionLocal() as session:
-            new_perm = Perms(
+            new_perm = Perm(
                 address=address,
                 perm=perm
             )

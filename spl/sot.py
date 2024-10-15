@@ -805,7 +805,7 @@ if __name__ == "__main__":
         args = parser.parse_args()
 
         # Create the app with the memory logging flag
-        app = create_app(args.sot_id, enable_memory_logging=args.enable_memory_logging)
+        app = create_app(args.sot_id, args.db_url, args.private_key, enable_memory_logging=args.enable_memory_logging)
 
         logging.info("Starting SOT service...")
 

@@ -30,7 +30,7 @@ import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 import heapq
 import itertools
-from .db.db_adapter_client import DBAdapterClients
+from .db.db_adapter_client import DBAdapterClient
 from .plugin_manager import get_plugin
 
 # Removed threading imports
@@ -127,7 +127,7 @@ embedding_initialized = False
 latest_block_timestamps = defaultdict(lambda: 0)  # To store the latest block timestamp processed for each tensor
 processed_tasks = set()
 
-db_adapter = DBAdapterClients(args.db_url)
+db_adapter = DBAdapterClient(args.db_url)
 
 class TaskQueue:
     def __init__(self):

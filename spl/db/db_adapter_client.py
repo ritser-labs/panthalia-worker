@@ -4,80 +4,36 @@ import aiohttp
 import asyncio
 import logging
 import json
-from ..util.json import load_json, save_json
 from eth_account.messages import encode_defunct
-from ..models import PermType
 from eth_account import Account
 import uuid
 import time
+from ..models import Sot, Job, Task, Subnet, Plugin, StateUpdate, Perm, PermDescription
 
 logger = logging.getLogger(__name__)
 
 class DBAdapterClient:
     def __init__(self, server_url, private_key=None):
-        """
-        Initialize the client with the server URL and authentication details.
-
-        Args:
-            server_url (str): Base URL of the DB server.
-            private_key (str): Private key for signing messages.
-            address (str): Ethereum address associated with the private key.
-            perm_type (PermType): Permission type required for operations.
-        """
         self.server_url = server_url.rstrip('/')
         self.private_key = private_key
 
     def generate_message(self, endpoint, data=None):
-        """
-        Generate a signed message for authentication.
-
-        Args:
-            endpoint (str): The API endpoint being accessed.
-            data (dict, optional): Additional data to include in the message.
-
-        Returns:
-            str: JSON-encoded message.
-        """
         message = {
             "endpoint": endpoint,
             "nonce": str(uuid.uuid4()),
             "timestamp": int(time.time()),
             "data": data or {}
         }
-        message_json = json.dumps(message, sort_keys=True)
-        return message_json
+        return json.dumps(message, sort_keys=True)
 
     def sign_message(self, message):
-        """
-        Sign the message with the private key.
-
-        Args:
-            message (str): The message to sign.
-
-        Returns:
-            str: The signature in hexadecimal format.
-        """
         message_defunct = encode_defunct(text=message)
         account = Account.from_key(self.private_key)
         signed_message = account.sign_message(message_defunct)
         return signed_message.signature.hex()
 
     async def authenticated_request(self, method, endpoint, data=None, params=None):
-        """
-        Send an HTTP request to the server, with authentication for non-GET requests.
-
-        Args:
-            method (str): HTTP method (GET, POST, etc.).
-            endpoint (str): API endpoint.
-            data (dict, optional): JSON data to send in the body.
-            params (dict, optional): URL parameters.
-
-        Returns:
-            dict: JSON response from the server or error information.
-        """
         url = f"{self.server_url}{endpoint}"
-        
-        # Only include authentication headers for non-GET requests
         headers = {}
         if method.upper() != 'GET':
             try:
@@ -94,7 +50,6 @@ class DBAdapterClient:
                     try:
                         response_json = await response.json()
                     except aiohttp.ContentTypeError:
-                        # Response is not JSON
                         response_text = await response.text()
                         logger.error(f"Non-JSON response from {url}: {response_text}")
                         return {'error': 'Invalid response format', 'response': response_text}
@@ -115,9 +70,14 @@ class DBAdapterClient:
                 logger.error(f"Unexpected error while sending request to {url}: {e}")
                 return {'error': str(e)}
 
+    def convert_to_object(self, model_class, data):
+        if data is None:
+            return None
+        return model_class(**data)
+
     async def get_job(self, job_id: int):
-        params = {'job_id': job_id}
-        return await self.authenticated_request('GET', '/get_job', params=params)
+        response = await self.authenticated_request('GET', '/get_job', params={'job_id': job_id})
+        return self.convert_to_object(Job, response)
 
     async def update_job_iteration(self, job_id: int, new_iteration: int):
         data = {'job_id': job_id, 'new_iteration': new_iteration}
@@ -134,7 +94,8 @@ class DBAdapterClient:
             'job_iteration': job_iteration,
             'status': status
         }
-        return (await self.authenticated_request('POST', '/create_task', data=data))['task_id']
+        response = await self.authenticated_request('POST', '/create_task', data=data)
+        return response['task_id']
 
     async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int):
         data = {
@@ -144,21 +105,24 @@ class DBAdapterClient:
             'sot_url': sot_url,
             'iteration': iteration
         }
-        return (await self.authenticated_request('POST', '/create_job', data=data))['job_id']
+        response = await self.authenticated_request('POST', '/create_job', data=data)
+        return response['job_id']
 
     async def create_subnet(self, address: str, rpc_url: str):
         data = {
             'address': address,
             'rpc_url': rpc_url
         }
-        return (await self.authenticated_request('POST', '/create_subnet', data=data))['subnet_id']
+        response = await self.authenticated_request('POST', '/create_subnet', data=data)
+        return response['subnet_id']
 
     async def create_plugin(self, name: str, code: str):
         data = {
             'name': name,
             'code': code
         }
-        return (await self.authenticated_request('POST', '/create_plugin', data=data))['plugin_id']
+        response = await self.authenticated_request('POST', '/create_plugin', data=data)
+        return response['plugin_id']
 
     async def update_task_status(self, subnet_task_id: int, status: str, result=None):
         data = {
@@ -173,23 +137,24 @@ class DBAdapterClient:
             'job_id': job_id,
             'state_iteration': state_iteration
         }
-        return (await self.authenticated_request('POST', '/create_state_update', data=data))['state_update_id']
+        response = await self.authenticated_request('POST', '/create_state_update', data=data)
+        return response['state_update_id']
 
     async def get_plugin_code(self, plugin_id: int):
-        params = {'plugin_id': plugin_id}
-        return (await self.authenticated_request('GET', '/get_plugin_code', params=params))['code']
+        response = await self.authenticated_request('GET', '/get_plugin_code', params={'plugin_id': plugin_id})
+        return response['code']
 
     async def get_subnet_using_address(self, address: str):
-        params = {'address': address}
-        return await self.authenticated_request('GET', '/get_subnet_using_address', params=params)
+        response = await self.authenticated_request('GET', '/get_subnet_using_address', params={'address': address})
+        return self.convert_to_object(Subnet, response)
 
     async def get_task(self, subnet_task_id: int, subnet_id: int):
-        params = {'subnet_task_id': subnet_task_id, 'subnet_id': subnet_id}
-        return await self.authenticated_request('GET', '/get_task', params=params)
+        response = await self.authenticated_request('GET', '/get_task', params={'subnet_task_id': subnet_task_id, 'subnet_id': subnet_id})
+        return self.convert_to_object(Task, response)
 
-    async def has_perm(self, address: str, perm: int):
-        params = {'address': address, 'perm': perm}
-        return (await self.authenticated_request('GET', '/has_perm', params=params))['perm']
+    async def get_perm(self, address: str, perm: int):
+        response = await self.authenticated_request('GET', '/get_perm', params={'address': address, 'perm': perm})
+        return self.convert_to_object(Perm, response['perm'])
 
     async def set_last_nonce(self, address: str, perm: int, last_nonce: str):
         data = {
@@ -200,42 +165,32 @@ class DBAdapterClient:
         return await self.authenticated_request('POST', '/set_last_nonce', data=data)
 
     async def get_sot(self, id: int):
-        params = {'id': id}
-        return await self.authenticated_request('GET', '/get_sot', params=params)
+        response = await self.authenticated_request('GET', '/get_sot', params={'id': id})
+        return self.convert_to_object(Sot, response)
 
     async def create_perm(self, address: str, perm: int):
         data = {
             'address': address,
             'perm': perm
         }
-        return (await self.authenticated_request('POST', '/create_perm', data=data))['perm_id']
+        response = await self.authenticated_request('POST', '/create_perm', data=data)
+        return response['perm_id']
 
     async def create_perm_description(self, perm_type: str):
         data = {
             'perm_type': perm_type.name
         }
-        return (await self.authenticated_request('POST', '/create_perm_description', data=data))['perm_description_id']
+        response = await self.authenticated_request('POST', '/create_perm_description', data=data)
+        return response['perm_description_id']
 
     async def create_sot(self, job_id: int, url: str):
         data = {
             'job_id': job_id,
             'url': url
         }
-        return (await self.authenticated_request('POST', '/create_sot', data=data))['sot_id']
+        response = await self.authenticated_request('POST', '/create_sot', data=data)
+        return response['sot_id']
 
     async def get_sot_by_job_id(self, job_id: int):
-        params = {'job_id': job_id}
-        return await self.authenticated_request('GET', '/get_sot_by_job_id', params=params)
-
-# Example usage:
-# async def main():
-#     client = DBAdapterClient(
-#         server_url="http://localhost:8000",
-#         private_key="YOUR_PRIVATE_KEY",
-#         perm_type=PermType.ModifyDb
-#     )
-#     job = await client.get_job(1)
-#     print(job)
-
-# if __name__ == "__main__":
-#     asyncio.run(main())
+        response = await self.authenticated_request('GET', '/get_sot_by_job_id', params={'job_id': job_id})
+        return self.convert_to_object(Sot, response)

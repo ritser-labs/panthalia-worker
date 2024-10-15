@@ -574,6 +574,12 @@ if __name__ == "__main__":
         help="Job ID for the task",
     )
     parser.add_argument(
+        "--db_url",
+        type=str,
+        required=True,
+        help="URL for the database",
+    )
+    parser.add_argument(
         "--max_concurrent_iterations",
         type=int,
         default=4,
@@ -596,6 +602,7 @@ if __name__ == "__main__":
         args.sot_url,
         subnet_addresses,
         args.job_id,
+        args.db_url,
         max_concurrent_iterations=args.max_concurrent_iterations,
         detailed_logs=args.detailed_logs,
     )
