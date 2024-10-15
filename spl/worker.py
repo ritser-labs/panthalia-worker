@@ -302,11 +302,12 @@ async def handle_event(task_id, task, time_invoked, contract_index):
     logging.debug(f"Adding task to queue with ID: {task_id} and params: {task_params}")
     
     task_db = await db_adapter.get_task(task_id, subnet_in_db.id)
+    job_db = await db_adapter.get_job(task_db.job_id)
     
     task_queue_obj = {
         'task_id': task_id,
-        'plugin_id': task_db.job.plugin_id,
-        'sot_url': task_db.job.sot_url,
+        'plugin_id': job_db.plugin_id,
+        'sot_url': job_db.sot_url,
         'task_params': task_params,
         'time_status_changed': task.timeStatusChanged,
         'contract_index': contract_index
@@ -314,7 +315,7 @@ async def handle_event(task_id, task, time_invoked, contract_index):
 
     await task_queue.add_task(task_queue_obj)
     
-    await get_plugin(task_queue_obj['plugin_id'])
+    await get_plugin(task_queue_obj['plugin_id'], db_adapter)
     
     blockchain_timestamp = (await web3.eth.get_block('latest'))['timestamp']
     
@@ -356,7 +357,7 @@ async def process_tasks():
                 task_id = next_task['task_id']
                 task_params = next_task['task_params']
                 contract_index = next_task['contract_index']
-                plugin = await get_plugin(next_task['plugin_id'])
+                plugin = await get_plugin(next_task['plugin_id'], db_adapter)
                 sot_url = next_task['sot_url']
                 time_status_changed = next_task['time_status_changed']  # Extract the time_status_changed
 

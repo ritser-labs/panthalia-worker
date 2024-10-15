@@ -24,10 +24,18 @@ AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_com
 Base = declarative_base()
 
 class Serializable(Base):
-    __abstract__ = True  # Mark this as an abstract class
+    __abstract__ = True
 
     def as_dict(self):
-        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+        result = {}
+        for c in self.__table__.columns:
+            value = getattr(self, c.name)
+            # If the value is an Enum, serialize it as its name
+            if isinstance(value, enum.Enum):
+                result[c.name] = value.name
+            else:
+                result[c.name] = value
+        return result
 
 
 class PermType(enum.Enum):

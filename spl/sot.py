@@ -252,7 +252,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         return batch_filename, targets_filename
 
     async def initialize_service():
-        nonlocal plugin_id, plugin, sot_db_obj, job_id, perm_db
+        nonlocal plugin_id, plugin, sot_db_obj, job_id, perm_db, db_adapter
         logging.info("Initializing distributed environment and tensors")
 
 
@@ -264,7 +264,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
  
         plugin_id = (await db_adapter.get_job(job_id)).plugin_id
         
-        plugin = await get_plugin(plugin_id)
+        plugin = await get_plugin(plugin_id, db_adapter)
 
         logging.info(
             f"Initializing service for SOT {sot_id}, job {job_id}, plugin {plugin_id}, perm {perm_db}")

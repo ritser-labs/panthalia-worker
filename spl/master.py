@@ -146,7 +146,10 @@ class Master:
         self.pool = self.web3.eth.contract(
             address=self.pool_address, abi=self.abis["Pool"]
         )
-        self.plugin = await get_plugin((await self.db_adapter.get_job(self.job_id)).plugin_id)
+        self.plugin = await get_plugin(
+            (await self.db_adapter.get_job(self.job_id)).plugin_id,
+            self.db_adapter
+        )
         logger.info('Initialized contracts and plugin')
 
     async def approve_tokens_at_start(self):
@@ -255,7 +258,12 @@ class Master:
                 )
 
                 # Create a new task in the DB
-                await self.db_adapter.create_task(self.job_id, task_id, iteration_number, TaskStatus.SelectingSolver)
+                await self.db_adapter.create_task(
+                    self.job_id,
+                    task_id,
+                    iteration_number,
+                    TaskStatus.SelectingSolver.name
+                )
 
                 return task_id
             except Exception as e:
@@ -331,7 +339,11 @@ class Master:
             ):
                 result = json.loads(task.postedSolution.decode("utf-8"))
             
-            await self.db_adapter.update_task_status(task_id, TaskStatus(task.status), result)
+            await self.db_adapter.update_task_status(
+                task_id,
+                TaskStatus(task.status).name,
+                result
+            )
             return result
         except Exception as e:
             logger.error(

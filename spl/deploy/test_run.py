@@ -566,7 +566,7 @@ async def main():
     
 
     # First, launch or reconnect the DB instance
-    db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb)
+    db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb.name)
     assert db_perm_id == GUESSED_DB_PERM_ID, f"Expected DB perm ID {GUESSED_DB_PERM_ID}, got {db_perm_id}"
 
     # Now launch the SOT service, which will use the `db_url`
@@ -702,7 +702,7 @@ async def main():
         
         subnet_id = await db_adapter.create_subnet(list(subnet_addresses.values())[0], args.rpc_url)
     
-        plugin = await get_plugin(plugin_id)
+        plugin = await get_plugin(plugin_id, db_adapter)
 
         check_guessed_ids(subnet_id, GUESSED_SUBNET_ID, 'Subnet')
         check_guessed_ids(plugin_id, GUESSED_PLUGIN_ID, 'Plugin')

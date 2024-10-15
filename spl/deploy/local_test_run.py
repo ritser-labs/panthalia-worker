@@ -459,7 +459,7 @@ async def main():
         
         job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
 
-        db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb)
+        db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb.name)
         
         assert db_perm_id == GUESS_DB_PERM_ID, f"Expected db_perm_id {GUESS_DB_PERM_ID}, got {db_perm_id}"
 
@@ -467,7 +467,7 @@ async def main():
 
         sot_perm_id = (await db_adapter.get_sot(sot_id)).perm
         
-        plugin = await get_plugin(plugin_id)
+        plugin = await get_plugin(plugin_id, db_adapter)
 
         master_wallets = generate_wallets(args.num_master_wallets)
         await fund_wallets(web3, args.private_key, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)

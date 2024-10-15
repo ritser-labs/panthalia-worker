@@ -1,4 +1,3 @@
-from .db_adapter import DBAdapter
 import aiofiles
 import os
 import sys
@@ -21,9 +20,8 @@ def setup_dir():
 
 last_plugin_id = None
 last_plugin = None
-db_adapter = DBAdapter()
 
-async def get_plugin(plugin_id):
+async def get_plugin(plugin_id, db_adapter):
     global last_plugin_id, last_plugin
     setup_dir()
     logger.info(f'Fetching plugin {plugin_id}')
