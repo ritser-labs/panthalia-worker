@@ -6,7 +6,7 @@ import argparse
 import requests
 import threading
 import curses
-from ..common import load_abi, wait_for_rpc_available, wait_for_sot, SOT_PRIVATE_PORT, fund_wallets, MAX_CONCURRENT_ITERATIONS
+from ..common import load_abi, wait_for_rpc_available, wait_for_sot, SOT_PRIVATE_PORT, fund_wallets, MAX_CONCURRENT_ITERATIONS, DB_PORT
 from ..db.db_adapter_client import DBAdapterClient
 from ..models import init_db, PermType
 from ..plugin_manager import get_plugin
@@ -42,6 +42,7 @@ LOG_DIR = os.path.join(parent_dir, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
 ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
+DB_LOG_FILE = os.path.join(LOG_DIR, 'db.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 STATE_FILE = os.path.join(STATE_DIR, 'state.json')  # State file to save/load state
 plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
@@ -50,6 +51,7 @@ LOCAL_MODEL_FILE = os.path.join(parent_dir, 'data', 'state', 'model.pt')
 
 GUESSED_SUBNET_ID = 1
 GUESSED_PLUGIN_ID = 1
+GUESS_DB_PERM_ID = 1
 
 DOCKER_IMAGE = 'runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04'
 GPU_TYPE = 'NVIDIA GeForce RTX 4090'
@@ -213,7 +215,6 @@ def reset_logs(log_dir):
                 logging.debug(f"Error processing log file {file_path}: {e}")
     else:
         logging.debug(f"Log directory {log_dir} does not exist.")
-
 
 def fetch_latest_loss():
     global latest_loss_cache, sot_url
@@ -482,19 +483,65 @@ def check_guessed_ids(guessed_id, actual_id, name):
         logging.error(f"Expected {name} ID {actual_id}, got {guessed_id}")
         exit(1)
 
+async def launch_db_instance(state, db_adapter, db_perm_id):
+    global sot_url, rpc_url
+    # Check if the DB server is already running
+    if 'db' not in state['pods']:
+        logging.info("Starting DB instance...")
+        public_key = Account.from_key(args.private_key).address
+        env = {
+            'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
+            'SERVICE_TYPE': 'db',
+            'DB_HOST': '0.0.0.0',
+            'DB_PORT': DB_PORT,
+            'DB_PERM': str(db_perm_id),
+            'ROOT_WALLET': public_key
+        }
+
+        # Start the DB service on a remote instance
+        db_instance, db_helpers = await launch_instance_and_record_logs(
+            name="db",
+            gpu_type=GPU_TYPE,
+            container_disk_in_gb=20,  # Set disk size appropriately for DB instance
+            image=DOCKER_IMAGE,
+            gpu_count=0,  # No GPU required for the DB instance
+            ports=f'{DB_PORT}/tcp',  # Expose the DB port
+            log_file=os.path.join(LOG_DIR, 'db.log'),
+            template_id=BASE_TEMPLATE_ID,
+            cmd=DOCKER_CMD,
+            env=env
+        )
+
+        # Save the DB instance to state
+        state['pods']['db'] = {
+            'pod_id': db_instance['id'],
+            'private_key_path': db_helpers['private_key_path'],
+            'log_file': os.path.join(LOG_DIR, 'db.log')
+        }
+        db_ip, db_port = await get_public_ip_and_port(db_instance['id'], private_port=int(DB_PORT))
+        state['db_url'] = f"http://{db_ip}:{[db_port]}"
+        save_state(state)
+        logging.info(f"DB service started on {state['db_url']}")
+
+        return db_instance, db_helpers
+    else:
+        logging.info("DB instance already running. Reconnecting...")
+        pod_id = state['pods']['db']['pod_id']
+        db_helpers = await reconnect_and_initialize_existing_pod(
+            pod_id, 'db', state['pods']['db']['private_key_path'], log_file=state['pods']['db']['log_file']
+        )
+        processes['db'] = runpod.get_pod(pod_id)
+        logging.info(f"Reconnected to DB at {state['db_url']}")
+
+        return runpod.get_pod(pod_id), db_helpers
+
+
 async def main():
     global sot_url, rpc_url
     processes = {}
     task_counts = {}  # Dictionary to store task counts
     pod_helpers = {}
 
-    our_wallet = generate_wallets(1)[0]
-
-    db_adapter = DBAdapterClient(
-        db_url,
-        our_wallet['private_key'],
-    )
-    
     # Use the new function to load state or prompt to delete
     state = load_or_prompt_state()
 
@@ -510,14 +557,24 @@ async def main():
 
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
+    db_instance, db_helpers = await launch_db_instance(state, db_adapter, GUESSED_DB_PERM_ID)
+    db_url = state['db_url']
+    db_adapter = DBAdapterClient(
+        db_url,
+        args.private_key,
+    )
+    
 
+    # First, launch or reconnect the DB instance
+    db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb)
+    assert db_perm_id == GUESSED_DB_PERM_ID, f"Expected DB perm ID {GUESSED_DB_PERM_ID}, got {db_perm_id}"
+
+    # Now launch the SOT service, which will use the `db_url`
     sot_promise = None
     if 'sot' not in state['pods']:
         logging.info("Starting SOT instance...")
 
-
         job_id = await db_adapter.create_job('test_job', GUESSED_PLUGIN_ID, GUESSED_SUBNET_ID, args.sot_url, 0)
-        db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb)
         sot_id = await db_adapter.create_sot(job_id, args.sot_url)
         sot_wallet = generate_wallets(1)[0]
 
@@ -536,7 +593,6 @@ async def main():
 
         logging.info(f'Environment variables for SOT: {env}')
 
-
         # Start the SOT service on a remote instance
         sot_promise = launch_instance_and_record_logs(
             name="sot",
@@ -550,6 +606,7 @@ async def main():
             cmd=DOCKER_CMD,
             env=env
         )
+
     if 'anvil' not in state['pods']:
         logging.info("Starting Anvil instance...")
 
@@ -637,7 +694,6 @@ async def main():
         token_address = await pool_contract.functions.token().call()
         token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
 
-
         await init_db()
         
         async with aiofiles.open(plugin_file, mode='r') as f:
@@ -651,18 +707,15 @@ async def main():
         check_guessed_ids(subnet_id, GUESSED_SUBNET_ID, 'Subnet')
         check_guessed_ids(plugin_id, GUESSED_PLUGIN_ID, 'Plugin')
 
-
         sot_perm_id = (await db_adapter.get_sot(sot_id)).perm
         authorized_master_wallet = master_wallets[0]
         await db_adapter.create_perm(authorized_master_wallet['address'], sot_perm_id)
         await db_adapter.create_perm(authorized_master_wallet['address'], db_perm_id)
 
-
         logging.info('Generating wallets')
 
         await fund_wallets(web3, args.private_key, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
         
-
         # Generate wallets for workers and fund them
         worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
         await fund_wallets(web3, args.private_key, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
@@ -823,4 +876,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

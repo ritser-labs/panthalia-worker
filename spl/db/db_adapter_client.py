@@ -4,13 +4,13 @@ import aiohttp
 import asyncio
 import logging
 import json
-from .api_auth import load_json, save_json, verify_signature
+from ..util.json import load_json, save_json
 from eth_account.messages import encode_defunct
-from .common import PermType
+from ..models import PermType
+from eth_account import Account
 import uuid
 import time
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class DBAdapterClient:
@@ -58,7 +58,7 @@ class DBAdapterClient:
             str: The signature in hexadecimal format.
         """
         message_defunct = encode_defunct(text=message)
-        account = self.web3.eth.account.from_key(self.private_key)
+        account = Account.from_key(self.private_key)
         signed_message = account.sign_message(message_defunct)
         return signed_message.signature.hex()
 
@@ -73,28 +73,46 @@ class DBAdapterClient:
             params (dict, optional): URL parameters.
 
         Returns:
-            dict: JSON response from the server.
+            dict: JSON response from the server or error information.
         """
         url = f"{self.server_url}{endpoint}"
         
         # Only include authentication headers for non-GET requests
         headers = {}
-        if method != 'GET':
-            message = self.generate_message(endpoint, data)
-            signature = self.sign_message(message)
-            headers = {"Authorization": f"{message}:{signature}"}
+        if method.upper() != 'GET':
+            try:
+                message = self.generate_message(endpoint, data)
+                signature = self.sign_message(message)
+                headers = {"Authorization": f"{message}:{signature}"}
+            except TypeError as te:
+                logger.error(f"Error generating authentication headers: {te}")
+                return {'error': 'Authentication header generation failed', 'details': str(te)}
 
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.request(method, url, json=data, params=params, headers=headers) as response:
-                    response_json = await response.json()
+                    try:
+                        response_json = await response.json()
+                    except aiohttp.ContentTypeError:
+                        # Response is not JSON
+                        response_text = await response.text()
+                        logger.error(f"Non-JSON response from {url}: {response_text}")
+                        return {'error': 'Invalid response format', 'response': response_text}
+
                     if response.status in (200, 201):
                         return response_json
                     else:
                         logger.error(f"Request to {url} failed with status {response.status}: {response_json}")
                         return {'error': response_json.get('error', 'Unknown error')}
+
+            except aiohttp.ClientResponseError as e:
+                logger.error(f"Response error while sending request to {url}: {e}")
+                return {'error': str(e)}
+            except aiohttp.ClientError as e:
+                logger.error(f"Client error while sending request to {url}: {e}")
+                return {'error': str(e)}
             except Exception as e:
-                logger.error(f"Failed to send request to {url}: {e}")
+                logger.error(f"Unexpected error while sending request to {url}: {e}")
                 return {'error': str(e)}
 
     async def get_job(self, job_id: int):
@@ -116,7 +134,7 @@ class DBAdapterClient:
             'job_iteration': job_iteration,
             'status': status
         }
-        return await self.authenticated_request('POST', '/create_task', data=data)
+        return (await self.authenticated_request('POST', '/create_task', data=data))['task_id']
 
     async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int):
         data = {
@@ -126,21 +144,21 @@ class DBAdapterClient:
             'sot_url': sot_url,
             'iteration': iteration
         }
-        return await self.authenticated_request('POST', '/create_job', data=data)
+        return (await self.authenticated_request('POST', '/create_job', data=data))['job_id']
 
     async def create_subnet(self, address: str, rpc_url: str):
         data = {
             'address': address,
             'rpc_url': rpc_url
         }
-        return await self.authenticated_request('POST', '/create_subnet', data=data)
+        return (await self.authenticated_request('POST', '/create_subnet', data=data))['subnet_id']
 
     async def create_plugin(self, name: str, code: str):
         data = {
             'name': name,
             'code': code
         }
-        return await self.authenticated_request('POST', '/create_plugin', data=data)
+        return (await self.authenticated_request('POST', '/create_plugin', data=data))['plugin_id']
 
     async def update_task_status(self, subnet_task_id: int, status: str, result=None):
         data = {
@@ -155,11 +173,11 @@ class DBAdapterClient:
             'job_id': job_id,
             'state_iteration': state_iteration
         }
-        return await self.authenticated_request('POST', '/create_state_update', data=data)
+        return (await self.authenticated_request('POST', '/create_state_update', data=data))['state_update_id']
 
     async def get_plugin_code(self, plugin_id: int):
         params = {'plugin_id': plugin_id}
-        return await self.authenticated_request('GET', '/get_plugin_code', params=params)
+        return (await self.authenticated_request('GET', '/get_plugin_code', params=params))['code']
 
     async def get_subnet_using_address(self, address: str):
         params = {'address': address}
@@ -171,7 +189,7 @@ class DBAdapterClient:
 
     async def has_perm(self, address: str, perm: int):
         params = {'address': address, 'perm': perm}
-        return await self.authenticated_request('GET', '/has_perm', params=params)
+        return (await self.authenticated_request('GET', '/has_perm', params=params))['perm']
 
     async def set_last_nonce(self, address: str, perm: int, last_nonce: str):
         data = {
@@ -190,20 +208,20 @@ class DBAdapterClient:
             'address': address,
             'perm': perm
         }
-        return await self.authenticated_request('POST', '/create_perm', data=data)
+        return (await self.authenticated_request('POST', '/create_perm', data=data))['perm_id']
 
     async def create_perm_description(self, perm_type: str):
         data = {
             'perm_type': perm_type
         }
-        return await self.authenticated_request('POST', '/create_perm_description', data=data)
+        return (await self.authenticated_request('POST', '/create_perm_description', data=data))['perm_description_id']
 
     async def create_sot(self, job_id: int, url: str):
         data = {
             'job_id': job_id,
             'url': url
         }
-        return await self.authenticated_request('POST', '/create_sot', data=data)
+        return (await self.authenticated_request('POST', '/create_sot', data=data))['sot_id']
 
     async def get_sot_by_job_id(self, job_id: int):
         params = {'job_id': job_id}

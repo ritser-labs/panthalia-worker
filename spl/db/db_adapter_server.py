@@ -1,21 +1,21 @@
 # db_adapter_server.py
 
-from .models import (
+from ..models import (
     AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet,
-    Perms, Sot, PermDescription, PermType, Base
+    Perms, Sot, PermDescription, PermType, Base, init_db
 )
 from sqlalchemy import select, update
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 import json
+import asyncio
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class DBAdapterServer:
     def __init__(self):
-        pass
+        asyncio.run(init_db())
 
     async def get_job(self, job_id: int):
         async with AsyncSessionLocal() as session:
@@ -107,6 +107,7 @@ class DBAdapterServer:
             session.add(new_state_update)
             await session.commit()
             logger.debug(f"Created State Update for Job {job_id}, Iteration {state_iteration}.")
+            return new_state_update.id
 
     async def get_plugin_code(self, plugin_id: int):
         async with AsyncSessionLocal() as session:
@@ -149,7 +150,7 @@ class DBAdapterServer:
             stmt = select(Perms).filter_by(address=address, perm=perm)
             result = await session.execute(stmt)
             perm_obj = result.scalar_one_or_none()
-            return perm_obj is not None
+            return perm_obj
 
     async def set_last_nonce(self, address: str, perm: int, last_nonce: str):
         async with AsyncSessionLocal() as session:

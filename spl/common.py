@@ -22,6 +22,8 @@ SOT_PRIVATE_PORT = 5001
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
+DB_PORT = '5432'
+
 MAX_SUBMIT_TASK_RETRY_DURATION = 300
 
 MAX_SELECT_SOLVER_TIME = 1000

@@ -182,12 +182,12 @@ class DBAdapter:
     async def create_perm_description(self, perm_type: PermType):
         async with AsyncSessionLocal() as session:
             new_perm_description = PermDescription(
-                perm_type=perm_type
+                perm_type=perm_type.name
             )
             session.add(new_perm_description)
             await session.commit()
             perm_id = new_perm_description.id
-            logging.debug(f"Created Perm Description with type {perm_type} and id {perm_id}.")
+            logging.debug(f"Created Perm Description with type {perm_type.name} and id {perm_id}.")
             return perm_id
     
     async def create_sot(self, job_id: int, url: str):

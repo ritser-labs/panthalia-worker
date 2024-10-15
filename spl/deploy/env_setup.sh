@@ -54,6 +54,9 @@ case $SERVICE_TYPE in
         #hypercorn "spl.sot:create_app('${PUBLIC_KEYS}')" --bind "0.0.0.0:${SOT_PRIVATE_PORT}"
         python -m spl.sot --sot_id ${SOT_ID} --db_url ${DB_URL} --private_key ${PRIVATE_KEY}
         ;;
+    db)
+        python -m spl.db.db_server --host ${DB_HOST} --port ${DB_PORT} --perm ${DB_PERM} --root_wallet ${ROOT_WALLET}
+        ;;
     *)
         echo "Error: Unknown service type"
         exit 1

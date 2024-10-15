@@ -23,6 +23,13 @@ engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
+class Serializable(Base):
+    __abstract__ = True  # Mark this as an abstract class
+
+    def as_dict(self):
+        return {c.name: getattr(self, c.name) for c in self.__table__.columns}
+
+
 class PermType(enum.Enum):
     ModifyDb = 0
     ModifySot = 1
@@ -31,18 +38,18 @@ class TimestampMixin:
     last_updated = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-class Plugin(TimestampMixin, Base):
+class Plugin(TimestampMixin, Serializable):
     __tablename__ = 'plugins'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     code = Column(Text, nullable=False)
 
-class Subnet(Base):
+class Subnet(Serializable):
     __tablename__ = 'subnets'
     id = Column(Integer, primary_key=True, index=True)
     address = Column(String, nullable=False)
     rpc_url = Column(String, nullable=False)
-class Job(TimestampMixin, Base):
+class Job(TimestampMixin, Serializable):
     __tablename__ = 'jobs'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True, nullable=False)
@@ -55,7 +62,7 @@ class Job(TimestampMixin, Base):
     plugin = relationship("Plugin", backref="jobs")
     subnet = relationship("Subnet", backref="jobs")
 
-class Task(TimestampMixin, Base):
+class Task(TimestampMixin, Serializable):
     __tablename__ = 'tasks'
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
@@ -68,7 +75,7 @@ class Task(TimestampMixin, Base):
 
     job = relationship("Job", backref="tasks")
 
-class StateUpdate(Base):
+class StateUpdate(Serializable):
     __tablename__ = 'state_updates'
     id = Column(Integer, primary_key=True, index=True)
     state_iteration = Column(Integer, nullable=False)
@@ -77,14 +84,14 @@ class StateUpdate(Base):
 
     job = relationship("Job", backref="state_updates")
 
-class Perms(Base):
+class Perms(Serializable):
     __tablename__ = 'perms'
     id = Column(Integer, primary_key=True, index=True)
     address = Column(String, nullable=False, index=True)
     perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
     last_nonce = Column(String, nullable=False, default=0)
 
-class Sot(Base):
+class Sot(Serializable):
     __tablename__ = 'sots'
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
@@ -93,7 +100,7 @@ class Sot(Base):
 
     job = relationship("Job", backref="sots")
 
-class PermDescription(Base):
+class PermDescription(Serializable):
     __tablename__ = 'perm_descriptions'
     id = Column(Integer, primary_key=True, index=True)
     perm_type = Column(Enum(PermType), nullable=False)

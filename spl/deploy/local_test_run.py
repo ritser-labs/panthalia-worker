@@ -7,7 +7,7 @@ import requests
 import threading
 import curses
 from flask import Flask, jsonify, send_from_directory
-from ..common import load_abi, wait_for_sot, wait_for_rpc_available, fund_wallets
+from ..common import load_abi, wait_for_sot, wait_for_rpc_available, fund_wallets, DB_PORT
 from ..db.db_adapter_client import DBAdapterClient
 from ..models import init_db, db_path, PermType
 from ..plugin_manager import get_plugin, global_plugin_dir
@@ -32,10 +32,16 @@ LOG_DIR = os.path.join(parent_dir, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
 ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
+DB_LOG_FILE = os.path.join(LOG_DIR, 'db.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 LAST_FUTURE_VERSION_FILE = os.path.join(STATE_DIR, 'last_future_version_number.json')
 plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
 DOCKER_IMAGE = 'zerogoliath/magnum:latest'
+DB_HOST = '0.0.0.0'
+db_url = f"http://{DB_HOST}:{DB_PORT}"
+
+
+GUESS_DB_PERM_ID = 1
 
 # Configure logging
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -60,7 +66,6 @@ if not any(isinstance(handler, logging.StreamHandler) for handler in logger.hand
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-
 
 
 def parse_args():
@@ -91,8 +96,6 @@ latest_loss_cache = {
 
 LOSS_REFRESH_INTERVAL = 60
 app = Flask(__name__)
-
-base_url = None
 
 async def wait_for_workers_to_sync(worker_count, sot_url, timeout=600):
     start_time = time.time()
@@ -347,7 +350,7 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
                     elif event_name == 'TaskResolved':
                         if task_id in tasks[task_type]:
                             tasks[task_type][task_id]['active'] = False
-        
+
         # Update the task counts
         for task_type in subnet_addresses.keys():
             active_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['active'])
@@ -396,7 +399,6 @@ async def main():
         os.environ['SOT_URL'] = args.sot_url
 
         logging.info(f'Time in string: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
-        #await set_next_block_timestamp(web3, int(time.time()))
         
         web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
         # Wait for the RPC to be available before proceeding
@@ -404,6 +406,24 @@ async def main():
             exit(1)
         await set_interval_mining(web3, 1)
 
+        # Start DB instance
+        logging.info("Starting DB instance...")
+        db_log = open(DB_LOG_FILE, 'w')
+        public_key = Account.from_key(args.private_key).address
+        db_process = subprocess.Popen(
+            [
+                'python', '-m', 'spl.db.db_server',
+                '--host', DB_HOST,
+                '--port', DB_PORT,
+                '--perm', str(GUESS_DB_PERM_ID),
+                '--root_wallet', public_key
+            ],
+            stdout=db_log, stderr=db_log, cwd=package_root_dir
+        )
+        processes['db'] = db_process
+        logging.info(f"DB instance started with PID {db_process.pid}")
+
+        # Run the deployment command
         deploy_command = [
             'forge', 'script', os.path.basename(args.forge_script),
             '--broadcast', '--rpc-url', args.rpc_url,
@@ -428,14 +448,8 @@ async def main():
         pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
         token_address = await pool_contract.functions.token().call()
         token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
-        
-            
-        await init_db()
 
-        our_wallet = generate_wallets(1)[0]
-
-        db_adapter = DBAdapterClient(db_url, our_wallet['private_key'])
-        
+        db_adapter = DBAdapterClient(db_url, args.private_key)
         
         async with aiofiles.open(plugin_file, mode='r') as f:
             code = await f.read()
@@ -446,6 +460,8 @@ async def main():
         job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
 
         db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb)
+        
+        assert db_perm_id == GUESS_DB_PERM_ID, f"Expected db_perm_id {GUESS_DB_PERM_ID}, got {db_perm_id}"
 
         sot_id = await db_adapter.create_sot(job_id, args.sot_url)
 

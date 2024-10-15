@@ -3,14 +3,13 @@
 import asyncio
 from quart import Quart, request, jsonify
 import logging
-from db_adapter_server import db_adapter_server
-from api_auth import requires_authentication, load_json, save_json
+from .db_adapter_server import db_adapter_server
+from ..api_auth import requires_authentication
 from eth_account.messages import encode_defunct
-from .db_adapter_client import DBAdapterClient
 import os
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -36,7 +35,7 @@ def get_perm_modify_db():
     return perm_modify_db
 
 def get_db_adapter():
-    return db_adapter
+    return db_adapter_server
 
 def requires_auth(f):
     return requires_authentication(
@@ -53,17 +52,7 @@ async def get_job():
         return jsonify({'error': 'Missing job_id parameter'}), 400
     job = await db_adapter_server.get_job(job_id)
     if job:
-        # Serialize the job object as needed
-        job_dict = {
-            'id': job.id,
-            'name': job.name,
-            'plugin_id': job.plugin_id,
-            'subnet_id': job.subnet_id,
-            'sot_url': job.sot_url,
-            'done': job.done,
-            'iteration': job.iteration
-        }
-        return jsonify(job_dict), 200
+        return jsonify(job.as_dict()), 200
     else:
         return jsonify({'error': 'Job not found'}), 404
 
@@ -157,8 +146,8 @@ async def create_state_update():
     state_iteration = data.get('state_iteration')
     if job_id is None or state_iteration is None:
         return jsonify({'error': 'Missing parameters'}), 400
-    await db_adapter_server.create_state_update(job_id, state_iteration)
-    return jsonify({'status': 'success'}), 200
+    state_update_id = await db_adapter_server.create_state_update(job_id, state_iteration)
+    return jsonify({'state_update_id': state_update_id}), 200
 
 @app.route('/get_plugin_code', methods=['GET'])
 async def get_plugin_code():
@@ -178,12 +167,7 @@ async def get_subnet_using_address():
         return jsonify({'error': 'Missing address parameter'}), 400
     subnet = await db_adapter_server.get_subnet_using_address(address)
     if subnet:
-        subnet_dict = {
-            'id': subnet.id,
-            'address': subnet.address,
-            'rpc_url': subnet.rpc_url
-        }
-        return jsonify(subnet_dict), 200
+        return jsonify(subnet.as_dict()), 200
     else:
         return jsonify({'error': 'Subnet not found'}), 404
 
@@ -195,15 +179,7 @@ async def get_task():
         return jsonify({'error': 'Missing parameters'}), 400
     task = await db_adapter_server.get_task(subnet_task_id, subnet_id)
     if task:
-        task_dict = {
-            'id': task.id,
-            'job_id': task.job_id,
-            'subnet_task_id': task.subnet_task_id,
-            'job_iteration': task.job_iteration,
-            'status': task.status.value if isinstance(task.status, enum.Enum) else task.status,
-            'result': task.result
-        }
-        return jsonify(task_dict), 200
+        return jsonify(task.as_dict()), 200
     else:
         return jsonify({'error': 'Task not found'}), 404
 
@@ -213,8 +189,11 @@ async def has_perm():
     perm = request.args.get('perm', type=int)
     if address is None or perm is None:
         return jsonify({'error': 'Missing parameters'}), 400
-    has_permission = await db_adapter_server.has_perm(address, perm)
-    return jsonify({'has_perm': has_permission}), 200
+    perm = await db_adapter_server.has_perm(address, perm)
+    if perm:
+        return jsonify({'perm': perm.as_dict()}), 200
+    else:
+        return jsonify({'error': 'Permission not found'}), 404
 
 @app.route('/set_last_nonce', methods=['POST'])
 @requires_auth
@@ -235,13 +214,7 @@ async def get_sot():
         return jsonify({'error': 'Missing id parameter'}), 400
     sot = await db_adapter_server.get_sot(id)
     if sot:
-        sot_dict = {
-            'id': sot.id,
-            'job_id': sot.job_id,
-            'perm': sot.perm,
-            'url': sot.url
-        }
-        return jsonify(sot_dict), 200
+        return jsonify(sot.as_dict()), 200
     else:
         return jsonify({'error': 'SOT not found'}), 404
 
@@ -288,13 +261,7 @@ async def get_sot_by_job_id():
         return jsonify({'error': 'Missing job_id parameter'}), 400
     sot = await db_adapter_server.get_sot_by_job_id(job_id)
     if sot:
-        sot_dict = {
-            'id': sot.id,
-            'job_id': sot.job_id,
-            'perm': sot.perm,
-            'url': sot.url
-        }
-        return jsonify(sot_dict), 200
+        return jsonify(sot.as_dict()), 200
     else:
         return jsonify({'error': 'SOT not found'}), 404
 
@@ -306,17 +273,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Database Server")
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind the server')
     parser.add_argument('--port', type=int, default=8000, help='Port to bind the server')
-    parser.add_argument('--perm', type=int, default=0, help='Permission level')
+    parser.add_argument('--perm', type=int, default=0, help='Permission ID')
+    parser.add_argument('--root_wallet', type=str, default='0x0', help='Root wallet address')
     args = parser.parse_args()
 
     perm_modify_db = args.perm
-
-    db_adapter = DBAdapterClient(
-        server_url=f"http://localhost:{args.port}"
-    )
+    
+    asyncio.run(db_adapter_server.create_perm(args.root_wallet, perm_modify_db))
 
     config = Config()
     config.bind = [f'{args.host}:{args.port}']
 
     logger.info(f"Starting Database Server on {args.host}:{args.port}...")
+    logger.info(f"Permission ID: {args.perm}")
+    logger.info(f"Root wallet address: {args.root_wallet}")
     asyncio.run(serve(app, config))
