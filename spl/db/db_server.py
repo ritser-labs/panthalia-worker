@@ -216,6 +216,25 @@ async def get_task():
     else:
         return jsonify({'error': 'Task not found'}), 404
 
+@app.route('/get_tasks_for_job', methods=['GET'])
+async def get_tasks_for_job():
+    try:
+        job_id = request.args.get('job_id', type=int)
+        offset = request.args.get('offset', default=0, type=int)
+        limit = request.args.get('limit', default=20, type=int)
+
+        if job_id is None:
+            return jsonify({'error': 'Missing job_id parameter'}), 400
+
+        tasks = await db_adapter_server.get_tasks_with_pagination_for_job(job_id, offset, limit)
+        if tasks:
+            return jsonify([task.as_dict() for task in tasks]), 200
+        else:
+            return jsonify({'error': 'No tasks found for the given job'}), 404
+    except Exception as e:
+        logger.error(f"Error fetching tasks for job {job_id}: {e}")
+        return jsonify({'error': 'Failed to fetch tasks', 'details': str(e)}), 500
+
 @app.route('/get_perm', methods=['GET'])
 async def get_perm():
     address = request.args.get('address')
