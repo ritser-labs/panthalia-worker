@@ -123,12 +123,47 @@ class DBAdapterClient:
         }
         response = await self.authenticated_request('POST', '/create_plugin', data=data)
         return response['plugin_id']
-
-    async def update_task_status(self, subnet_task_id: int, status: str, result=None):
+    
+    async def update_time_solved(
+        self,
+        subnet_task_id: int,
+        job_id: int,
+        time_solved: int
+    ):
         data = {
             'subnet_task_id': subnet_task_id,
+            'job_id': job_id,
+            'time_solved': time_solved
+        }
+        return await self.authenticated_request('POST', '/update_time_solved', data=data)
+    
+    async def update_time_solver_selected(
+        self,
+        subnet_task_id: int,
+        job_id: int,
+        time_solver_selected: int
+    ):
+        data = {
+            'subnet_task_id': subnet_task_id,
+            'job_id': job_id,
+            'time_solver_selected': time_solver_selected
+        }
+        return await self.authenticated_request('POST', '/update_time_solver_selected', data=data)
+
+    async def update_task_status(
+        self,
+        subnet_task_id: int,
+        job_id: int,
+        status: str,
+        result=None,
+        solver_address=None,
+    ):
+        data = {
+            'subnet_task_id': subnet_task_id,
+            'job_id': job_id,
             'status': status,
-            'result': result
+            'result': result,
+            'solver_address': solver_address
         }
         return await self.authenticated_request('POST', '/update_task_status', data=data)
 

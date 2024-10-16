@@ -127,16 +127,48 @@ async def create_plugin():
     plugin_id = await db_adapter_server.create_plugin(name, code)
     return jsonify({'plugin_id': plugin_id}), 200
 
+@app.route('/update_time_solved', methods=['POST'])
+@requires_auth
+async def update_time_solved():
+    data = await request.get_json()
+    subnet_task_id = data.get('subnet_task_id')
+    job_id = data.get('job_id')
+    time_solved = data.get('time_solved')
+    if subnet_task_id is None or time_solved is None:
+        return jsonify({'error': 'Missing parameters'}), 400
+    await db_adapter_server.update_time_solved(subnet_task_id, job_id, time_solved)
+    return jsonify({'status': 'success'}), 200
+
+@app.route('/update_time_solver_selected', methods=['POST'])
+@requires_auth
+async def update_time_solver_selected():
+    data = await request.get_json()
+    subnet_task_id = data.get('subnet_task_id')
+    job_id = data.get('job_id')
+    time_solver_selected = data.get('time_solver_selected')
+    if subnet_task_id is None or time_solver_selected is None:
+        return jsonify({'error': 'Missing parameters'}), 400
+    await db_adapter_server.update_time_solver_selected(subnet_task_id, job_id, time_solver_selected)
+    return jsonify({'status': 'success'}), 200
+
 @app.route('/update_task_status', methods=['POST'])
 @requires_auth
 async def update_task_status():
     data = await request.get_json()
     subnet_task_id = data.get('subnet_task_id')
+    job_id = data.get('job_id')
     status = TaskStatus[data.get('status')]
     result = data.get('result')
+    solver_address = data.get('solver_address')
     if subnet_task_id is None or status is None:
         return jsonify({'error': 'Missing parameters'}), 400
-    await db_adapter_server.update_task_status(subnet_task_id, status, result)
+    await db_adapter_server.update_task_status(
+        subnet_task_id,
+        job_id,
+        status,
+        result,
+        solver_address
+    )
     return jsonify({'status': 'success'}), 200
 
 @app.route('/create_state_update', methods=['POST'])

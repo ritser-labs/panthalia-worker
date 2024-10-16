@@ -78,6 +78,9 @@ class Task(TimestampMixin, Serializable):
     job_iteration = Column(Integer, nullable=False)
     status = Column(Enum(TaskStatus), nullable=False)
     result = Column(JSON, nullable=True)
+    solver_address = Column(String, nullable=True)
+    time_solved = Column(DateTime, nullable=True)
+    time_solver_selected = Column(DateTime, nullable=True)
     
     __table_args__ = (UniqueConstraint('job_id', 'subnet_task_id', name='_job_task_uc'),)
 

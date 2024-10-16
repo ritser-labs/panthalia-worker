@@ -7,6 +7,7 @@ from ..models import (
 from sqlalchemy import select, update
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime
 import logging
 import json
 import asyncio
@@ -90,10 +91,53 @@ class DBAdapterServer:
             await session.commit()
             logger.debug(f"Created Plugin {name} with code {code}.")
             return new_plugin.id
-
-    async def update_task_status(self, subnet_task_id: int, status: TaskStatus, result=None):
+    
+    async def update_time_solved(
+        self,
+        subnet_task_id: int,
+        job_id: int,
+        time_solved: int
+    ):
+        time_solved = datetime.utcfromtimestamp(time_solved)
         async with AsyncSessionLocal() as session:
-            stmt = update(Task).where(Task.subnet_task_id == subnet_task_id).values(status=status, result=result)
+            stmt = update(Task).where(
+                Task.subnet_task_id == subnet_task_id
+                and Task.job_id == job_id
+            ).values(time_solved=time_solved)
+            await session.execute(stmt)
+            await session.commit()
+            logger.debug(f"Updated Task {task_id} to time solved {time_solved}.")
+    
+    async def update_time_solver_selected(
+        self,
+        subnet_task_id: int,
+        job_id: int,
+        time_solver_selected: int
+    ):
+        time_solver_selected = datetime.utcfromtimestamp(time_solver_selected)
+        async with AsyncSessionLocal() as session:
+            stmt = update(Task).where(
+                Task.subnet_task_id == subnet_task_id
+                and Task.job_id == job_id
+            ).values(time_solver_selected=time_solver_selected)
+            await session.execute(stmt)
+            await session.commit()
+            logger.debug(f"Updated Task {task_id} to time solver selected {time_solver_selected}.")
+
+    async def update_task_status(
+        self,
+        subnet_task_id: int,
+        job_id: int,
+        status: TaskStatus,
+        result=None,
+        solver_address=None
+    ):
+        async with AsyncSessionLocal() as session:
+            stmt = update(Task).where(
+                Task.subnet_task_id == subnet_task_id
+                and Task.job_id == job_id
+            ).values(
+                status=status, result=result, solver_address=solver_address)
             await session.execute(stmt)
             await session.commit()
             logger.debug(f"Updated Task {subnet_task_id} to status {status} with result {result}.")

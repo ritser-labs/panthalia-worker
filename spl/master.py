@@ -333,16 +333,37 @@ class Master:
             logger.info(
                 f"Expected status: {TaskStatus.SolutionSubmitted.value}"
             )
+            if task.status == TaskStatus.SolutionSubmitted.value:
+                await self.db_adapter.update_time_solved(
+                    task_id,
+                    self.job_id,
+                    task.timeStatusChanged
+                )
+            if task.status == TaskStatus.SolverSelected.value:
+                await self.db_adapter.update_time_solver_selected(
+                    task_id,
+                    self.job_id,
+                    task.timeStatusChanged
+                )
             if (
                 task.status == TaskStatus.SolutionSubmitted.value
                 or task.status == TaskStatus.ResolvedCorrect.value
+                or task.status == TaskStatus.ResolvedIncorrect.value
             ):
-                result = json.loads(task.postedSolution.decode("utf-8"))
+                try:
+                    result = json.loads(task.postedSolution.decode("utf-8"))
+                except Exception as e:
+                    result = "DECODING_ERROR"
+                    logger.error(
+                        f"Error decoding solution for task ID {task_id}: {e}"
+                    )
             
             await self.db_adapter.update_task_status(
                 task_id,
+                self.job_id,
                 TaskStatus(task.status).name,
-                result
+                result,
+                task.solver
             )
             return result
         except Exception as e:
