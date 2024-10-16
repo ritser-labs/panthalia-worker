@@ -106,7 +106,7 @@ class DBAdapterServer:
             ).values(time_solved=time_solved)
             await session.execute(stmt)
             await session.commit()
-            logger.debug(f"Updated Task {task_id} to time solved {time_solved}.")
+            logger.debug(f"Updated Task {subnet_task_id} to time solved {time_solved}.")
     
     async def update_time_solver_selected(
         self,
@@ -122,7 +122,7 @@ class DBAdapterServer:
             ).values(time_solver_selected=time_solver_selected)
             await session.execute(stmt)
             await session.commit()
-            logger.debug(f"Updated Task {task_id} to time solver selected {time_solver_selected}.")
+            logger.debug(f"Updated Task {subnet_task_id} to time solver selected {time_solver_selected}.")
 
     async def update_task_status(
         self,
@@ -188,6 +188,22 @@ class DBAdapterServer:
             else:
                 logger.error(f"Task with ID {subnet_task_id} not found or does not match Subnet ID {subnet_id}.")
             return task
+
+    async def get_tasks_with_pagination_for_job(self, job_id: int, offset: int = 0, limit: int = 20):
+        """
+        Retrieve tasks for a specific job with pagination, ordered by the earliest created.
+        :param job_id: The ID of the job to retrieve tasks for.
+        :param offset: The starting point for pagination.
+        :param limit: The number of tasks to retrieve.
+        :return: A list of tasks.
+        """
+        async with AsyncSessionLocal() as session:
+            # Select tasks for a specific job, ordered by creation time, applying offset and limit
+            stmt = select(Task).filter_by(job_id=job_id).order_by(Task.created_at.asc()).offset(offset).limit(limit)
+            result = await session.execute(stmt)
+            tasks = result.scalars().all()
+            logger.debug(f"Retrieved {len(tasks)} tasks for job {job_id} with offset {offset} and limit {limit}.")
+            return tasks
 
     async def get_perm(self, address: str, perm: int):
         async with AsyncSessionLocal() as session:
