@@ -89,9 +89,9 @@ class Task(TimestampMixin, Serializable):
 class StateUpdate(Serializable):
     __tablename__ = 'state_updates'
     id = Column(Integer, primary_key=True, index=True)
-    state_iteration = Column(Integer, nullable=False)
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
     data = Column(JSON, nullable=False)
+    submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     job = relationship("Job", backref="state_updates")
 

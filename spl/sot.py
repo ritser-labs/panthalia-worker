@@ -442,15 +442,24 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
 
                 set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
                 await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+                saved_num_updates = num_updates.get(tensor_name, 0)
 
                 set_dict_and_adam(num_updates, tensor_name, 0)
                 await save_json(num_updates_file, num_updates, num_updates_file_lock)
-
-                set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
+                saved_iteration_number = iteration_number.get(tensor_name, 0)
+                set_dict_and_adam(iteration_number, tensor_name, saved_iteration_number + 1)
                 await save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
                 if last_future_version_number.get(tensor_name, 0) < future_version_number:
                     set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
                     await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
+                if saved_num_updates > 0:
+                    await db_adapter.create_state_update(
+                        job_id,
+                        {
+                            'num_updates': saved_num_updates,
+                            'iteration_number': saved_iteration_number,
+                        }
+                    )
         finally:
             update_timestamp_lock.release()
         return old_block_timestamp

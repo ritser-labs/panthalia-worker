@@ -7,6 +7,7 @@ from .db_adapter_server import db_adapter_server
 from ..api_auth import requires_authentication
 from eth_account.messages import encode_defunct
 from ..models import PermType, TaskStatus
+from quart_cors import cors
 import os
 
 logging.basicConfig(
@@ -16,6 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Quart(__name__)
+
+app = cors(app, allow_origin="http://localhost:3000")
 
 # Define permission constants (should match those in your original PermType)
 perm_modify_db = None
@@ -176,20 +179,20 @@ async def update_task_status():
 async def create_state_update():
     data = await request.get_json()
     job_id = data.get('job_id')
-    state_iteration = data.get('state_iteration')
-    if job_id is None or state_iteration is None:
+    state_data = data.get('data')
+    if job_id is None or state_data is None:
         return jsonify({'error': 'Missing parameters'}), 400
-    state_update_id = await db_adapter_server.create_state_update(job_id, state_iteration)
+    state_update_id = await db_adapter_server.create_state_update(job_id, state_data)
     return jsonify({'state_update_id': state_update_id}), 200
 
-@app.route('/get_plugin_code', methods=['GET'])
-async def get_plugin_code():
+@app.route('/get_plugin', methods=['GET'])
+async def get_plugin():
     plugin_id = request.args.get('plugin_id', type=int)
     if plugin_id is None:
         return jsonify({'error': 'Missing plugin_id parameter'}), 400
-    code = await db_adapter_server.get_plugin_code(plugin_id)
-    if code:
-        return jsonify({'code': code}), 200
+    plugin = await db_adapter_server.get_plugin(plugin_id)
+    if plugin:
+        return jsonify(plugin.as_dict()), 200
     else:
         return jsonify({'error': 'Plugin not found'}), 404
 
@@ -234,6 +237,39 @@ async def get_tasks_for_job():
     except Exception as e:
         logger.error(f"Error fetching tasks for job {job_id}: {e}")
         return jsonify({'error': 'Failed to fetch tasks', 'details': str(e)}), 500
+
+@app.route('/get_task_count_for_job', methods=['GET'])
+async def get_task_count_for_job():
+    """
+    Retrieve the total number of tasks for a specific job.
+    """
+    job_id = request.args.get('job_id', type=int)
+    if job_id is None:
+        return jsonify({'error': 'Missing job_id parameter'}), 400
+
+    task_count = await db_adapter_server.get_task_count_for_job(job_id)
+    return jsonify(task_count), 200
+
+@app.route('/get_task_count_by_status_for_job', methods=['GET'])
+async def get_task_count_by_status_for_job():
+    """
+    Retrieve the number of tasks for a specific job with a given list of statuses.
+    """
+    job_id = request.args.get('job_id', type=int)
+    status_list = request.args.getlist('statuses')
+
+    if job_id is None or not status_list:
+        return jsonify({'error': 'Missing job_id or statuses parameter'}), 400
+
+    try:
+        statuses = [TaskStatus[status] for status in status_list]
+        task_count_by_status = await db_adapter_server.get_task_count_by_status_for_job(job_id, statuses)
+        return jsonify(task_count_by_status), 200
+    except KeyError as e:
+        return jsonify({'error': f'Invalid TaskStatus value: {str(e)}'}), 400
+    except Exception as e:
+        logger.error(f"Error fetching task count for job {job_id}: {e}")
+        return jsonify({'error': 'Failed to fetch task count', 'details': str(e)}), 500
 
 @app.route('/get_perm', methods=['GET'])
 async def get_perm():
@@ -311,6 +347,40 @@ async def get_sot_by_job_id():
         return jsonify(sot.as_dict()), 200
     else:
         return jsonify({'error': 'SOT not found'}), 404
+
+@app.route('/get_total_state_updates_for_job', methods=['GET'])
+async def get_total_state_updates_for_job():
+    job_id = request.args.get('job_id', type=int)
+    if job_id is None:
+        return jsonify({'error': 'Missing job_id parameter'}), 400
+
+    try:
+        total_state_updates = await db_adapter_server.get_total_state_updates_for_job(job_id)
+        return jsonify(total_state_updates), 200
+    except Exception as e:
+        logger.error(f"Error fetching total state updates for job {job_id}: {e}")
+        return jsonify({'error': 'Failed to fetch state updates', 'details': str(e)}), 500
+
+@app.route('/get_last_task_with_status', methods=['GET'])
+async def get_last_task_with_status():
+    job_id = request.args.get('job_id', type=int)
+    status_list = request.args.getlist('statuses')
+
+    if job_id is None or not status_list:
+        return jsonify({'error': 'Missing job_id or statuses parameter'}), 400
+
+    try:
+        statuses = [TaskStatus[status] for status in status_list]
+        last_task = await db_adapter_server.get_last_task_with_status(job_id, statuses)
+        if last_task:
+            return jsonify(last_task.as_dict()), 200
+        else:
+            return jsonify({'error': 'No task found matching the given statuses'}), 404
+    except KeyError as e:
+        return jsonify({'error': f'Invalid TaskStatus value: {str(e)}'}), 400
+    except Exception as e:
+        logger.error(f"Error fetching last task with status for job {job_id}: {e}")
+        return jsonify({'error': 'Failed to fetch task', 'details': str(e)}), 500
 
 if __name__ == "__main__":
     import argparse

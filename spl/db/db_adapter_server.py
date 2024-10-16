@@ -4,10 +4,11 @@ from ..models import (
     AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet,
     Perm, Sot, PermDescription, PermType, Base, init_db
 )
-from sqlalchemy import select, update
+from sqlalchemy import select, update, desc, func
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
+from typing import Dict
 import logging
 import json
 import asyncio
@@ -142,18 +143,18 @@ class DBAdapterServer:
             await session.commit()
             logger.debug(f"Updated Task {subnet_task_id} to status {status} with result {result}.")
 
-    async def create_state_update(self, job_id: int, state_iteration: int):
+    async def create_state_update(self, job_id: int, data: Dict):
         async with AsyncSessionLocal() as session:
             new_state_update = StateUpdate(
                 job_id=job_id,
-                state_iteration=state_iteration
+                data=data
             )
             session.add(new_state_update)
             await session.commit()
-            logger.debug(f"Created State Update for Job {job_id}, Iteration {state_iteration}.")
+            logger.debug(f"Created State Update for Job {job_id}.")
             return new_state_update.id
 
-    async def get_plugin_code(self, plugin_id: int):
+    async def get_plugin(self, plugin_id: int):
         async with AsyncSessionLocal() as session:
             stmt = select(Plugin).filter_by(id=plugin_id)
             result = await session.execute(stmt)
@@ -162,7 +163,7 @@ class DBAdapterServer:
                 logger.debug(f"Retrieved Plugin: {plugin}")
             else:
                 logger.error(f"Plugin with ID {plugin_id} not found.")
-            return plugin.code
+            return plugin
 
     async def get_subnet_using_address(self, address: str):
         async with AsyncSessionLocal() as session:
@@ -199,11 +200,41 @@ class DBAdapterServer:
         """
         async with AsyncSessionLocal() as session:
             # Select tasks for a specific job, ordered by creation time, applying offset and limit
-            stmt = select(Task).filter_by(job_id=job_id).order_by(Task.created_at.asc()).offset(offset).limit(limit)
+            stmt = select(Task).filter_by(job_id=job_id).order_by(Task.submitted_at.asc()).offset(offset).limit(limit)
             result = await session.execute(stmt)
             tasks = result.scalars().all()
             logger.debug(f"Retrieved {len(tasks)} tasks for job {job_id} with offset {offset} and limit {limit}.")
             return tasks
+        
+    async def get_task_count_for_job(self, job_id: int):
+        """
+        Get the total number of tasks for a specific job.
+        :param job_id: The ID of the job.
+        :return: The total number of tasks for the job.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(func.count(Task.id)).filter_by(job_id=job_id)
+            result = await session.execute(stmt)
+            task_count = result.scalar_one()
+            logger.debug(f"Job {job_id} has {task_count} tasks.")
+            return task_count
+
+    async def get_task_count_by_status_for_job(self, job_id: int, statuses: list[TaskStatus]):
+        """
+        Get the number of tasks for a specific job with a list of statuses.
+        :param job_id: The ID of the job.
+        :param statuses: A list of TaskStatus values to count tasks for.
+        :return: The number of tasks with the given statuses for the job.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(func.count(Task.id)).filter(
+                Task.job_id == job_id,
+                Task.status.in_(statuses)
+            )
+            result = await session.execute(stmt)
+            task_status_count = result.scalar_one()
+            logger.debug(f"Job {job_id} has {task_status_count} tasks with statuses {statuses}.")
+            return task_status_count
 
     async def get_perm(self, address: str, perm: int):
         async with AsyncSessionLocal() as session:
@@ -278,6 +309,40 @@ class DBAdapterServer:
             else:
                 logger.error(f"SOT for Job {job_id} not found.")
             return sot
+    
+    async def get_total_state_updates_for_job(self, job_id: int):
+        """
+        Get the total number of state updates for a specific job.
+        :param job_id: The ID of the job.
+        :return: The total number of state updates for the job.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(func.count(StateUpdate.id)).filter_by(job_id=job_id)
+            result = await session.execute(stmt)
+            total_state_updates = result.scalar_one()
+            logger.debug(f"Job {job_id} has {total_state_updates} state updates.")
+            return total_state_updates
+    
+    async def get_last_task_with_status(self, job_id: int, statuses: list[TaskStatus]):
+        """
+        Get the last task of a job that has one of the specified TaskStatus values.
+        :param job_id: The ID of the job.
+        :param statuses: A list of TaskStatus values to filter tasks by.
+        :return: The last task with one of the specified statuses or None if no task is found.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(Task).filter(
+                Task.job_id == job_id,
+                Task.status.in_(statuses)
+            ).order_by(desc(Task.submitted_at)).limit(1)
+            result = await session.execute(stmt)
+            task = result.scalar_one_or_none()
+            if task:
+                logger.debug(f"Retrieved the last task with one of the statuses {statuses} for Job {job_id}.")
+            else:
+                logger.error(f"No task found with statuses {statuses} for Job {job_id}.")
+            return task
+
 
 # Instantiate the server adapter
 db_adapter_server = DBAdapterServer()

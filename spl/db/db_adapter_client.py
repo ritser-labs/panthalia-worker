@@ -9,6 +9,7 @@ from eth_account import Account
 import uuid
 import time
 from ..models import Sot, Job, Task, Subnet, Plugin, StateUpdate, Perm, PermDescription
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -167,17 +168,17 @@ class DBAdapterClient:
         }
         return await self.authenticated_request('POST', '/update_task_status', data=data)
 
-    async def create_state_update(self, job_id: int, state_iteration: int):
+    async def create_state_update(self, job_id: int, data: Dict):
         data = {
             'job_id': job_id,
-            'state_iteration': state_iteration
+            'data': data
         }
         response = await self.authenticated_request('POST', '/create_state_update', data=data)
         return response['state_update_id']
 
-    async def get_plugin_code(self, plugin_id: int):
-        response = await self.authenticated_request('GET', '/get_plugin_code', params={'plugin_id': plugin_id})
-        return response['code']
+    async def get_plugin(self, plugin_id: int):
+        response = await self.authenticated_request('GET', '/get_plugin', params={'plugin_id': plugin_id})
+        return self.convert_to_object(Plugin, response)
 
     async def get_subnet_using_address(self, address: str):
         response = await self.authenticated_request('GET', '/get_subnet_using_address', params={'address': address})
@@ -229,3 +230,4 @@ class DBAdapterClient:
     async def get_sot_by_job_id(self, job_id: int):
         response = await self.authenticated_request('GET', '/get_sot_by_job_id', params={'job_id': job_id})
         return self.convert_to_object(Sot, response)
+
