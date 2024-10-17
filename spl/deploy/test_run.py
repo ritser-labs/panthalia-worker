@@ -236,6 +236,14 @@ def fetch_latest_loss():
 
     return latest_loss_cache['value']
 
+def write_private_key_to_temp(private_key, temp_dir):
+    import tempfile
+    import os
+    fd, path = tempfile.mkstemp(dir=temp_dir)
+    with os.fdopen(fd, 'w') as tmp:
+        tmp.write(private_key)
+    return path
+
 def monitor_processes(stdscr, processes, pod_helpers, task_counts):
     global args
     logger = logging.getLogger()
@@ -453,10 +461,10 @@ async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_cont
         cmd=DOCKER_CMD
     )
 
-    # Save the pod ID and private key path to state
+    # Save the private key value instead of the path to the state
     state['pods'][worker_name] = {
         'pod_id': worker_instance['id'],
-        'private_key_path': worker_helpers['private_key_path'],
+        'private_key': env['PRIVATE_KEYS'],
         'log_file': os.path.join(LOG_DIR, f"{worker_name}.log")
     }
     save_state(state)
@@ -512,14 +520,14 @@ async def launch_db_instance(state, db_adapter, db_perm_id):
             env=env
         )
 
-        # Save the DB instance to state
+        # Save the DB instance to state with the private key value
         state['pods']['db'] = {
             'pod_id': db_instance['id'],
-            'private_key_path': db_helpers['private_key_path'],
+            'private_key': db_helpers['private_key'],
             'log_file': os.path.join(LOG_DIR, 'db.log')
         }
         db_ip, db_port = await get_public_ip_and_port(db_instance['id'], private_port=int(DB_PORT))
-        state['db_url'] = f"http://{db_ip}:{[db_port]}"
+        state['db_url'] = f"http://{db_ip}:{db_port}"
         save_state(state)
         logging.info(f"DB service started on {state['db_url']}")
 
@@ -527,14 +535,15 @@ async def launch_db_instance(state, db_adapter, db_perm_id):
     else:
         logging.info("DB instance already running. Reconnecting...")
         pod_id = state['pods']['db']['pod_id']
+        private_key = state['pods']['db']['private_key']
+        temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
         db_helpers = await reconnect_and_initialize_existing_pod(
-            pod_id, 'db', state['pods']['db']['private_key_path'], log_file=state['pods']['db']['log_file']
+            pod_id, 'db', temp_path, log_file=state['pods']['db']['log_file']
         )
         processes['db'] = runpod.get_pod(pod_id)
         logging.info(f"Reconnected to DB at {state['db_url']}")
 
         return runpod.get_pod(pod_id), db_helpers
-
 
 async def main():
     global sot_url, rpc_url
@@ -563,7 +572,6 @@ async def main():
         db_url,
         args.private_key,
     )
-    
 
     # First, launch or reconnect the DB instance
     db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb.name)
@@ -626,10 +634,10 @@ async def main():
         processes['anvil'] = anvil_instance
         logging.info(f"Anvil started on {rpc_url}")
 
-        # Save Anvil instance to state
+        # Save Anvil instance to state with the private key value
         state['pods']['anvil'] = {
             'pod_id': anvil_instance['id'],
-            'private_key_path': anvil_helpers['private_key_path'],
+            'private_key': anvil_helpers['private_key'],
             'log_file': ANVIL_LOG_FILE
         }
         state['rpc_url'] = rpc_url
@@ -725,8 +733,10 @@ async def main():
     else:
         logging.info("Anvil instance already running. Reconnecting...")
         pod_id = state['pods']['anvil']['pod_id']
+        private_key = state['pods']['anvil']['private_key']
+        temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
         pod_helpers['anvil'] = await reconnect_and_initialize_existing_pod(
-            pod_id, 'anvil', state['pods']['anvil']['private_key_path'], log_file=ANVIL_LOG_FILE
+            pod_id, 'anvil', temp_path, log_file=state['pods']['anvil']['log_file']
         )
         processes['anvil'] = runpod.get_pod(pod_id)
         rpc_url = state['rpc_url']
@@ -753,10 +763,10 @@ async def main():
         processes['sot'] = sot_instance
         logging.info(f"SOT service started on {sot_url}")
 
-        # Save SOT instance to state
+        # Save SOT instance to state with the private key value
         state['pods']['sot'] = {
             'pod_id': sot_instance['id'],
-            'private_key_path': sot_helpers['private_key_path'],
+            'private_key': sot_helpers['private_key'],
             'log_file': SOT_LOG_FILE
         }
         state['sot_url'] = sot_url
@@ -769,8 +779,10 @@ async def main():
     else:
         logging.info("SOT instance already running. Reconnecting...")
         pod_id = state['pods']['sot']['pod_id']
+        private_key = state['pods']['sot']['private_key']
+        temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
         pod_helpers['sot'] = await reconnect_and_initialize_existing_pod(
-            pod_id, 'sot', state['pods']['sot']['private_key_path'], log_file=SOT_LOG_FILE
+            pod_id, 'sot', temp_path, log_file=SOT_LOG_FILE
         )
         processes['sot'] = runpod.get_pod(pod_id)
         sot_url = state['sot_url']
@@ -796,8 +808,10 @@ async def main():
         else:
             logging.info(f"Worker {worker_name} already running. Reconnecting...")
             pod_id = state['pods'][worker_name]['pod_id']
+            private_key = state['pods'][worker_name]['private_key']
+            temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
             pod_helpers[worker_name] = await reconnect_and_initialize_existing_pod(
-                pod_id, worker_name, state['pods'][worker_name]['private_key_path'], log_file=state['pods'][worker_name]['log_file']
+                pod_id, worker_name, temp_path, log_file=state['pods'][worker_name]['log_file']
             )
             processes[worker_name] = runpod.get_pod(pod_id)
 
@@ -838,18 +852,20 @@ async def main():
             processes['master'] = master_instance
             logging.info(f"Master process started on instance {master_instance['id']}")
 
-            # Save master instance to state
+            # Save master instance to state with the private key value
             state['pods']['master'] = {
                 'pod_id': master_instance['id'],
-                'private_key_path': master_helpers['private_key_path'],
+                'private_key': master_helpers['private_key'],
                 'log_file': os.path.join(LOG_DIR, 'master.log')
             }
             save_state(state)
         else:
             logging.info("Master instance already running. Reconnecting...")
             pod_id = state['pods']['master']['pod_id']
+            private_key = state['pods']['master']['private_key']
+            temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
             pod_helpers['master'] = await reconnect_and_initialize_existing_pod(
-                pod_id, 'master', state['pods']['master']['private_key_path'], log_file=state['pods']['master']['log_file']
+                pod_id, 'master', temp_path, log_file=state['pods']['master']['log_file']
             )
             processes['master'] = runpod.get_pod(pod_id)
 
