@@ -40,9 +40,6 @@ TEMP_DIR = os.path.join(STATE_DIR, 'temp')
 DEPLOY_SCRIPT = os.path.join(parent_dir, 'script', 'Deploy.s.sol')
 LOG_DIR = os.path.join(parent_dir, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
-ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
-SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
-DB_LOG_FILE = os.path.join(LOG_DIR, 'db.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 STATE_FILE = os.path.join(STATE_DIR, 'state.json')  # State file to save/load state
 plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
@@ -70,6 +67,12 @@ logging.getLogger().addHandler(file_handler)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 for handler in logging.getLogger().handlers:
     handler.setFormatter(formatter)
+
+def get_log_file(instance_name):
+    """
+    Helper function to get the log file path based on the instance name.
+    """
+    return os.path.join(LOG_DIR, f"{instance_name}.log")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
@@ -283,7 +286,7 @@ def monitor_processes(stdscr, processes, pod_helpers, task_counts):
 
         # Display logs on the left side
         process_name = ordered_process_names[selected_process]
-        log_file = os.path.join(LOG_DIR, f"{process_name}.log")
+        log_file = get_log_file(process_name)  # Inferred log file path
         log_lines = []
 
         if os.path.exists(log_file):
@@ -455,7 +458,7 @@ async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_cont
         image=DOCKER_IMAGE,
         gpu_count=1,
         ports='',
-        log_file=os.path.join(LOG_DIR, f"{worker_name}.log"),
+        log_file=get_log_file(worker_name),  # Inferred log file path
         env=env,
         template_id=BASE_TEMPLATE_ID,
         cmd=DOCKER_CMD
@@ -465,7 +468,7 @@ async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_cont
     state['pods'][worker_name] = {
         'pod_id': worker_instance['id'],
         'private_key': env['PRIVATE_KEYS'],
-        'log_file': os.path.join(LOG_DIR, f"{worker_name}.log")
+        # 'log_file': get_log_file(worker_name)  # Removed as per requirement
     }
     save_state(state)
 
@@ -514,7 +517,7 @@ async def launch_db_instance(state, db_adapter, db_perm_id):
             image=DOCKER_IMAGE,
             gpu_count=0,  # No GPU required for the DB instance
             ports=f'{DB_PORT}/tcp',  # Expose the DB port
-            log_file=os.path.join(LOG_DIR, 'db.log'),
+            log_file=get_log_file("db"),  # Inferred log file path
             template_id=BASE_TEMPLATE_ID,
             cmd=DOCKER_CMD,
             env=env
@@ -524,7 +527,7 @@ async def launch_db_instance(state, db_adapter, db_perm_id):
         state['pods']['db'] = {
             'pod_id': db_instance['id'],
             'private_key': db_helpers['private_key'],
-            'log_file': os.path.join(LOG_DIR, 'db.log')
+            # 'log_file': get_log_file("db")  # Removed as per requirement
         }
         db_ip, db_port = await get_public_ip_and_port(db_instance['id'], private_port=int(DB_PORT))
         state['db_url'] = f"http://{db_ip}:{db_port}"
@@ -538,7 +541,7 @@ async def launch_db_instance(state, db_adapter, db_perm_id):
         private_key = state['pods']['db']['private_key']
         temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
         db_helpers = await reconnect_and_initialize_existing_pod(
-            pod_id, 'db', temp_path, log_file=state['pods']['db']['log_file']
+            pod_id, 'db', temp_path, log_file=get_log_file("db")  # Inferred log file path
         )
         processes['db'] = runpod.get_pod(pod_id)
         logging.info(f"Reconnected to DB at {state['db_url']}")
@@ -566,24 +569,26 @@ async def main():
 
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
-    db_instance, db_helpers = await launch_db_instance(state, db_adapter, GUESSED_DB_PERM_ID)
-    db_url = state['db_url']
     db_adapter = DBAdapterClient(
-        db_url,
-        args.private_key,
+        db_url='',  # Temporary, will be set after DB instance is launched
+        private_key=args.private_key,
     )
+    db_instance, db_helpers = await launch_db_instance(state, db_adapter, GUESS_DB_PERM_ID)
+    db_url = state['db_url']
+    db_adapter.db_url = db_url  # Update the db_url in db_adapter
 
     # First, launch or reconnect the DB instance
     db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb.name)
-    assert db_perm_id == GUESSED_DB_PERM_ID, f"Expected DB perm ID {GUESSED_DB_PERM_ID}, got {db_perm_id}"
+    check_guessed_ids(db_perm_id, GUESS_DB_PERM_ID, 'DB Perm')
 
     # Now launch the SOT service, which will use the `db_url`
     sot_promise = None
     if 'sot' not in state['pods']:
         logging.info("Starting SOT instance...")
 
-        job_id = await db_adapter.create_job('test_job', GUESSED_PLUGIN_ID, GUESSED_SUBNET_ID, args.sot_url, 0)
-        sot_id = await db_adapter.create_sot(job_id, args.sot_url)
+        # Assuming `create_job` and `create_sot` are async functions
+        job_id = await db_adapter.create_job('test_job', GUESSED_PLUGIN_ID, GUESSED_SUBNET_ID, sot_url, 0)
+        sot_id = await db_adapter.create_sot(job_id, sot_url)
         sot_wallet = generate_wallets(1)[0]
 
         await db_adapter.create_perm(sot_wallet['address'], db_perm_id)
@@ -609,7 +614,7 @@ async def main():
             image=DOCKER_IMAGE,
             gpu_count=1,
             ports=f'{SOT_PRIVATE_PORT}/tcp',
-            log_file=SOT_LOG_FILE,
+            log_file=get_log_file("sot"),  # Inferred log file path
             template_id=BASE_TEMPLATE_ID,
             cmd=DOCKER_CMD,
             env=env
@@ -622,7 +627,7 @@ async def main():
             name="anvil",
             gpu_count=0,
             ports='8545/tcp',
-            log_file=ANVIL_LOG_FILE,
+            log_file=get_log_file("anvil"),  # Inferred log file path
             template_id=BASE_TEMPLATE_ID,
             cmd=ANVIL_CMD,
             env={},
@@ -638,7 +643,7 @@ async def main():
         state['pods']['anvil'] = {
             'pod_id': anvil_instance['id'],
             'private_key': anvil_helpers['private_key'],
-            'log_file': ANVIL_LOG_FILE
+            # 'log_file': get_log_file("anvil")  # Removed as per requirement
         }
         state['rpc_url'] = rpc_url
         save_state(state)
@@ -708,7 +713,7 @@ async def main():
             code = await f.read()
         plugin_id = await db_adapter.create_plugin('plugin', code)
         
-        subnet_id = await db_adapter.create_subnet(list(subnet_addresses.values())[0], args.rpc_url)
+        subnet_id = await db_adapter.create_subnet(list(subnet_addresses.values())[0], rpc_url)
     
         plugin = await get_plugin(plugin_id, db_adapter)
 
@@ -736,7 +741,7 @@ async def main():
         private_key = state['pods']['anvil']['private_key']
         temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
         pod_helpers['anvil'] = await reconnect_and_initialize_existing_pod(
-            pod_id, 'anvil', temp_path, log_file=state['pods']['anvil']['log_file']
+            pod_id, 'anvil', temp_path, log_file=get_log_file("anvil")  # Inferred log file path
         )
         processes['anvil'] = runpod.get_pod(pod_id)
         rpc_url = state['rpc_url']
@@ -767,7 +772,7 @@ async def main():
         state['pods']['sot'] = {
             'pod_id': sot_instance['id'],
             'private_key': sot_helpers['private_key'],
-            'log_file': SOT_LOG_FILE
+            # 'log_file': get_log_file("sot")  # Removed as per requirement
         }
         state['sot_url'] = sot_url
         save_state(state)
@@ -782,7 +787,7 @@ async def main():
         private_key = state['pods']['sot']['private_key']
         temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
         pod_helpers['sot'] = await reconnect_and_initialize_existing_pod(
-            pod_id, 'sot', temp_path, log_file=SOT_LOG_FILE
+            pod_id, 'sot', temp_path, log_file=get_log_file("sot")  # Inferred log file path
         )
         processes['sot'] = runpod.get_pod(pod_id)
         sot_url = state['sot_url']
@@ -811,7 +816,7 @@ async def main():
             private_key = state['pods'][worker_name]['private_key']
             temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
             pod_helpers[worker_name] = await reconnect_and_initialize_existing_pod(
-                pod_id, worker_name, temp_path, log_file=state['pods'][worker_name]['log_file']
+                pod_id, worker_name, temp_path, log_file=get_log_file(worker_name)  # Inferred log file path
             )
             processes[worker_name] = runpod.get_pod(pod_id)
 
@@ -842,7 +847,7 @@ async def main():
                 name="master",
                 gpu_count=0,
                 ports='',
-                log_file=os.path.join(LOG_DIR, 'master.log'),
+                log_file=get_log_file("master"),  # Inferred log file path
                 env=env,
                 template_id=BASE_TEMPLATE_ID,
                 cmd=DOCKER_CMD,
@@ -856,7 +861,7 @@ async def main():
             state['pods']['master'] = {
                 'pod_id': master_instance['id'],
                 'private_key': master_helpers['private_key'],
-                'log_file': os.path.join(LOG_DIR, 'master.log')
+                # 'log_file': get_log_file("master")  # Removed as per requirement
             }
             save_state(state)
         else:
@@ -865,7 +870,7 @@ async def main():
             private_key = state['pods']['master']['private_key']
             temp_path = write_private_key_to_temp(private_key, TEMP_DIR)
             pod_helpers['master'] = await reconnect_and_initialize_existing_pod(
-                pod_id, 'master', temp_path, log_file=state['pods']['master']['log_file']
+                pod_id, 'master', temp_path, log_file=get_log_file("master")  # Inferred log file path
             )
             processes['master'] = runpod.get_pod(pod_id)
 
