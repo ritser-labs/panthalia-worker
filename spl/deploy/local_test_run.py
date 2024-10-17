@@ -458,7 +458,7 @@ async def main():
         subnet_id = await db_adapter.create_subnet(
             list(subnet_addresses.values())[0],
             args.rpc_url,
-            distributor_contract_address
+            distributor_contract_address,
             pool_address
         )
         
