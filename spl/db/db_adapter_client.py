@@ -109,10 +109,18 @@ class DBAdapterClient:
         response = await self.authenticated_request('POST', '/create_job', data=data)
         return response['job_id']
 
-    async def create_subnet(self, address: str, rpc_url: str):
+    async def create_subnet(
+        self,
+        address: str,
+        rpc_url: str,
+        distributor_address: str,
+        pool_address: str
+    ):
         data = {
             'address': address,
-            'rpc_url': rpc_url
+            'rpc_url': rpc_url,
+            'distributor_address': distributor_address,
+            'pool_address': pool_address
         }
         response = await self.authenticated_request('POST', '/create_subnet', data=data)
         return response['subnet_id']

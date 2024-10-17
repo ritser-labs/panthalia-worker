@@ -6,7 +6,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-USE_SECIMPORT = False
+USE_SECIMPORT = True
 
 
 # Define a global directory for plugins
@@ -37,7 +37,7 @@ async def get_plugin(plugin_id, db_adapter):
 
         # Fetch the plugin code and write it to the plugin's subdirectory
         async with aiofiles.open(plugin_path, mode='w') as f:
-            await f.write(await db_adapter.get_plugin_code(plugin_id))
+            await f.write((await db_adapter.get_plugin(plugin_id)).code)
 
         # Copy the adapters directory to the plugin's subdirectory
         local_adapters_dir = os.path.join(os.path.dirname(__file__), 'adapters')
@@ -76,6 +76,7 @@ async def get_plugin(plugin_id, db_adapter):
 
         logger.info(f'Plugin {plugin_id} code fetched and written to {plugin_path}')
         if USE_SECIMPORT:
+            logger.info(f'Using secimport to import plugin {plugin_id}')
             import secimport
             last_plugin = secimport.secure_import(f'plugin_{plugin_id}.plugin_{plugin_id}')
             last_plugin = getattr(last_plugin, f'plugin_{plugin_id}')

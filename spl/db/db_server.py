@@ -114,9 +114,16 @@ async def create_subnet():
     data = await request.get_json()
     address = data.get('address')
     rpc_url = data.get('rpc_url')
+    distributor_address = data.get('distributor_address')
+    pool_address = data.get('pool_address')
     if None in (address, rpc_url):
         return jsonify({'error': 'Missing parameters'}), 400
-    subnet_id = await db_adapter_server.create_subnet(address, rpc_url)
+    subnet_id = await db_adapter_server.create_subnet(
+        address,
+        rpc_url,
+        distributor_address,
+        pool_address
+    )
     return jsonify({'subnet_id': subnet_id}), 200
 
 @app.route('/create_plugin', methods=['POST'])

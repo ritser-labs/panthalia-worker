@@ -57,6 +57,9 @@ class Subnet(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     address = Column(String, nullable=False)
     rpc_url = Column(String, nullable=False)
+    distributor_address = Column(String, nullable=False)
+    pool_address = Column(String, nullable=False)
+
 class Job(TimestampMixin, Serializable):
     __tablename__ = 'jobs'
     id = Column(Integer, primary_key=True, index=True)
@@ -115,6 +118,17 @@ class PermDescription(Serializable):
     __tablename__ = 'perm_descriptions'
     id = Column(Integer, primary_key=True, index=True)
     perm_type = Column(Enum(PermType), nullable=False)
+
+class Instance(Base):
+    __tablename__ = 'instances'
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    job_id = Column(Integer, ForeignKey('jobs.id'))
+    private_key = Column(String)
+    pod_id = Column(String)
+    process_id = Column(Integer)
+    
+    job = relationship("Job", backref="instances")
 
 async def init_db():
     async with engine.begin() as conn:

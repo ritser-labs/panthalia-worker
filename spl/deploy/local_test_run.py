@@ -455,7 +455,12 @@ async def main():
             code = await f.read()
         plugin_id = await db_adapter.create_plugin('plugin', code)
         
-        subnet_id = await db_adapter.create_subnet(list(subnet_addresses.values())[0], args.rpc_url)
+        subnet_id = await db_adapter.create_subnet(
+            list(subnet_addresses.values())[0],
+            args.rpc_url,
+            distributor_contract_address
+            pool_address
+        )
         
         job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
 

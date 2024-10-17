@@ -71,11 +71,19 @@ class DBAdapterServer:
             logger.debug(f"Created Job {name} with Plugin {plugin_id}, Subnet {subnet_id}, SOT URL {sot_url}, Iteration {iteration}.")
             return new_job.id
 
-    async def create_subnet(self, address: str, rpc_url: str):
+    async def create_subnet(
+        self,
+        address: str,
+        rpc_url: str,
+        distributor_address: str,
+        pool_address: str
+    ):
         async with AsyncSessionLocal() as session:
             new_subnet = Subnet(
                 address=address,
-                rpc_url=rpc_url
+                rpc_url=rpc_url,
+                distributor_address=distributor_address,
+                pool_address=pool_address
             )
             session.add(new_subnet)
             await session.commit()

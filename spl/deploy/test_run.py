@@ -8,7 +8,7 @@ import threading
 import curses
 from ..common import load_abi, wait_for_rpc_available, wait_for_sot, SOT_PRIVATE_PORT, fund_wallets, MAX_CONCURRENT_ITERATIONS, DB_PORT
 from ..db.db_adapter_client import DBAdapterClient
-from ..models import init_db, PermType
+from ..models import init_db, db_path, PermType
 from ..plugin_manager import get_plugin
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
@@ -569,13 +569,13 @@ async def main():
 
     os.environ['RANK'] = '0'
     os.environ['WORLD_SIZE'] = '1'
-    db_adapter = DBAdapterClient(
-        db_url='',  # Temporary, will be set after DB instance is launched
-        private_key=args.private_key,
-    )
-    db_instance, db_helpers = await launch_db_instance(state, db_adapter, GUESS_DB_PERM_ID)
+    
+    db_instance, db_helpers = await launch_db_instance(state, db_adapter, GUESSED_DB_PERM_ID)
     db_url = state['db_url']
-    db_adapter.db_url = db_url  # Update the db_url in db_adapter
+    db_adapter = DBAdapterClient(
+        db_url,
+        args.private_key,
+    )
 
     # First, launch or reconnect the DB instance
     db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb.name)
@@ -713,7 +713,12 @@ async def main():
             code = await f.read()
         plugin_id = await db_adapter.create_plugin('plugin', code)
         
-        subnet_id = await db_adapter.create_subnet(list(subnet_addresses.values())[0], rpc_url)
+        subnet_id = await db_adapter.create_subnet(
+            list(subnet_addresses.values())[0],
+            rpc_url,
+            distributor_contract_address,
+            pool_address,
+        )
     
         plugin = await get_plugin(plugin_id, db_adapter)
 
