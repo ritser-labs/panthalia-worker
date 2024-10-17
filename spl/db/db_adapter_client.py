@@ -1,24 +1,29 @@
 # db_adapter_client.py
 
-import aiohttp
-import asyncio
 import logging
+import aiohttp
 import json
+import time
+import uuid
 from eth_account.messages import encode_defunct
 from eth_account import Account
-import uuid
-import time
-from ..models import Sot, Job, Task, Subnet, Plugin, StateUpdate, Perm, PermDescription
-from typing import Dict, Optional
+from typing import Optional, List, Type, TypeVar, Dict, Any
+from ..models import (
+    Job, Plugin, Subnet, Task, TaskStatus, Perm, Sot, Instance, ServiceType, Base, PermType
+)
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# Generic Type for SQLAlchemy models
+T = TypeVar('T', bound=Base)
+
 class DBAdapterClient:
-    def __init__(self, server_url, private_key=None):
-        self.server_url = server_url.rstrip('/')
+    def __init__(self, base_url, private_key=None):
+        self.base_url = base_url.rstrip('/')
         self.private_key = private_key
 
-    def generate_message(self, endpoint, data=None):
+    def _generate_message(self, endpoint, data=None):
         message = {
             "endpoint": endpoint,
             "nonce": str(uuid.uuid4()),
@@ -27,78 +32,46 @@ class DBAdapterClient:
         }
         return json.dumps(message, sort_keys=True)
 
-    def sign_message(self, message):
+    def _sign_message(self, message):
+        if not self.private_key:
+            return None
         message_defunct = encode_defunct(text=message)
         account = Account.from_key(self.private_key)
         signed_message = account.sign_message(message_defunct)
         return signed_message.signature.hex()
 
-    async def authenticated_request(self, method, endpoint, data=None, params=None):
-        url = f"{self.server_url}{endpoint}"
+    async def _authenticated_request(self, method: str, endpoint: str, data=None, params=None):
+        url = f"{self.base_url}{endpoint}"
         headers = {}
-        if method.upper() != 'GET':
-            try:
-                message = self.generate_message(endpoint, data)
-                signature = self.sign_message(message)
-                headers = {"Authorization": f"{message}:{signature}"}
-            except TypeError as te:
-                logger.error(f"Error generating authentication headers: {te}")
-                return {'error': 'Authentication header generation failed', 'details': str(te)}
+
+        if method.upper() != 'GET' and self.private_key:
+            message = self._generate_message(endpoint, data)
+            signature = self._sign_message(message)
+            headers = {"Authorization": f"{message}:{signature}"}
 
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.request(method, url, json=data, params=params, headers=headers) as response:
-                    try:
-                        response_json = await response.json()
-                    except aiohttp.ContentTypeError:
-                        response_text = await response.text()
-                        logger.error(f"Non-JSON response from {url}: {response_text}")
-                        return {'error': 'Invalid response format', 'response': response_text}
-
-                    if response.status in (200, 201):
-                        return response_json
-                    else:
-                        logger.error(f"Request to {url} failed with status {response.status}: {response_json}")
-                        return {'error': response_json.get('error', 'Unknown error')}
-
-            except aiohttp.ClientResponseError as e:
-                logger.error(f"Response error while sending request to {url}: {e}")
-                return {'error': str(e)}
+                    response.raise_for_status()
+                    json_response = await response.json()
+                    if not isinstance(json_response, dict):
+                        logger.error(f"Unexpected response format from {url}: {json_response}")
+                        return {'error': 'Unexpected response format'}
+                    return json_response
             except aiohttp.ClientError as e:
-                logger.error(f"Client error while sending request to {url}: {e}")
-                return {'error': str(e)}
-            except Exception as e:
-                logger.error(f"Unexpected error while sending request to {url}: {e}")
+                logger.error(f"Request to {url} failed: {e}")
                 return {'error': str(e)}
 
-    def convert_to_object(self, model_class, data):
-        if data is None:
+    def _extract_id(self, response: Dict[str, Any], id_key: str) -> Optional[int]:
+        if 'error' in response:
             return None
-        return model_class(**data)
+        return response.get(id_key) or response.get('data', {}).get(id_key)
 
-    async def get_job(self, job_id: int):
-        response = await self.authenticated_request('GET', '/get_job', params={'job_id': job_id})
-        return self.convert_to_object(Job, response)
+    # --- JOBS ---
+    async def get_job(self, job_id: int) -> Optional[Job]:
+        return await self._fetch_entity('/get_job', Job, params={'job_id': job_id})
 
-    async def update_job_iteration(self, job_id: int, new_iteration: int):
-        data = {'job_id': job_id, 'new_iteration': new_iteration}
-        return await self.authenticated_request('POST', '/update_job_iteration', data=data)
-
-    async def mark_job_as_done(self, job_id: int):
-        data = {'job_id': job_id}
-        return await self.authenticated_request('POST', '/mark_job_as_done', data=data)
-
-    async def create_task(self, job_id: int, subnet_task_id: int, job_iteration: int, status: str):
-        data = {
-            'job_id': job_id,
-            'subnet_task_id': subnet_task_id,
-            'job_iteration': job_iteration,
-            'status': status
-        }
-        response = await self.authenticated_request('POST', '/create_task', data=data)
-        return response['task_id']
-
-    async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int):
+    async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int) -> Optional[int]:
         data = {
             'name': name,
             'plugin_id': plugin_id,
@@ -106,67 +79,104 @@ class DBAdapterClient:
             'sot_url': sot_url,
             'iteration': iteration
         }
-        response = await self.authenticated_request('POST', '/create_job', data=data)
-        return response['job_id']
+        response = await self._authenticated_request('POST', '/create_job', data=data)
+        return self._extract_id(response, 'job_id')
 
-    async def create_subnet(
-        self,
-        address: str,
-        rpc_url: str,
-        distributor_address: str,
-        pool_address: str
-    ):
+    async def update_job_iteration(self, job_id: int, new_iteration: int) -> bool:
+        data = {
+            'job_id': job_id,
+            'new_iteration': new_iteration
+        }
+        response = await self._authenticated_request('POST', '/update_job_iteration', data=data)
+        return 'success' in response
+
+    async def mark_job_as_done(self, job_id: int) -> bool:
+        data = {
+            'job_id': job_id
+        }
+        response = await self._authenticated_request('POST', '/mark_job_as_done', data=data)
+        return 'success' in response
+
+    # --- PLUGINS ---
+    async def get_plugin(self, plugin_id: int) -> Optional[Plugin]:
+        return await self._fetch_entity('/get_plugin', Plugin, params={'plugin_id': plugin_id})
+
+    async def create_plugin(self, name: str, code: str) -> Optional[int]:
+        data = {
+            'name': name,
+            'code': code
+        }
+        response = await self._authenticated_request('POST', '/create_plugin', data=data)
+        return self._extract_id(response, 'plugin_id')
+
+    # --- SUBNETS ---
+    async def get_subnet_using_address(self, address: str) -> Optional[Subnet]:
+        return await self._fetch_entity('/get_subnet_using_address', Subnet, params={'address': address})
+
+    async def create_subnet(self, address: str, rpc_url: str, distributor_address: str, pool_address: str) -> Optional[int]:
         data = {
             'address': address,
             'rpc_url': rpc_url,
             'distributor_address': distributor_address,
             'pool_address': pool_address
         }
-        response = await self.authenticated_request('POST', '/create_subnet', data=data)
-        return response['subnet_id']
+        response = await self._authenticated_request('POST', '/create_subnet', data=data)
+        return self._extract_id(response, 'subnet_id')
 
-    async def create_plugin(self, name: str, code: str):
+    # --- TASKS ---
+    async def get_task(self, subnet_task_id: int, subnet_id: int) -> Optional[Task]:
+        return await self._fetch_entity('/get_task', Task, params={'subnet_task_id': subnet_task_id, 'subnet_id': subnet_id})
+
+    async def get_tasks_for_job(self, job_id: int, offset: int = 0, limit: int = 20) -> Optional[List[Task]]:
+        params = {'job_id': job_id, 'offset': offset, 'limit': limit}
+        response = await self._authenticated_request('GET', '/get_tasks_for_job', params=params)
+        if 'error' in response:
+            logger.error(response['error'])
+            return None
+        return [self._deserialize(Task, task) for task in response]
+
+    async def get_task_count_for_job(self, job_id: int) -> Optional[int]:
+        response = await self._authenticated_request('GET', '/get_task_count_for_job', params={'job_id': job_id})
+        return response.get('task_count')
+
+    async def get_task_count_by_status_for_job(self, job_id: int, statuses: List[str]) -> Optional[Dict[str, int]]:
+        params = {'job_id': job_id, 'statuses': statuses}
+        response = await self._authenticated_request('GET', '/get_task_count_by_status_for_job', params=params)
+        return response
+
+    async def get_last_task_with_status(self, job_id: int, statuses: List[str]) -> Optional[Task]:
+        params = {'job_id': job_id, 'statuses': statuses}
+        return await self._fetch_entity('/get_last_task_with_status', Task, params=params)
+
+    async def create_task(self, job_id: int, subnet_task_id: int, job_iteration: int, status: str) -> Optional[int]:
         data = {
-            'name': name,
-            'code': code
+            'job_id': job_id,
+            'subnet_task_id': subnet_task_id,
+            'job_iteration': job_iteration,
+            'status': status
         }
-        response = await self.authenticated_request('POST', '/create_plugin', data=data)
-        return response['plugin_id']
-    
-    async def update_time_solved(
-        self,
-        subnet_task_id: int,
-        job_id: int,
-        time_solved: int
-    ):
+        response = await self._authenticated_request('POST', '/create_task', data=data)
+        return self._extract_id(response, 'task_id')
+
+    async def update_time_solved(self, subnet_task_id: int, job_id: int, time_solved: int) -> bool:
         data = {
             'subnet_task_id': subnet_task_id,
             'job_id': job_id,
             'time_solved': time_solved
         }
-        return await self.authenticated_request('POST', '/update_time_solved', data=data)
-    
-    async def update_time_solver_selected(
-        self,
-        subnet_task_id: int,
-        job_id: int,
-        time_solver_selected: int
-    ):
+        response = await self._authenticated_request('POST', '/update_time_solved', data=data)
+        return 'success' in response
+
+    async def update_time_solver_selected(self, subnet_task_id: int, job_id: int, time_solver_selected: int) -> bool:
         data = {
             'subnet_task_id': subnet_task_id,
             'job_id': job_id,
             'time_solver_selected': time_solver_selected
         }
-        return await self.authenticated_request('POST', '/update_time_solver_selected', data=data)
+        response = await self._authenticated_request('POST', '/update_time_solver_selected', data=data)
+        return 'success' in response
 
-    async def update_task_status(
-        self,
-        subnet_task_id: int,
-        job_id: int,
-        status: str,
-        result=None,
-        solver_address=None,
-    ):
+    async def update_task_status(self, subnet_task_id: int, job_id: int, status: str, result=None, solver_address=None) -> bool:
         data = {
             'subnet_task_id': subnet_task_id,
             'job_id': job_id,
@@ -174,72 +184,69 @@ class DBAdapterClient:
             'result': result,
             'solver_address': solver_address
         }
-        return await self.authenticated_request('POST', '/update_task_status', data=data)
+        response = await self._authenticated_request('POST', '/update_task_status', data=data)
+        return 'success' in response
 
-    async def create_state_update(self, job_id: int, data: Dict):
-        data = {
-            'job_id': job_id,
-            'data': data
+    # --- PERMISSIONS ---
+    async def get_perm(self, address: str, perm: int) -> Optional[Perm]:
+        params = {
+            'address': address,
+            'perm': perm
         }
-        response = await self.authenticated_request('POST', '/create_state_update', data=data)
-        return response['state_update_id']
+        return await self._fetch_entity('/get_perm', Perm, params=params)
 
-    async def get_plugin(self, plugin_id: int):
-        response = await self.authenticated_request('GET', '/get_plugin', params={'plugin_id': plugin_id})
-        return self.convert_to_object(Plugin, response)
+    async def create_perm(self, address: str, perm: int) -> Optional[int]:
+        data = {
+            'address': address,
+            'perm': perm
+        }
+        response = await self._authenticated_request('POST', '/create_perm', data=data)
+        return self._extract_id(response, 'perm_id')
 
-    async def get_subnet_using_address(self, address: str):
-        response = await self.authenticated_request('GET', '/get_subnet_using_address', params={'address': address})
-        return self.convert_to_object(Subnet, response)
+    async def create_perm_description(self, perm_type: str) -> Optional[int]:
+        data = {
+            'perm_type': perm_type,
+        }
+        response = await self._authenticated_request('POST', '/create_perm_description', data=data)
+        return self._extract_id(response, 'perm_description_id')
 
-    async def get_task(self, subnet_task_id: int, subnet_id: int):
-        response = await self.authenticated_request('GET', '/get_task', params={'subnet_task_id': subnet_task_id, 'subnet_id': subnet_id})
-        return self.convert_to_object(Task, response)
-
-    async def get_perm(self, address: str, perm: int):
-        response = await self.authenticated_request('GET', '/get_perm', params={'address': address, 'perm': perm})
-        return self.convert_to_object(Perm, response['perm'])
-
-    async def set_last_nonce(self, address: str, perm: int, last_nonce: str):
+    async def set_last_nonce(self, address: str, perm: int, last_nonce: str) -> bool:
         data = {
             'address': address,
             'perm': perm,
             'last_nonce': last_nonce
         }
-        return await self.authenticated_request('POST', '/set_last_nonce', data=data)
+        response = await self._authenticated_request('POST', '/set_last_nonce', data=data)
+        return 'success' in response
 
-    async def get_sot(self, id: int):
-        response = await self.authenticated_request('GET', '/get_sot', params={'id': id})
-        return self.convert_to_object(Sot, response)
+    # --- SOTS ---
+    async def get_sot(self, sot_id: int) -> Optional[Sot]:
+        return await self._fetch_entity('/get_sot', Sot, params={'id': sot_id})
 
-    async def create_perm(self, address: str, perm: int):
-        data = {
-            'address': address,
-            'perm': perm
-        }
-        response = await self.authenticated_request('POST', '/create_perm', data=data)
-        return response['perm_id']
+    async def get_sot_by_job_id(self, job_id: int) -> Optional[Sot]:
+        return await self._fetch_entity('/get_sot_by_job_id', Sot, params={'job_id': job_id})
 
-    async def create_perm_description(self, perm_type: str):
-        data = {
-            'perm_type': perm_type,
-        }
-        response = await self.authenticated_request('POST', '/create_perm_description', data=data)
-        return response['perm_description_id']
-
-    async def create_sot(self, job_id: int, url: str):
+    async def create_sot(self, job_id: int, url: str) -> Optional[int]:
         data = {
             'job_id': job_id,
             'url': url
         }
-        response = await self.authenticated_request('POST', '/create_sot', data=data)
-        return response['sot_id']
+        response = await self._authenticated_request('POST', '/create_sot', data=data)
+        return self._extract_id(response, 'sot_id')
 
-    async def get_sot_by_job_id(self, job_id: int):
-        response = await self.authenticated_request('GET', '/get_sot_by_job_id', params={'job_id': job_id})
-        return self.convert_to_object(Sot, response)
+    # --- INSTANCES ---
+    async def get_instance_by_service_type(self, service_type: str, job_id: int) -> Optional[Instance]:
+        params = {'service_type': service_type, 'job_id': job_id}
+        return await self._fetch_entity('/get_instance_by_service_type', Instance, params=params)
 
-    async def create_instance(self, name: str, service_type: str, job_id: Optional[int], private_key: str, pod_id: str, process_id: int):
+    async def get_instances_by_job(self, job_id: int) -> Optional[List[Instance]]:
+        response = await self._authenticated_request('GET', '/get_instances_by_job', params={'job_id': job_id})
+        if 'error' in response:
+            logger.error(response['error'])
+            return None
+        return [self._deserialize(Instance, instance) for instance in response]
+
+    async def create_instance(self, name: str, service_type: str, job_id: int, private_key: str, pod_id: str, process_id: str) -> Optional[int]:
         data = {
             'name': name,
             'service_type': service_type,
@@ -248,21 +255,56 @@ class DBAdapterClient:
             'pod_id': pod_id,
             'process_id': process_id
         }
-        response = await self.authenticated_request('POST', '/create_instance', data=data)
-        return response['instance_id']
+        response = await self._authenticated_request('POST', '/create_instance', data=data)
+        return self._extract_id(response, 'instance_id')
 
-    async def get_instance_by_service_type(self, service_type: str, job_id: Optional[int] = None):
-        params = {'service_type': service_type}
-        if job_id is not None:
-            params['job_id'] = job_id
-        response = await self.authenticated_request('GET', '/get_instance_by_service_type', params=params)
-        return self.convert_to_object(Instance, response)
+    async def update_instance(self, instance_id: int, **kwargs) -> bool:
+        data = {
+            'instance_id': instance_id,
+            **kwargs
+        }
+        response = await self._authenticated_request('POST', '/update_instance', data=data)
+        return 'success' in response
 
-    async def get_instances_by_job(self, job_id: int):
-        params = {'job_id': job_id}
-        response = await self.authenticated_request('GET', '/get_instances_by_job', params=params)
-        return [self.convert_to_object(Instance, instance_data) for instance_data in response]
+    # --- STATE UPDATES ---
+    async def get_total_state_updates_for_job(self, job_id: int) -> Optional[int]:
+        response = await self._authenticated_request('GET', '/get_total_state_updates_for_job', params={'job_id': job_id})
+        return response.get('total_state_updates')
 
-    async def update_instance(self, instance_id: int, **kwargs):
-        data = {'instance_id': instance_id, **kwargs}
-        return await self.authenticated_request('POST', '/update_instance', data=data)
+    async def create_state_update(self, job_id: int, data: str) -> Optional[int]:
+        payload = {
+            'job_id': job_id,
+            'data': data
+        }
+        response = await self._authenticated_request('POST', '/create_state_update', data=payload)
+        return self._extract_id(response, 'state_update_id')
+
+    # --- HELPERS ---
+    async def _fetch_entity(self, endpoint: str, model_cls: Type[T], data=None, params=None) -> Optional[T]:
+        response = await self._authenticated_request('GET', endpoint, data=data, params=params)
+        if 'error' in response:
+            logger.error(response['error'])
+            return None
+        return self._deserialize(model_cls, response.get('data', response))
+
+    def _deserialize(self, model_cls: Type[T], data: Dict[str, Any]) -> T:
+        field_names = {column.name for column in model_cls.__table__.columns}
+        model_data = {k: v for k, v in data.items() if k in field_names}
+        
+        for column in model_cls.__table__.columns:
+            if column.type.python_type == datetime and column.name in model_data:
+                model_data[column.name] = self._parse_datetime(model_data[column.name])
+
+        return model_cls(**model_data)
+
+    def _parse_datetime(self, date_str: Optional[str]) -> Optional[datetime]:
+        if not date_str:
+            return None
+        try:
+            return datetime.fromisoformat(date_str)
+        except ValueError:
+            try:
+                return datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
+            except ValueError:
+                logger.error(f"Failed to parse datetime string: {date_str}")
+                return None

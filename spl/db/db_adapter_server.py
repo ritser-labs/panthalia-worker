@@ -64,11 +64,14 @@ class DBAdapterServer:
                 plugin_id=plugin_id,
                 subnet_id=subnet_id,
                 sot_url=sot_url,
-                iteration=iteration
+                iteration=iteration,
+                done=False,  # assuming default is False
+                last_updated=datetime.utcnow(),
+                submitted_at=datetime.utcnow()
             )
             session.add(new_job)
             await session.commit()
-            logger.debug(f"Created Job {name} with Plugin {plugin_id}, Subnet {subnet_id}, SOT URL {sot_url}, Iteration {iteration}.")
+            logger.debug(f"Created Job {name} with ID {new_job.id}.")
             return new_job.id
 
     async def create_subnet(
