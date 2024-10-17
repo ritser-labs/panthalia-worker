@@ -6,7 +6,7 @@ import logging
 from .db_adapter_server import db_adapter_server
 from ..api_auth import requires_authentication
 from eth_account.messages import encode_defunct
-from ..models import PermType, TaskStatus
+from ..models import PermType, TaskStatus, ServiceType
 from quart_cors import cors
 import os
 
@@ -388,6 +388,57 @@ async def get_last_task_with_status():
     except Exception as e:
         logger.error(f"Error fetching last task with status for job {job_id}: {e}")
         return jsonify({'error': 'Failed to fetch task', 'details': str(e)}), 500
+
+
+@app.route('/create_instance', methods=['POST'])
+@requires_auth
+async def create_instance():
+    data = await request.get_json()
+    name = data.get('name')
+    service_type = ServiceType[data.get('service_type')]
+    job_id = data.get('job_id')
+    private_key = data.get('private_key')
+    pod_id = data.get('pod_id')
+    process_id = data.get('process_id')
+    if None in (name, service_type, private_key, pod_id, process_id):
+        return jsonify({'error': 'Missing parameters'}), 400
+    instance_id = await db_adapter_server.create_instance(name, service_type, job_id, private_key, pod_id, process_id)
+    return jsonify({'instance_id': instance_id}), 200
+
+@app.route('/get_instance_by_service_type', methods=['GET'])
+async def get_instance_by_service_type():
+    service_type = request.args.get('service_type')
+    job_id = request.args.get('job_id', type=int)
+    if service_type is None:
+        return jsonify({'error': 'Missing service_type parameter'}), 400
+    try:
+        service_type_enum = ServiceType[service_type]
+    except KeyError:
+        return jsonify({'error': 'Invalid service_type'}), 400
+    instance = await db_adapter_server.get_instance_by_service_type(service_type_enum, job_id)
+    if instance:
+        return jsonify(instance.as_dict()), 200
+    else:
+        return jsonify({'error': 'Instance not found'}), 404
+
+@app.route('/get_instances_by_job', methods=['GET'])
+async def get_instances_by_job():
+    job_id = request.args.get('job_id', type=int)
+    if job_id is None:
+        return jsonify({'error': 'Missing job_id parameter'}), 400
+    instances = await db_adapter_server.get_instances_by_job(job_id)
+    return jsonify([instance.as_dict() for instance in instances]), 200
+
+@app.route('/update_instance', methods=['POST'])
+@requires_auth
+async def update_instance():
+    data = await request.get_json()
+    instance_id = data.get('instance_id')
+    if instance_id is None:
+        return jsonify({'error': 'Missing instance_id parameter'}), 400
+    kwargs = {key: value for key, value in data.items() if key != 'instance_id'}
+    await db_adapter_server.update_instance(instance_id, **kwargs)
+    return jsonify({'status': 'success'}), 200
 
 if __name__ == "__main__":
     import argparse

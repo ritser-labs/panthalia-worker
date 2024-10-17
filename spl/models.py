@@ -1,3 +1,5 @@
+# models.py
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from sqlalchemy import Column, Integer, String, ForeignKey, Text, UniqueConstraint, DateTime, Enum, Float, Boolean, JSON
@@ -22,6 +24,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
+
+class ServiceType(enum.Enum):
+    db = "db"
+    master = "master"
+    sot = "sot"
+    worker = "worker"
 
 class Serializable(Base):
     __abstract__ = True
@@ -72,6 +80,7 @@ class Job(TimestampMixin, Serializable):
 
     plugin = relationship("Plugin", backref="jobs")
     subnet = relationship("Subnet", backref="jobs")
+    instances = relationship("Instance", back_populates="job")
 
 class Task(TimestampMixin, Serializable):
     __tablename__ = 'tasks'
@@ -103,7 +112,7 @@ class Perm(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     address = Column(String, nullable=False, index=True)
     perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
-    last_nonce = Column(String, nullable=False, default=0)
+    last_nonce = Column(String, nullable=False, default='0')
 
 class Sot(Serializable):
     __tablename__ = 'sots'
@@ -123,12 +132,13 @@ class Instance(Base):
     __tablename__ = 'instances'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
-    job_id = Column(Integer, ForeignKey('jobs.id'))
+    service_type = Column(Enum(ServiceType), nullable=False)
+    job_id = Column(Integer, ForeignKey('jobs.id'), nullable=True)
     private_key = Column(String)
     pod_id = Column(String)
     process_id = Column(Integer)
     
-    job = relationship("Job", backref="instances")
+    job = relationship("Job", back_populates="instances")
 
 async def init_db():
     async with engine.begin() as conn:

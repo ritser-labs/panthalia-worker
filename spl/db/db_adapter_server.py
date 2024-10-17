@@ -2,13 +2,13 @@
 
 from ..models import (
     AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet,
-    Perm, Sot, PermDescription, PermType, Base, init_db
+    Perm, Sot, PermDescription, PermType, Base, init_db, ServiceType
 )
 from sqlalchemy import select, update, desc, func
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 import logging
 import json
 import asyncio
@@ -350,6 +350,57 @@ class DBAdapterServer:
             else:
                 logger.error(f"No task found with statuses {statuses} for Job {job_id}.")
             return task
+    
+    async def create_instance(
+        self,
+        name: str,
+        service_type: ServiceType,
+        job_id: Optional[int],
+        private_key: str,
+        pod_id: str,
+        process_id: int
+    ):
+        async with AsyncSessionLocal() as session:
+            new_instance = Instance(
+                name=name,
+                service_type=service_type,
+                job_id=job_id,
+                private_key=private_key,
+                pod_id=pod_id,
+                process_id=process_id
+            )
+            session.add(new_instance)
+            await session.commit()
+            logger.debug(f"Created Instance {name} of type {service_type} with pod_id {pod_id} for Job {job_id}.")
+            return new_instance.id
+
+    async def get_instance_by_service_type(self, service_type: ServiceType, job_id: Optional[int] = None):
+        async with AsyncSessionLocal() as session:
+            stmt = select(Instance).filter_by(service_type=service_type)
+            if job_id is not None:
+                stmt = stmt.filter_by(job_id=job_id)
+            result = await session.execute(stmt)
+            instance = result.scalars().first()
+            if instance:
+                logger.debug(f"Retrieved Instance: {instance}")
+            else:
+                logger.error(f"Instance with service_type {service_type} and job_id {job_id} not found.")
+            return instance
+
+    async def get_instances_by_job(self, job_id: int):
+        async with AsyncSessionLocal() as session:
+            stmt = select(Instance).filter_by(job_id=job_id)
+            result = await session.execute(stmt)
+            instances = result.scalars().all()
+            logger.debug(f"Retrieved {len(instances)} instances for Job {job_id}.")
+            return instances
+
+    async def update_instance(self, instance_id: int, **kwargs):
+        async with AsyncSessionLocal() as session:
+            stmt = update(Instance).where(Instance.id == instance_id).values(**kwargs)
+            await session.execute(stmt)
+            await session.commit()
+            logger.debug(f"Updated Instance {instance_id} with {kwargs}.")
 
 
 # Instantiate the server adapter

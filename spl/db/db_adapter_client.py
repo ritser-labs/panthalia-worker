@@ -9,7 +9,7 @@ from eth_account import Account
 import uuid
 import time
 from ..models import Sot, Job, Task, Subnet, Plugin, StateUpdate, Perm, PermDescription
-from typing import Dict
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -239,3 +239,30 @@ class DBAdapterClient:
         response = await self.authenticated_request('GET', '/get_sot_by_job_id', params={'job_id': job_id})
         return self.convert_to_object(Sot, response)
 
+    async def create_instance(self, name: str, service_type: str, job_id: Optional[int], private_key: str, pod_id: str, process_id: int):
+        data = {
+            'name': name,
+            'service_type': service_type,
+            'job_id': job_id,
+            'private_key': private_key,
+            'pod_id': pod_id,
+            'process_id': process_id
+        }
+        response = await self.authenticated_request('POST', '/create_instance', data=data)
+        return response['instance_id']
+
+    async def get_instance_by_service_type(self, service_type: str, job_id: Optional[int] = None):
+        params = {'service_type': service_type}
+        if job_id is not None:
+            params['job_id'] = job_id
+        response = await self.authenticated_request('GET', '/get_instance_by_service_type', params=params)
+        return self.convert_to_object(Instance, response)
+
+    async def get_instances_by_job(self, job_id: int):
+        params = {'job_id': job_id}
+        response = await self.authenticated_request('GET', '/get_instances_by_job', params=params)
+        return [self.convert_to_object(Instance, instance_data) for instance_data in response]
+
+    async def update_instance(self, instance_id: int, **kwargs):
+        data = {'instance_id': instance_id, **kwargs}
+        return await self.authenticated_request('POST', '/update_instance', data=data)
