@@ -11,7 +11,10 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-runpod.api_key = RUNPOD_API_KEY
+BASE_TEMPLATE_ID = '7nm4j9t6od'
+
+runpod.api_key = os.getenv('CLOUD_KEY')
+
 INPUT_JSON_PATH = '/tmp/input.json'
 
 # Define a ThreadPoolExecutor for handling blocking calls

@@ -30,10 +30,10 @@ from .cloud_adapters.runpod import (
     launch_instance_and_record_logs,
     terminate_all_pods,
     get_public_ip_and_port,
-    INPUT_JSON_PATH
+    INPUT_JSON_PATH,
+    BASE_TEMPLATE_ID,
 )
 import glob
-from .cloud_adapters.runpod_config import BASE_TEMPLATE_ID
 import shutil
 import asyncio
 import logging
@@ -769,8 +769,10 @@ async def main():
             'SOT_URL': sot_url,
             'SUBNET_ADDRESSES': args.subnet_addresses,
             'MAX_CONCURRENT_ITERATIONS': str(MAX_CONCURRENT_ITERATIONS),
-            'JOB_ID': '1',  # Adjust as necessary
             'DB_URL': db_url,
+            'NUM_WORKERS': str(args.worker_count),
+            'DEPLOY_TYPE': 'cloud',
+            'CLOUD_KEY': os.environ.get('CLOUD_KEY', ''),
         }
 
         if args.detailed_logs:

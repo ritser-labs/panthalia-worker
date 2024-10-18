@@ -48,7 +48,7 @@ case $SERVICE_TYPE in
         eval $CMD
         ;;
     master)
-        python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES} --max_concurrent_iterations ${MAX_CONCURRENT_ITERATIONS} --job_id ${JOB_ID} --db_url ${DB_URL}
+        python -m spl.master --rpc_url ${RPC_URL} --wallets ${WALLETS} --sot_url ${SOT_URL} --subnet_addresses ${SUBNET_ADDRESSES} --max_concurrent_iterations ${MAX_CONCURRENT_ITERATIONS} --db_url ${DB_URL} --num_workers ${NUM_WORKERS} --deploy_type ${DEPLOY_TYPE} --cloud_key ${CLOUD_KEY}
         ;;
     sot)
         #hypercorn "spl.sot:create_app('${PUBLIC_KEYS}')" --bind "0.0.0.0:${SOT_PRIVATE_PORT}"

@@ -414,6 +414,18 @@ class DBAdapterServer:
             await session.commit()
             logger.debug(f"Updated Instance {instance_id} with {kwargs}.")
 
+    async def get_jobs_without_instances(self):
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(Job)
+                .outerjoin(Instance, Job.id == Instance.job_id)
+                .filter(Instance.id == None)  # filter for jobs with no associated instances
+            )
+            result = await session.execute(stmt)
+            jobs_without_instances = result.scalars().all()
+            logger.debug(f"Retrieved {len(jobs_without_instances)} jobs without instances.")
+            return jobs_without_instances
+
 
 # Instantiate the server adapter
 db_adapter_server = DBAdapterServer()

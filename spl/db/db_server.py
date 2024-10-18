@@ -117,6 +117,7 @@ app.route('/get_instance_by_service_type', methods=['GET'], endpoint='get_instan
 app.route('/get_instances_by_job', methods=['GET'], endpoint='get_instances_by_job_endpoint')(create_get_route('Instance', db_adapter_server.get_instances_by_job, ['job_id']))
 app.route('/get_tasks_for_job', methods=['GET'], endpoint='get_tasks_for_job_endpoint')(create_get_route('Task', db_adapter_server.get_tasks_with_pagination_for_job, ['job_id', 'offset', 'limit']))
 app.route('/get_all_instances', methods=['GET'], endpoint='get_all_instances_endpoint')(create_get_route('Instance', db_adapter_server.get_all_instances, []))
+app.route('/get_jobs_without_instances', methods=['GET'], endpoint='get_jobs_without_instances_endpoint')(create_get_route('Job', db_adapter_server.get_jobs_without_instances, []))
 
 @app.route('/get_task_count_for_job', methods=['GET'], endpoint='get_task_count_for_job_endpoint')
 @require_params('job_id')

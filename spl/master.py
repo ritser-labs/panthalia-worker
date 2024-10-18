@@ -41,6 +41,7 @@ from eth_account import Account
 import uuid
 from .db.db_adapter_client import DBAdapterClient
 from .plugin_manager import get_plugin
+from typing import List, Dict
 
 class Master:
     def __init__(
@@ -51,6 +52,7 @@ class Master:
         subnet_addresses,
         job_id,  # Add job_id to interact with the database
         db_url,
+        db_adapter,
         max_concurrent_iterations=2,
         max_iterations=float('inf'),
         detailed_logs=False,
@@ -63,12 +65,11 @@ class Master:
         self.iteration = 0  # Track the number of iterations
         self.losses = []  # Initialize loss list
         self.loss_queue = queue.Queue()
-        self.load_wallets(wallets)
+        self.wallets = wallets
         self.current_wallet_index = 0
         self.done = False
         self.max_iterations = max_iterations
         self.job_id = job_id  # Track the job ID
-        self.db_adapter = DBAdapterClient(db_url, self.wallets[0]["private_key"])
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
@@ -111,11 +112,6 @@ class Master:
 
         # Run the main process
         self.tasks = []  # Track running tasks
-        asyncio.run(self.run_main())
-
-    def load_wallets(self, wallets_string):
-        with open(wallets_string, "r") as file:
-            self.wallets = json.load(file)
 
     def get_next_wallet(self):
         wallet = self.wallets[self.current_wallet_index]
@@ -446,7 +442,7 @@ class Master:
             self.tasks.append(task)
 
         # Dynamically await new tasks as they are added
-        while True:
+        while not self.done:
             if self.tasks:
                 done, pending = await asyncio.wait(
                     self.tasks, return_when=asyncio.FIRST_COMPLETED
@@ -569,6 +565,57 @@ class Master:
             f"Failed to retrieve batch and targets URL after {self.max_retries} attempts."
         )
 
+def run_master_main(
+    obj: Master
+):
+    asyncio.run(obj.run_main())
+
+
+
+def load_wallets(wallets_string):
+    with open(wallets_string, "r") as file:
+        return json.load(file)
+
+async def check_for_new_jobs(
+    rpc_url: str,
+    wallets: List[Dict[str, str]],
+    sot_url: str,
+    subnet_addresses: str,
+    db_url: str,
+    max_concurrent_iterations: int,
+    detailed_logs: bool,
+    num_workers: int,
+    deploy_type: str,
+    cloud_key: str,
+):
+    jobs_processing = []
+    db_adapter = DBAdapterClient(db_url, wallets[0]["private_key"])
+    logger.info(f"Checking for new jobs")
+    while True:
+        new_jobs = await db_adapter.get_jobs_without_instances()
+        logger.info(1)
+        for job in new_jobs:
+            logger.info(2)
+            if job.id in jobs_processing:
+                logger.info(3)
+                continue
+            jobs_processing.append(job.id)
+            logger.info(f"Starting new job: {job.id}")
+            obj = Master(
+                rpc_url,
+                wallets,
+                sot_url,
+                subnet_addresses,
+                job.id,
+                db_url,
+                db_adapter,
+                max_concurrent_iterations=max_concurrent_iterations,
+                detailed_logs=detailed_logs,
+            )
+            asyncio.to_thread(run_master_main, obj)
+            jobs_processing.remove(job.id)
+        logger.info(4)
+        await asyncio.sleep(1)
 
 if __name__ == "__main__":
     import argparse
@@ -601,12 +648,6 @@ if __name__ == "__main__":
         help="Path to subnet addresses JSON file",
     )
     parser.add_argument(
-        "--job_id",
-        type=int,
-        required=True,
-        help="Job ID for the task",
-    )
-    parser.add_argument(
         "--db_url",
         type=str,
         required=True,
@@ -623,19 +664,38 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable detailed logs",
     )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        help="Number of workers to start for each job",
+    )
+    parser.add_argument(
+        "--deploy_type",
+        type=str,
+        required=True,
+        help="Type of deployment (disabled, local, cloud)",
+    )
+    parser.add_argument(
+        "--cloud_key",
+        type=str,
+        help="Cloud key for deployment",
+    )
 
     args = parser.parse_args()
 
     with open(args.subnet_addresses, "r") as file:
         subnet_addresses = json.load(file)
+    logger.info(f'Starting master process')
 
-    master = Master(
+    asyncio.run(check_for_new_jobs(
         args.rpc_url,
-        args.wallets,
+        load_wallets(args.wallets),
         args.sot_url,
         subnet_addresses,
-        args.job_id,
         args.db_url,
-        max_concurrent_iterations=args.max_concurrent_iterations,
-        detailed_logs=args.detailed_logs,
-    )
+        args.max_concurrent_iterations,
+        args.detailed_logs,
+        args.num_workers,
+        args.deploy_type,
+        args.cloud_key,
+    ))

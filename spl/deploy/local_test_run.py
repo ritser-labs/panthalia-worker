@@ -223,16 +223,28 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
     curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)
     curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    
+    instances_last = await db_adapter.get_all_instances()
+    instances_last_check = time.time()
+    
+    async def get_instances():
+        nonlocal instances_last, instances_last_check
+        POLL_INTERVAL = 1
+        if time.time() - instances_last_check > POLL_INTERVAL:
+            instances_last = await db_adapter.get_all_instances()
+            instances_last_check = time.time()
+        return instances_last
 
-    max_name_length = max(len(instance.name) for instance in await db_adapter.get_all_instances()) + 14
+    max_name_length = max(len(instance.name) for instance in await get_instances()) + 14
     right_col_width = max_name_length + 2
+    
 
     async def draw_screen():
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         split_point = width - right_col_width
 
-        instances = await db_adapter.get_all_instances()
+        instances = await get_instances()
         ordered_process_names = sorted([instance.name for instance in instances], key=lambda name: (
             name.startswith('worker_final_logits'),
             name.startswith('worker_forward'),
@@ -293,10 +305,10 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
     while True:
         key = stdscr.getch()
         if key == curses.KEY_UP:
-            selected_process = (selected_process - 1) % len(await db_adapter.get_all_instances())
+            selected_process = (selected_process - 1) % len(await get_instances())
             await draw_screen()
         elif key == curses.KEY_DOWN:
-            selected_process = (selected_process + 1) % len(await db_adapter.get_all_instances())
+            selected_process = (selected_process + 1) % len(await get_instances())
             await draw_screen()
         elif key == curses.KEY_RESIZE:
             last_resize = time.time()
@@ -561,8 +573,9 @@ async def main():
                 '--sot_url', args.sot_url,
                 '--subnet_addresses', args.subnet_addresses,
                 '--max_concurrent_iterations', str(plugin.max_concurrent_iterations),
-                '--job_id', str(job_id),
                 '--db_url', db_url,
+                '--num_workers', str(args.worker_count),
+                '--deploy_type', 'local',
             ]
             if args.detailed_logs:
                 master_command.append('--detailed_logs')

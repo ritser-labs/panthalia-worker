@@ -96,6 +96,13 @@ class DBAdapterClient:
         }
         response = await self._authenticated_request('POST', '/mark_job_as_done', data=data)
         return 'success' in response
+    
+    async def get_jobs_without_instances(self) -> Optional[List[Job]]:
+        response = await self._authenticated_request('GET', '/get_jobs_without_instances')
+        if 'error' in response:
+            logger.error(response['error'])
+            return None
+        return [self._deserialize(Job, job) for job in response]
 
     # --- PLUGINS ---
     async def get_plugin(self, plugin_id: int) -> Optional[Plugin]:
