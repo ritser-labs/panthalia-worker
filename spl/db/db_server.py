@@ -90,12 +90,20 @@ def create_get_route(entity_name, method, params):
     async def handler(*args, **kwargs):
         query_params = {p: request.args.get(p) for p in params}
         entity = await method(**query_params)
-        if entity:
+        
+        # Check if the returned entity is a list or a single entity
+        if isinstance(entity, list):
+            if entity:
+                return jsonify([item.as_dict() for item in entity]), 200
+            else:
+                return jsonify([]), 200
+        elif entity:
             return jsonify(entity.as_dict()), 200
         else:
             return jsonify({'error': f'{entity_name} not found'}), 404
 
     return require_params(*params)(handle_errors(handler))
+
 
 # Define GET routes
 app.route('/get_job', methods=['GET'], endpoint='get_job_endpoint')(create_get_route('Job', db_adapter_server.get_job, ['job_id']))
@@ -107,16 +115,8 @@ app.route('/get_sot', methods=['GET'], endpoint='get_sot_endpoint')(create_get_r
 app.route('/get_sot_by_job_id', methods=['GET'], endpoint='get_sot_by_job_id_endpoint')(create_get_route('SOT', db_adapter_server.get_sot_by_job_id, ['job_id']))
 app.route('/get_instance_by_service_type', methods=['GET'], endpoint='get_instance_by_service_type_endpoint')(create_get_route('Instance', db_adapter_server.get_instance_by_service_type, ['service_type', 'job_id']))
 app.route('/get_instances_by_job', methods=['GET'], endpoint='get_instances_by_job_endpoint')(create_get_route('Instance', db_adapter_server.get_instances_by_job, ['job_id']))
-
-@app.route('/get_tasks_for_job', methods=['GET'], endpoint='get_tasks_for_job_endpoint')
-@require_params('job_id')
-@handle_errors
-async def get_tasks_for_job():
-    job_id = request.args.get('job_id', type=int)
-    offset = request.args.get('offset', default=0, type=int)
-    limit = request.args.get('limit', default=20, type=int)
-    tasks = await db_adapter_server.get_tasks_with_pagination_for_job(job_id, offset, limit)
-    return jsonify([task.as_dict() for task in tasks]), 200
+app.route('/get_tasks_for_job', methods=['GET'], endpoint='get_tasks_for_job_endpoint')(create_get_route('Task', db_adapter_server.get_tasks_with_pagination_for_job, ['job_id', 'offset', 'limit']))
+app.route('/get_all_instances', methods=['GET'], endpoint='get_all_instances_endpoint')(create_get_route('Instance', db_adapter_server.get_all_instances, []))
 
 @app.route('/get_task_count_for_job', methods=['GET'], endpoint='get_task_count_for_job_endpoint')
 @require_params('job_id')
@@ -156,6 +156,11 @@ async def get_last_task_with_status():
         return jsonify(last_task.as_dict()), 200
     else:
         return jsonify({'error': 'No task found matching the given statuses'}), 404
+
+@app.route('/health', methods=['GET'], endpoint='health_endpoint')
+@handle_errors
+async def health_check():
+    return jsonify({'status': 'healthy'}), 200
 
 # Define POST routes
 app.route('/create_job', methods=['POST'], endpoint='create_job_endpoint')(

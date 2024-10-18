@@ -6,7 +6,7 @@ import argparse
 import requests
 import threading
 import curses
-from ..common import load_abi, wait_for_rpc_available, wait_for_sot, SOT_PRIVATE_PORT, fund_wallets, MAX_CONCURRENT_ITERATIONS, DB_PORT
+from ..common import load_abi, wait_for_rpc_available, wait_for_health, SOT_PRIVATE_PORT, fund_wallets, MAX_CONCURRENT_ITERATIONS, DB_PORT
 from ..db.db_adapter_client import DBAdapterClient
 from ..models import init_db, db_path, PermType
 from ..plugin_manager import get_plugin
@@ -783,7 +783,7 @@ async def main():
         save_state(state)
 
         # Wait for the SOT service to be available
-        if not await wait_for_sot(sot_url):
+        if not await wait_for_health(sot_url):
             logging.error("Error: SOT service did not become available within the timeout period.")
             exit(1)
     else:

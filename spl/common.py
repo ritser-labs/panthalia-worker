@@ -42,19 +42,19 @@ abi_dir = os.path.join(current_dir, 'abis')
 # Global variables for transaction management by private key
 pending_transactions = {}
 
-async def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
-    """Wait for the SOT service to be available asynchronously."""
+async def wait_for_health(url, timeout=1200):  # Increased timeout to 20 minutes
+    """Wait for the service to be available asynchronously."""
     start_time = time.time()
     
     async with aiohttp.ClientSession() as session:
         while time.time() - start_time < timeout:
             try:
-                async with session.get(f"{sot_url}/health") as response:
+                async with session.get(f"{url}/health") as response:
                     if response.status == 200:
-                        logging.debug("SOT service is available.")
+                        logging.debug("Service is available.")
                         return True
             except aiohttp.ClientConnectionError as e:
-                logging.debug(f"Waiting for SOT service to be available... {e}")
+                logging.debug(f"Waiting for service to be available... {e}")
             await asyncio.sleep(2)
     
     return False

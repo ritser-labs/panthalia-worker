@@ -2,7 +2,8 @@
 
 from ..models import (
     AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet,
-    Perm, Sot, PermDescription, PermType, Base, init_db, ServiceType
+    Perm, Sot, PermDescription, PermType, Base, init_db, ServiceType,
+    Instance
 )
 from sqlalchemy import select, update, desc, func
 from sqlalchemy.orm import joinedload
@@ -396,6 +397,14 @@ class DBAdapterServer:
             result = await session.execute(stmt)
             instances = result.scalars().all()
             logger.debug(f"Retrieved {len(instances)} instances for Job {job_id}.")
+            return instances
+    
+    async def get_all_instances(self):
+        async with AsyncSessionLocal() as session:
+            stmt = select(Instance)
+            result = await session.execute(stmt)
+            instances = result.scalars().all()
+            logger.debug(f"Retrieved {len(instances)} instances.")
             return instances
 
     async def update_instance(self, instance_id: int, **kwargs):

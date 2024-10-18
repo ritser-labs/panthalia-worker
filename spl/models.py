@@ -26,10 +26,11 @@ AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_com
 Base = declarative_base()
 
 class ServiceType(enum.Enum):
-    db = "db"
-    master = "master"
-    sot = "sot"
-    worker = "worker"
+    Anvil = "anvil"
+    Db = "db"
+    Master = "master"
+    Sot = "sot"
+    Worker = "worker"
 
 class Serializable(Base):
     __abstract__ = True
@@ -128,7 +129,7 @@ class PermDescription(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     perm_type = Column(Enum(PermType), nullable=False)
 
-class Instance(Base):
+class Instance(Serializable):
     __tablename__ = 'instances'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)

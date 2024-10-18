@@ -54,7 +54,7 @@ class DBAdapterClient:
                 async with session.request(method, url, json=data, params=params, headers=headers) as response:
                     response.raise_for_status()
                     json_response = await response.json()
-                    if not isinstance(json_response, dict):
+                    if not isinstance(json_response, dict) and not isinstance(json_response, list):
                         logger.error(f"Unexpected response format from {url}: {json_response}")
                         return {'error': 'Unexpected response format'}
                     return json_response
@@ -241,6 +241,13 @@ class DBAdapterClient:
 
     async def get_instances_by_job(self, job_id: int) -> Optional[List[Instance]]:
         response = await self._authenticated_request('GET', '/get_instances_by_job', params={'job_id': job_id})
+        if 'error' in response:
+            logger.error(response['error'])
+            return None
+        return [self._deserialize(Instance, instance) for instance in response]
+    
+    async def get_all_instances(self) -> Optional[List[Instance]]:
+        response = await self._authenticated_request('GET', '/get_all_instances')
         if 'error' in response:
             logger.error(response['error'])
             return None

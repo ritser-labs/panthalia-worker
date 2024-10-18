@@ -7,9 +7,9 @@ import requests
 import threading
 import curses
 from flask import Flask, jsonify, send_from_directory
-from ..common import load_abi, wait_for_sot, wait_for_rpc_available, fund_wallets, DB_PORT
+from ..common import load_abi, wait_for_health, wait_for_rpc_available, fund_wallets, DB_PORT
 from ..db.db_adapter_client import DBAdapterClient
-from ..models import init_db, db_path, PermType
+from ..models import init_db, db_path, PermType, ServiceType
 from ..plugin_manager import get_plugin, global_plugin_dir
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
@@ -39,7 +39,6 @@ plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
 DOCKER_IMAGE = 'zerogoliath/magnum:latest'
 DB_HOST = '0.0.0.0'
 db_url = f"http://{DB_HOST}:{DB_PORT}"
-
 
 GUESS_DB_PERM_ID = 1
 
@@ -150,22 +149,22 @@ def delete_directory_contents(directory):
         except Exception as e:
             logging.debug(f"Error deleting directory {directory}: {e}")
 
-def terminate_processes(processes):
-    for process_name, process in processes.items():
-        if process.poll() is None:  # If process is still running
-            logging.info(f"Terminating process {process_name} (PID {process.pid})")
-            process.terminate()
-    for process_name, process in processes.items():
+async def terminate_processes(db_adapter, job_id):
+    instances = await db_adapter.get_all_instances()
+    for instance in instances:
         try:
-            process.wait(timeout=5)  # Wait up to 5 seconds for each process to terminate
-            logging.info(f"Process {process_name} (PID {process.pid}) terminated with exit code {process.returncode}")
+            pid = int(instance.process_id)
+            if pid > 0:
+                process = subprocess.Popen(["kill", "-TERM", str(pid)])
+                process.wait(timeout=5)
+                logging.info(f"Process {instance.name} (PID {pid}) terminated successfully.")
         except subprocess.TimeoutExpired:
-            logging.warning(f"Process {process_name} (PID {process.pid}) did not terminate in time, forcefully killing it.")
-            process.kill()  # Forcefully kill the process if it doesn't terminate in time
+            logging.warning(f"Process {instance.name} (PID {pid}) did not terminate in time, forcefully killing it.")
+            process = subprocess.Popen(["kill", "-KILL", str(pid)])
             process.wait()
-            logging.info(f"Process {process_name} (PID {process.pid}) was killed forcefully with exit code {process.returncode}")
+            logging.info(f"Process {instance.name} (PID {pid}) was killed forcefully.")
         except Exception as e:
-            logging.error(f"Error terminating process {process_name}: {e}")
+            logging.error(f"Error terminating process {instance.name}: {e}")
 
 def reset_logs(log_dir):
     """Delete all log files in the log directory except for the LOG_FILE, which is truncated (reset)."""
@@ -186,7 +185,6 @@ def reset_logs(log_dir):
     else:
         logging.debug(f"Log directory {log_dir} does not exist.")
 
-
 def fetch_latest_loss(sot_url):
     global latest_loss_cache
     current_time = time.time()
@@ -206,8 +204,7 @@ def fetch_latest_loss(sot_url):
 
     return latest_loss_cache['value']
 
-
-def monitor_processes(stdscr, processes, task_counts):
+async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
     global args
     logger = logging.getLogger()
     for handler in logger.handlers:
@@ -227,16 +224,16 @@ def monitor_processes(stdscr, processes, task_counts):
     curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)
     curses.init_pair(4, curses.COLOR_CYAN, curses.COLOR_BLACK)
 
-    max_name_length = max(len(name) for name in processes.keys()) + 14
+    max_name_length = max(len(instance.name) for instance in await db_adapter.get_all_instances()) + 14
     right_col_width = max_name_length + 2
 
-    def draw_screen():
+    async def draw_screen():
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         split_point = width - right_col_width
 
-        # Order processes by name
-        ordered_process_names = sorted(processes.keys(), key=lambda name: (
+        instances = await db_adapter.get_all_instances()
+        ordered_process_names = sorted([instance.name for instance in instances], key=lambda name: (
             name.startswith('worker_final_logits'),
             name.startswith('worker_forward'),
             name.startswith('worker_embed'),
@@ -261,9 +258,17 @@ def monitor_processes(stdscr, processes, task_counts):
             stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
 
         for i, name in enumerate(ordered_process_names):
-            process = processes[name]
+            # inefficient but works for now
+            found_instance = None
+            for instance in instances:
+                if instance.name == name:
+                    found_instance = instance
+            if found_instance is None:
+                continue
+            instance = found_instance
             is_selected = (i == selected_process)
-            status = process.poll() is None
+            pid = int(instance.process_id)
+            status = (pid > 0) and (os.path.exists(f"/proc/{pid}"))
             color = curses.color_pair(1) if status else curses.color_pair(2)
             indicator = '*' if is_selected else ' '
 
@@ -280,31 +285,30 @@ def monitor_processes(stdscr, processes, task_counts):
         for i, (task_type, (solver_selected, active)) in enumerate(task_counts.items()):
             stdscr.addstr(task_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
 
-        #stdscr.addstr(height - 1, 0, "Use arrow keys to navigate. Press 'q' to quit.", curses.A_BOLD)
         stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
         stdscr.refresh()
 
-    draw_screen()  # Initial draw
+    await draw_screen()  # Initial draw
 
     while True:
         key = stdscr.getch()
         if key == curses.KEY_UP:
-            selected_process = (selected_process - 1) % len(processes)
-            draw_screen()
+            selected_process = (selected_process - 1) % len(await db_adapter.get_all_instances())
+            await draw_screen()
         elif key == curses.KEY_DOWN:
-            selected_process = (selected_process + 1) % len(processes)
-            draw_screen()
+            selected_process = (selected_process + 1) % len(await db_adapter.get_all_instances())
+            await draw_screen()
         elif key == curses.KEY_RESIZE:
             last_resize = time.time()
         elif key == ord('q'):
-            terminate_processes(processes)
+            await terminate_processes(db_adapter, job_id)
             break
 
         if last_resize and time.time() - last_resize > 0.1:
-            draw_screen()
+            await draw_screen()
             last_resize = None
 
-        draw_screen()
+        await draw_screen()
         time.sleep(0.05)
 
     stdscr.keypad(False)
@@ -363,13 +367,17 @@ async def set_interval_mining(web3, interval):
     """Set the mining interval on the Ethereum node."""
     await web3.provider.make_request('evm_setIntervalMining', [interval])
 
+def run_monitor_processes(stdscr, db_adapter, job_id, task_counts):
+    asyncio.run(monitor_processes(stdscr, db_adapter, job_id, task_counts))
+
 async def main():
     global base_url
-    processes = {}
     task_counts = {}
 
     base_url = f"http://localhost:5002"
 
+    db_adapter = DBAdapterClient(db_url, args.private_key)
+    
     reset_logs(LOG_DIR)
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -377,16 +385,33 @@ async def main():
     if os.path.exists(global_plugin_dir):
         shutil.rmtree(global_plugin_dir, ignore_errors=True)
 
-    # Start anvil process
-    logging.info("Starting anvil...")
-    anvil_log = open(ANVIL_LOG_FILE, 'w')
-    anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log, cwd=package_root_dir)
-    processes['anvil'] = anvil_process
-    logging.info(f"Anvil started with PID {anvil_process.pid}")
+    logging.info("Starting DB instance...")
+    db_log = open(DB_LOG_FILE, 'w')
+    public_key = Account.from_key(args.private_key).address
+    db_process = subprocess.Popen(
+        [
+            'python', '-m', 'spl.db.db_server',
+            '--host', DB_HOST,
+            '--port', DB_PORT,
+            '--perm', str(GUESS_DB_PERM_ID),
+            '--root_wallet', public_key
+        ],
+        stdout=db_log, stderr=db_log, cwd=package_root_dir
+    )
+    await wait_for_health(db_url)
+    await db_adapter.create_instance("db", ServiceType.Db.name, None, args.private_key, '', str(db_process.pid))
+    logging.info(f"DB instance started with PID {db_process.pid}")
 
     try:
         delete_old_tensor_files(STATE_DIR, BLOCK_TIMESTAMPS_FILE, LAST_FUTURE_VERSION_FILE)
         delete_directory_contents(TEMP_DIR)
+
+        # Start anvil process
+        logging.info("Starting anvil...")
+        anvil_log = open(ANVIL_LOG_FILE, 'w')
+        anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log, cwd=package_root_dir)
+        instance_id = await db_adapter.create_instance("anvil", ServiceType.Anvil.name, None, args.private_key, '', str(anvil_process.pid))
+        logging.info(f"Anvil started with PID {anvil_process.pid}")
 
         # Start Flask server in a separate thread
         flask_thread = threading.Thread(target=lambda: app.run(port=5002))
@@ -401,27 +426,10 @@ async def main():
         logging.info(f'Time in string: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
         
         web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
-        # Wait for the RPC to be available before proceeding
         if not await wait_for_rpc_available(web3):
             exit(1)
-        await set_interval_mining(web3, 1)
 
-        # Start DB instance
-        logging.info("Starting DB instance...")
-        db_log = open(DB_LOG_FILE, 'w')
-        public_key = Account.from_key(args.private_key).address
-        db_process = subprocess.Popen(
-            [
-                'python', '-m', 'spl.db.db_server',
-                '--host', DB_HOST,
-                '--port', DB_PORT,
-                '--perm', str(GUESS_DB_PERM_ID),
-                '--root_wallet', public_key
-            ],
-            stdout=db_log, stderr=db_log, cwd=package_root_dir
-        )
-        processes['db'] = db_process
-        logging.info(f"DB instance started with PID {db_process.pid}")
+        await set_interval_mining(web3, 1)
 
         # Run the deployment command
         deploy_command = [
@@ -433,7 +441,6 @@ async def main():
 
         logging.info("Deployment completed successfully.")
 
-        # Load subnet addresses and deployment config
         with open(args.subnet_addresses, 'r') as file:
             subnet_addresses = json.load(file)
 
@@ -449,8 +456,6 @@ async def main():
         token_address = await pool_contract.functions.token().call()
         token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
 
-        db_adapter = DBAdapterClient(db_url, args.private_key)
-        
         async with aiofiles.open(plugin_file, mode='r') as f:
             code = await f.read()
         plugin_id = await db_adapter.create_plugin('plugin', code)
@@ -507,10 +512,10 @@ async def main():
             ],
             stdout=sot_log, stderr=sot_log, cwd=package_root_dir
         )
-        processes['sot'] = sot_process
+        await db_adapter.create_instance("sot", ServiceType.Sot.name, job_id, args.private_key, '', str(sot_process.pid))
         logging.info(f"SOT service started with PID {sot_process.pid}")
 
-        if not await wait_for_sot(args.sot_url):
+        if not await wait_for_health(args.sot_url):
             logging.error("Error: SOT service did not become available within the timeout period.")
             sot_process.terminate()
             exit(1)
@@ -537,13 +542,13 @@ async def main():
             log_file_path = os.path.join(LOG_DIR, f"{worker_name}.log")
             log_file = open(log_file_path, 'w')
             worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file, cwd=package_root_dir)
-            processes[worker_name] = worker_process
+            await db_adapter.create_instance(worker_name, ServiceType.Worker.name, job_id, args.private_key, '', str(worker_process.pid))
             logging.info(f"Started worker process {worker_idx} for tasks with command: {' '.join(command)}")
 
         try:
             if not await wait_for_workers_to_sync(args.worker_count, args.sot_url):
                 logging.error("Error: Not all workers synced within the timeout period.")
-                terminate_processes(processes)
+                await terminate_processes(db_adapter, job_id)
                 exit(1)
 
             logging.info("Starting master process...")
@@ -562,35 +567,28 @@ async def main():
             if args.detailed_logs:
                 master_command.append('--detailed_logs')
             master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log, cwd=package_root_dir)
-            processes['master'] = master_process
+            await db_adapter.create_instance("master", ServiceType.Master.name, job_id, args.private_key, '', str(master_process.pid))
             logging.info(f"Started master process with command: {' '.join(master_command)}")
 
             logging.info("Master process started.")
 
-            # Start the curses interface in a new thread
-            curses_thread = threading.Thread(target=curses.wrapper, args=(monitor_processes, processes, task_counts))
+            curses_thread = threading.Thread(target=curses.wrapper, args=(run_monitor_processes, db_adapter, job_id, task_counts))
             curses_thread.start()
-
-            # Run the task tracking in an asyncio loop
-            await track_tasks(web3, subnet_addresses, pool_contract, task_counts)
-
         except Exception as e:
             logging.error(f"Error: {e}", exc_info=True)
-            terminate_processes(processes)
+            await terminate_processes(db_adapter, job_id)
             exit(1)
-
     except Exception as e:
         logging.error(f"Error: {e}", exc_info=True)
-        terminate_processes(processes)
+        await terminate_processes(db_adapter, job_id)
         exit(1)
-
     finally:
-        # Log reasons for processes being stopped/killed
-        for process_name, process in processes.items():
-            if process.poll() is not None:  # Process has exited
-                logging.info(f"Process {process_name} terminated with exit code {process.returncode}")
+        for instance in await db_adapter.get_all_instances():
+            pid = int(instance.process_id)
+            if (pid > 0) and (os.path.exists(f"/proc/{pid}")):
+                logging.info(f"Process {instance.name} terminated with exit code {pid}")
             else:
-                logging.warning(f"Process {process_name} was killed before completion.")
+                logging.warning(f"Process {instance.name} was killed before completion.")
 
         logging.info("All processes terminated.")
 
