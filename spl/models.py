@@ -122,7 +122,7 @@ class Sot(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
     perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
-    url = Column(String, nullable=False)
+    url = Column(String)
 
     job = relationship("Job", backref="sots")
 

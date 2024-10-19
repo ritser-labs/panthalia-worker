@@ -36,7 +36,8 @@ from .common import (
     generate_wallets,
     fund_wallets,
     SOT_PRIVATE_PORT,
-    wait_for_health
+    wait_for_health,
+    load_abi
 )
 from io import BytesIO
 import os
@@ -595,6 +596,9 @@ def load_wallets(wallets_string):
         return json.load(file)
 
 async def launch_sot(db_adapter, job, deploy_type, db_url):
+    sot_wallet = generate_wallets(1)[0]
+    sot_id = await db_adapter.create_sot(job.id, None)
+    
     if deploy_type == 'local':
         sot_url = f"http://localhost:{SOT_PRIVATE_PORT}"
         sot_log = open(SOT_LOG_FILE, 'w')
@@ -645,15 +649,13 @@ async def launch_sot(db_adapter, job, deploy_type, db_url):
         instance_pid
     )
     logging.info(f"SOT service started")
-
-    if not await wait_for_health(args.sot_url):
+    if not await wait_for_health(sot_url):
         logging.error("Error: SOT service did not become available within the timeout period.")
         sot_process.terminate()
         exit(1)
-    sot_id = await db_adapter.create_sot(job.id, args.sot_url)
+    await db_adapter.update_sot(sot_id, sot_url)
     sot_db = await db_adapter.get_sot(job.id)
     sot_perm_id = sot_db.perm
-    sot_wallet = generate_wallets(1)[0]
     await db_adapter.create_perm(sot_wallet['address'], sot_perm_id)
     await db_adapter.create_perm(sot_wallet['address'], DB_PERM_ID)
     return sot_db, sot_url
@@ -736,13 +738,16 @@ async def launch_workers(
     sot_url: str,
 ):
     web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(subnet.rpc_url))
-    worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
+    worker_wallets = generate_wallets(args.num_workers)
+    token_contract = web3.eth.contract(
+        address=subnet.token_address, abi=load_abi('ERC20')
+    )
     await fund_wallets(
         web3, args.private_key, worker_wallets,
-        subnet.token_contract, 1, 10000 * 10**18, subnet.distributor_address
+        token_contract, 1, 10000 * 10**18, subnet.distributor_address
     )
     worker_tasks = []
-    for i in range(args.worker_count):
+    for i in range(args.num_workers):
         worker_wallet = worker_wallets[i]
         task = asyncio.create_task(launch_worker(
             i,
@@ -793,11 +798,14 @@ async def check_for_new_jobs(
             # Master
             master_wallets = generate_wallets(num_master_wallets)
             web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(subnet.rpc_url))
+            token_contract = web3.eth.contract(
+                address=subnet.token_address, abi=load_abi('ERC20')
+            )
             await fund_wallets(
                 web3,
                 private_key,
                 master_wallets,
-                subnet.token_address,
+                token_contract,
                 1,
                 10000 * 10**18,
                 subnet.distributor_address
@@ -864,11 +872,14 @@ if __name__ == "__main__":
         required=True,
         help="Type of deployment (disabled, local, cloud)",
     )
+    parser.add_argument(
+        "--torch_compile",
+        action="store_true",
+        help="Enable torch.compile and model warmup",
+    )
 
     args = parser.parse_args()
 
-    with open(args.subnet_addresses, "r") as file:
-        subnet_addresses = json.load(file)
     logger.info(f'Starting master process')
 
     asyncio.run(check_for_new_jobs(

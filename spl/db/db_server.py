@@ -108,7 +108,8 @@ def create_get_route(entity_name, method, params):
 # Define GET routes
 app.route('/get_job', methods=['GET'], endpoint='get_job_endpoint')(create_get_route('Job', db_adapter_server.get_job, ['job_id']))
 app.route('/get_plugin', methods=['GET'], endpoint='get_plugin_endpoint')(create_get_route('Plugin', db_adapter_server.get_plugin, ['plugin_id']))
-app.route('/get_subnet_using_address', methods=['GET'], endpoint='get_subnet_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet_using_address, ['address']))
+app.route('/get_subnet_using_address', methods=['GET'], endpoint='get_subnet_using_address_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet_using_address, ['address']))
+app.route('/get_subnet', methods=['GET'], endpoint='get_subnet_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet, ['subnet_id']))
 app.route('/get_task', methods=['GET'], endpoint='get_task_endpoint')(create_get_route('Task', db_adapter_server.get_task, ['subnet_task_id', 'subnet_id']))
 app.route('/get_perm', methods=['GET'], endpoint='get_perm_endpoint')(create_get_route('Permission', db_adapter_server.get_perm, ['address', 'perm']))
 app.route('/get_sot', methods=['GET'], endpoint='get_sot_endpoint')(create_get_route('SOT', db_adapter_server.get_sot, ['id']))
@@ -213,6 +214,9 @@ app.route('/update_task_status', methods=['POST'], endpoint='update_task_status_
 )
 app.route('/update_instance', methods=['POST'], endpoint='update_instance_endpoint')(
     create_post_route_return_id(db_adapter_server.update_instance, ['instance_id'], 'success')
+)
+app.route('/update_sot', methods=['POST'], endpoint='update_sot_endpoint')(
+    create_post_route_return_id(db_adapter_server.update_sot, ['sot_id', 'url'], 'success')
 )
 
 if __name__ == "__main__":

@@ -120,13 +120,16 @@ class DBAdapterClient:
     async def get_subnet_using_address(self, address: str) -> Optional[Subnet]:
         return await self._fetch_entity('/get_subnet_using_address', Subnet, params={'address': address})
 
+    async def get_subnet(self, subnet_id: int) -> Optional[Subnet]:
+        return await self._fetch_entity('/get_subnet', Subnet, params={'subnet_id': subnet_id})
+
     async def create_subnet(self, address: str, rpc_url: str, distributor_address: str, pool_address: str, token_address: str, solver_group: int) -> Optional[int]:
         data = {
             'address': address,
             'rpc_url': rpc_url,
             'distributor_address': distributor_address,
             'pool_address': pool_address,
-            'token_address': pool_address,
+            'token_address': token_address,
             'solver_group': solver_group
         }
         response = await self._authenticated_request('POST', '/create_subnet', data=data)
@@ -243,6 +246,13 @@ class DBAdapterClient:
         response = await self._authenticated_request('POST', '/create_sot', data=data)
         return self._extract_id(response, 'sot_id')
 
+    async def update_sot(self, sot_id: int, url: str) -> bool:
+        data = {
+            'sot_id': sot_id,
+            'url': url
+        }
+        response = await self._authenticated_request('POST', '/update_sot', data=data)
+        return 'success' in response
     # --- INSTANCES ---
     async def get_instance_by_service_type(self, service_type: str, job_id: int) -> Optional[Instance]:
         params = {'service_type': service_type, 'job_id': job_id}

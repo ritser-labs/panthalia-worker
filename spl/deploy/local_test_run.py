@@ -83,8 +83,6 @@ def parse_args():
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
     return parser.parse_args()
 
-args = parse_args()
-
 sync_status = {}
 
 latest_loss_cache = {
@@ -221,6 +219,8 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
         return instances_last
 
     max_name_length = max(len(instance.name) for instance in await get_instances()) + 14
+    v_string = "PANTHALIA SIMULATOR V0"
+    max_name_length = max(max_name_length, len(v_string) + 2)
     right_col_width = max_name_length + 2
     
 
@@ -281,8 +281,8 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
         task_start = height - 3 - len(task_counts)
         for i, (task_type, (solver_selected, active)) in enumerate(task_counts.items()):
             stdscr.addstr(task_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
-
-        stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
+        logging.debug(f'H: {height}, W: {width}, SP: {split_point}, RP: {right_col_width}')
+        stdscr.addstr(height - 1, split_point, v_string, curses.color_pair(3))
         stdscr.refresh()
 
     await draw_screen()  # Initial draw
@@ -496,7 +496,7 @@ async def main():
             if args.torch_compile:
                 master_command.append('--torch_compile')
             master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log, cwd=package_root_dir)
-            await db_adapter.create_instance("master", ServiceType.Master.name, job_id, args.private_key, '', str(master_process.pid))
+            await db_adapter.create_instance("master", ServiceType.Master.name, None, args.private_key, '', str(master_process.pid))
             logging.info(f"Started master process with command: {' '.join(master_command)}")
 
             logging.info("Master process started.")
@@ -522,4 +522,5 @@ async def main():
         logging.info("All processes terminated.")
 
 if __name__ == "__main__":
+    args = parse_args()
     asyncio.run(main())

@@ -13,7 +13,6 @@ from ..common import (
     wait_for_health,
     SOT_PRIVATE_PORT,
     fund_wallets,
-    MAX_CONCURRENT_ITERATIONS,
     DB_PORT,
     generate_wallets
 )
@@ -112,7 +111,7 @@ def parse_args():
     parser.add_argument('--terminate', action='store_true', help="Allow termination of all running pods")
     return parser.parse_args()
 
-args = parse_args()
+args = None
 
 latest_loss_cache = {
     'value': None,
@@ -611,7 +610,7 @@ async def main():
             'RANK': '0',
             'WORLD_SIZE': '1',
             'PRIVATE_KEY': args.private_key,
-            'MAX_CONCURRENT_ITERATIONS': str(MAX_CONCURRENT_ITERATIONS),
+            'MAX_CONCURRENT_ITERATIONS': str(plugin.max_concurrent_iterations),
             'DB_URL': db_url,
             'NUM_WORKERS': str(args.worker_count),
             'DEPLOY_TYPE': 'cloud',
@@ -640,7 +639,7 @@ async def main():
         await db_adapter.create_instance(
             name="master",
             service_type=ServiceType.Master.name,
-            job_id=1,  # Assuming job_id is 1; adjust as needed
+            job_id=None,
             private_key=master_helpers['private_key'],
             pod_id=master_instance['id'],
             process_id=str(master_instance['pid']) if 'pid' in master_instance else '0'
@@ -680,4 +679,5 @@ def signal_handler(signal_received, frame):
 signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ == "__main__":
+    args = parse_args()
     asyncio.run(main())

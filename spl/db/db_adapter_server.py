@@ -191,6 +191,17 @@ class DBAdapterServer:
             else:
                 logger.error(f"Subnet with address {address} not found.")
             return subnet
+    
+    async def get_subnet(self, subnet_id: int):
+        async with AsyncSessionLocal() as session:
+            stmt = select(Subnet).filter_by(id=subnet_id)
+            result = await session.execute(stmt)
+            subnet = result.scalar_one_or_none()
+            if subnet:
+                logger.debug(f"Retrieved Subnet: {subnet}")
+            else:
+                logger.error(f"Subnet with ID {subnet_id} not found.")
+            return subnet
 
     async def get_task(self, subnet_task_id: int, subnet_id: int):
         async with AsyncSessionLocal() as session:
@@ -314,6 +325,13 @@ class DBAdapterServer:
             await session.commit()
             logger.debug(f"Created SOT for Job {job_id} with perm {perm}.")
             return new_sot.id
+    
+    async def update_sot(self, sot_id: int, url: str):
+        async with AsyncSessionLocal() as session:
+            stmt = update(Sot).where(Sot.id == sot_id).values(url=url)
+            await session.execute(stmt)
+            await session.commit()
+            logger.debug(f"Updated SOT {sot_id} with URL {url}.")
 
     async def get_sot_by_job_id(self, job_id: int):
         async with AsyncSessionLocal() as session:
