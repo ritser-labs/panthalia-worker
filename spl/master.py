@@ -670,13 +670,12 @@ async def launch_worker(
 ):
     this_worker_wallets = [worker_private_key]
     worker_name = f'worker_{worker_idx}'
-    private_keys = '+'.join([x['private_key'] for x in this_worker_wallets])
+    private_keys = '+'.join(this_worker_wallets)
     if deploy_type == 'local':
         command = [
             'python', '-m', 'spl.worker',
-            '--subnet_id', subnet.id,
+            '--subnet_id', str(subnet.id),
             '--private_keys', private_keys,
-            '--rpc_url', subnet.rpc_url,
             '--sot_url', sot_url,
             '--db_url', db_url,
         ]
@@ -696,7 +695,6 @@ async def launch_worker(
             'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
             'SUBNET_ID': subnet.id,
             'PRIVATE_KEYS': private_keys,
-            'RPC_URL': subnet.rpc_url,
             'SOT_URL': sot_url,
             'DB_URL': db_url,
         }
