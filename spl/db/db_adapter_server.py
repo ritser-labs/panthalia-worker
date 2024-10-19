@@ -80,14 +80,18 @@ class DBAdapterServer:
         address: str,
         rpc_url: str,
         distributor_address: str,
-        pool_address: str
+        pool_address: str,
+        token_address: str,
+        solver_group: int
     ):
         async with AsyncSessionLocal() as session:
             new_subnet = Subnet(
                 address=address,
                 rpc_url=rpc_url,
                 distributor_address=distributor_address,
-                pool_address=pool_address
+                pool_address=pool_address,
+                token_address=token_address,
+                solver_group=solver_group
             )
             session.add(new_subnet)
             await session.commit()

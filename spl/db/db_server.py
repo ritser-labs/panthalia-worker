@@ -180,7 +180,7 @@ app.route('/create_task', methods=['POST'], endpoint='create_task_endpoint')(
     create_post_route_return_id(db_adapter_server.create_task, ['job_id', 'subnet_task_id', 'job_iteration', 'status'], 'task_id')
 )
 app.route('/create_subnet', methods=['POST'], endpoint='create_subnet_endpoint')(
-    create_post_route_return_id(db_adapter_server.create_subnet, ['address', 'rpc_url', 'distributor_address', 'pool_address'], 'subnet_id')
+    create_post_route_return_id(db_adapter_server.create_subnet, ['address', 'rpc_url', 'distributor_address', 'pool_address', 'token_address', 'solver_group'], 'subnet_id')
 )
 app.route('/create_state_update', methods=['POST'], endpoint='create_state_update_endpoint')(
     create_post_route_return_id(db_adapter_server.create_state_update, ['job_id', 'data'], 'state_update_id')

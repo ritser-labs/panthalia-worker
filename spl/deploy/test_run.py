@@ -14,7 +14,8 @@ from ..common import (
     SOT_PRIVATE_PORT,
     fund_wallets,
     MAX_CONCURRENT_ITERATIONS,
-    DB_PORT
+    DB_PORT,
+    generate_wallets
 )
 from ..db.db_adapter_client import DBAdapterClient
 from ..models import (
@@ -104,7 +105,6 @@ def parse_args():
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
     parser.add_argument('--forge_script', type=str, default=DEPLOY_SCRIPT, help="Path to the Forge deploy script")
-    parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
     parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
     parser.add_argument('--worker_count', type=int, default=1, help="Number of workers to start")
@@ -132,30 +132,6 @@ def get_public_ip():
     except requests.RequestException as e:
         logging.error(f"Unable to retrieve public IP: {e}")
         return None
-
-async def wait_for_workers_to_sync(worker_count, sot_url, timeout=600):
-    start_time = time.time()
-    get_num_workers_url = os.path.join(sot_url, 'get_num_synced')
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(get_num_workers_url)
-            synced_workers = response.json()
-            logging.debug(f"Synced {synced_workers}/{worker_count} workers.")
-            if synced_workers >= worker_count:
-                logging.debug("All workers have synced.")
-                return True
-        except requests.RequestException as e:
-            logging.error(f"Error checking worker sync status: {e}")
-        await asyncio.sleep(2)
-    logging.debug("Timeout waiting for workers to sync.")
-    return False
-
-def generate_wallets(num_wallets):
-    wallets = []
-    for _ in range(num_wallets):
-        account = Account.create()
-        wallets.append({'private_key': account._private_key.hex(), 'address': account.address})
-    return wallets
 
 def delete_old_tensor_files(directory, timestamps_file):
     if not os.path.exists(directory):
@@ -435,58 +411,6 @@ async def set_interval_mining(web3, interval):
     """Set the mining interval on the Ethereum node."""
     await web3.provider.make_request('evm_setIntervalMining', [interval])
 
-async def launch_worker(worker_idx, subnet_addresses, worker_wallets, token_contract, pool_address, db_adapter, job_id, db_url):
-    # Define environment variables for the worker
-    this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
-
-    env = {
-        'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
-        'SERVICE_TYPE': 'worker',
-        'RANK': '0',
-        'WORLD_SIZE': '1',
-        'TASK_TYPES': '+'.join(list(subnet_addresses.keys())),
-        'SUBNET_ADDRESSES': '+'.join(list(subnet_addresses.values())),
-        'PRIVATE_KEYS': '+'.join([x['private_key'] for x in this_worker_wallets]),
-        'RPC_URL': rpc_url,
-        'SOT_URL': sot_url,
-        'POOL_ADDRESS': pool_address,
-        'GROUP': str(args.group),
-        'LOCAL_STORAGE_DIR': args.local_storage_dir,
-        'BACKEND': args.backend,
-        'DB_URL': db_url,
-    }
-
-    if args.torch_compile:
-        env['TORCH_COMPILE'] = 'true'
-
-    worker_name = f'worker_{worker_idx}'
-
-    # Launch the worker instance and save state via DB
-    worker_instance, worker_helpers = await launch_instance_and_record_logs(
-        name=worker_name,
-        gpu_type=GPU_TYPE,
-        image=DOCKER_IMAGE,
-        gpu_count=1,
-        ports='',
-        log_file=get_log_file(worker_name),
-        env=env,
-        template_id=BASE_TEMPLATE_ID,
-        cmd=DOCKER_CMD
-    )
-
-    # Create instance entry in the DB
-    await db_adapter.create_instance(
-        name=worker_name,
-        service_type=ServiceType.Worker.name,
-        job_id=job_id,
-        private_key=worker_helpers['private_key'],
-        pod_id=worker_instance['id'],
-        process_id=str(worker_instance['pid']) if 'pid' in worker_instance else '0'
-    )
-
-    logging.info(f"Started worker process {worker_idx} for tasks on instance {worker_instance['id']} with env {env}")
-
-    return worker_name, worker_instance, worker_helpers
 
 def load_state():
     """Load the state from the state file."""
@@ -662,6 +586,8 @@ async def main():
             rpc_url,
             distributor_contract_address,
             pool_address,
+            token_address,
+            args.group
         )
 
         plugin = await get_plugin(plugin_id, db_adapter)
@@ -670,91 +596,11 @@ async def main():
         check_guessed_ids(plugin_id, GUESSED_PLUGIN_ID, 'Plugin')
 
         sot_perm_id = (await db_adapter.get_sot(1)).perm  # Assuming SOT ID is 1; adjust as needed
-        authorized_master_wallet = generate_wallets(args.num_master_wallets)[0]
-        await db_adapter.create_perm(authorized_master_wallet['address'], sot_perm_id)
-        await db_adapter.create_perm(authorized_master_wallet['address'], GUESS_DB_PERM_ID)
+        await db_adapter.create_perm(deployer_address, sot_perm_id)
+        await db_adapter.create_perm(deployer_address, GUESS_DB_PERM_ID)
 
         logging.info('Generating wallets')
 
-        master_wallets = generate_wallets(args.num_master_wallets)
-        await fund_wallets(
-            web3, args.private_key, master_wallets, deployer_address,
-            token_contract, 1, 10000 * 10**18, distributor_contract_address
-        )
-
-        # Save master wallets
-        with open(os.path.join(DATA_DIR, 'master_wallets.json'), 'w') as f:
-            json.dump(master_wallets, f)
-
-        logging.info("Starting SOT service...")
-
-        sot_wallet = generate_wallets(1)[0]
-        await db_adapter.create_perm(sot_wallet['address'], GUESS_DB_PERM_ID)
-
-        sot_instance, sot_helpers = await launch_instance_and_record_logs(
-            name="sot",
-            gpu_type=GPU_TYPE,
-            container_disk_in_gb=40,
-            image=DOCKER_IMAGE,
-            gpu_count=1,
-            ports=f'{SOT_PRIVATE_PORT}/tcp',
-            log_file=get_log_file("sot"),
-            template_id=BASE_TEMPLATE_ID,
-            cmd=DOCKER_CMD,
-            env={
-                'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
-                'SOT_ID': '1',  # Adjust as necessary
-                'DB_URL': db_url,
-                'PRIVATE_KEY': sot_wallet['private_key'],
-            }
-        )
-
-        # Create instance entry in the DB
-        await db_adapter.create_instance(
-            name="sot",
-            service_type=ServiceType.Sot.name,
-            job_id=1,  # Assuming job_id is 1; adjust as needed
-            private_key=sot_helpers['private_key'],
-            pod_id=sot_instance['id'],
-            process_id=str(sot_instance['pid']) if 'pid' in sot_instance else '0'
-        )
-
-        logging.info(f"SOT service started on instance {sot_instance['id']}")
-
-        sot_ip, sot_port = await get_public_ip_and_port(sot_instance['id'], private_port=SOT_PRIVATE_PORT)
-        sot_url = f"http://{sot_ip}:{sot_port}"
-        state['sot_url'] = sot_url
-        save_state(state)
-
-        # Wait for the SOT service to be available
-        if not await wait_for_health(sot_url):
-            logging.error("Error: SOT service did not become available within the timeout period.")
-            await terminate_processes(db_adapter, 1)
-            exit(1)
-
-        logging.info("Starting worker processes...")
-
-        worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
-        await fund_wallets(
-            web3, args.private_key, worker_wallets, deployer_address,
-            token_contract, 1, 10000 * 10**18, distributor_contract_address
-        )
-
-        # Start worker instances
-        worker_tasks = []
-        for worker_idx in range(args.worker_count):
-            worker_tasks.append(
-                launch_worker(
-                    worker_idx,
-                    subnet_addresses,
-                    worker_wallets,
-                    token_contract,
-                    pool_address,
-                    db_adapter,
-                    1,  # Assuming job_id is 1; adjust as needed
-                    db_url
-                )
-            )
 
         # Start master process
         logging.info("Starting master process...")
@@ -764,10 +610,7 @@ async def main():
             'SERVICE_TYPE': 'master',
             'RANK': '0',
             'WORLD_SIZE': '1',
-            'RPC_URL': rpc_url,
-            'WALLETS': os.path.join(DATA_DIR, 'master_wallets.json'),
-            'SOT_URL': sot_url,
-            'SUBNET_ADDRESSES': args.subnet_addresses,
+            'PRIVATE_KEY': args.private_key,
             'MAX_CONCURRENT_ITERATIONS': str(MAX_CONCURRENT_ITERATIONS),
             'DB_URL': db_url,
             'NUM_WORKERS': str(args.worker_count),
@@ -777,6 +620,8 @@ async def main():
 
         if args.detailed_logs:
             master_env['DETAILED_LOGS'] = 'true'
+        if args.torch_compile:
+            master_env['TORCH_COMPILE'] = 'true'
 
         master_instance, master_helpers = await launch_instance_and_record_logs(
             name="master",
@@ -802,10 +647,6 @@ async def main():
         )
 
         logging.info(f"Master process started on instance {master_instance['id']}")
-
-        # Start all worker tasks
-        if worker_tasks:
-            await asyncio.gather(*worker_tasks)
 
     else:
         # If reconnecting, skip launching new instances

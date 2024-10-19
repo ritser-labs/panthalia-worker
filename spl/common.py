@@ -16,6 +16,7 @@ from hexbytes import HexBytes
 from eth_abi import decode
 import threading
 import aiohttp
+from eth_account import Account
 
 SOT_PRIVATE_PORT = 5001
 
@@ -530,8 +531,9 @@ async def wait_for_rpc_available(web3, retry_interval=5, max_retries=60):
     logging.error(f"RPC not available after {max_retries} retries. Exiting...")
     return False
 
-async def fund_wallets(web3, private_key, wallets, deployer_address, token_contract, amount_eth, amount_token, distributor_contract_address):
+async def fund_wallets(web3, private_key, wallets, token_contract, amount_eth, amount_token, distributor_contract_address):
     logging.info('Funding wallets')
+    deployer_address = web3.eth.account.from_key(private_key).address
 
     distributor_contract = web3.eth.contract(address=distributor_contract_address, abi=load_abi('Distributor'))
 
@@ -575,3 +577,11 @@ async def fund_wallets(web3, private_key, wallets, deployer_address, token_contr
         *[token_contract.address, recipients, [amount_token] * len(wallets)],
     )
     logging.info('Token distribution completed')
+
+
+def generate_wallets(num_wallets):
+    wallets = []
+    for _ in range(num_wallets):
+        account = Account.create()
+        wallets.append({'private_key': account._private_key.hex(), 'address': account.address})
+    return wallets

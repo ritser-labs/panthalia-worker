@@ -7,7 +7,7 @@ import requests
 import threading
 import curses
 from flask import Flask, jsonify, send_from_directory
-from ..common import load_abi, wait_for_health, wait_for_rpc_available, fund_wallets, DB_PORT
+from ..common import load_abi, wait_for_health, wait_for_rpc_available, fund_wallets, DB_PORT, generate_wallets
 from ..db.db_adapter_client import DBAdapterClient
 from ..models import init_db, db_path, PermType, ServiceType
 from ..plugin_manager import get_plugin, global_plugin_dir
@@ -39,6 +39,7 @@ plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
 DOCKER_IMAGE = 'zerogoliath/magnum:latest'
 DB_HOST = '0.0.0.0'
 db_url = f"http://{DB_HOST}:{DB_PORT}"
+RPC_URL = 'http://localhost:8545'
 
 GUESS_DB_PERM_ID = 1
 
@@ -71,13 +72,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
     parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to the subnet addresses JSON file")
     parser.add_argument('--deployment_config', type=str, required=True, help="Path to the deployment configuration JSON file")
-    parser.add_argument('--rpc_url', type=str, default='http://localhost:8545', help="URL of the Ethereum RPC node")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the deployer's Ethereum account")
     parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
     parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
     parser.add_argument('--forge_script', type=str, default=DEPLOY_SCRIPT, help="Path to the Forge deploy script")
-    parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
     parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
     parser.add_argument('--worker_count', type=int, default=1, help="Number of workers to start")
@@ -95,20 +94,6 @@ latest_loss_cache = {
 
 LOSS_REFRESH_INTERVAL = 60
 app = Flask(__name__)
-
-async def wait_for_workers_to_sync(worker_count, sot_url, timeout=600):
-    start_time = time.time()
-    get_num_workers_url = os.path.join(sot_url, 'get_num_synced')
-    while time.time() - start_time < timeout:
-        response = requests.get(get_num_workers_url)
-        synced_workers = response.json()
-        logging.debug(f"Synced {synced_workers}/{worker_count} workers.")
-        if synced_workers >= worker_count:
-            logging.debug("All workers have synced.")
-            return True
-        time.sleep(2)
-    logging.debug("Timeout waiting for workers to sync.")
-    return False
 
 def generate_wallets(num_wallets):
     wallets = []
@@ -437,7 +422,7 @@ async def main():
 
         logging.info(f'Time in string: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
         
-        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
+        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(RPC_URL))
         if not await wait_for_rpc_available(web3):
             exit(1)
 
@@ -446,7 +431,7 @@ async def main():
         # Run the deployment command
         deploy_command = [
             'forge', 'script', os.path.basename(args.forge_script),
-            '--broadcast', '--rpc-url', args.rpc_url,
+            '--broadcast', '--rpc-url', RPC_URL,
             '--private-key', args.private_key, '-vv'
         ]
         subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
@@ -474,9 +459,11 @@ async def main():
         
         subnet_id = await db_adapter.create_subnet(
             list(subnet_addresses.values())[0],
-            args.rpc_url,
+            RPC_URL,
             distributor_contract_address,
-            pool_address
+            pool_address,
+            token_address,
+            args.group
         )
         
         job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
@@ -487,91 +474,18 @@ async def main():
 
         sot_id = await db_adapter.create_sot(job_id, args.sot_url)
 
-        sot_perm_id = (await db_adapter.get_sot(sot_id)).perm
-        
         plugin = await get_plugin(plugin_id, db_adapter)
 
-        master_wallets = generate_wallets(args.num_master_wallets)
-        await fund_wallets(web3, args.private_key, master_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
 
-        with open(MASTER_WALLETS_FILE, 'w') as f:
-            json.dump(master_wallets, f)
-        
-        authorized_master_wallet = master_wallets[0]
-        logging.info(f"Creating permission for wallet {authorized_master_wallet['address']} with perm_id {sot_perm_id}")
-        await db_adapter.create_perm(authorized_master_wallet['address'], sot_perm_id)
-        await db_adapter.create_perm(authorized_master_wallet['address'], db_perm_id)
-
-        worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
-        await fund_wallets(web3, args.private_key, worker_wallets, deployer_address, token_contract, 1, 10000 * 10**18, distributor_contract_address)
-
-        os.environ['RANK'] = '0'
-        os.environ['WORLD_SIZE'] = '1'
-
-        logging.info("Starting SOT service...")
-
-        sot_wallet = generate_wallets(1)[0]
-
-        await db_adapter.create_perm(sot_wallet['address'], db_perm_id)
-
-        sot_log = open(SOT_LOG_FILE, 'w')
-        sot_process = subprocess.Popen(
-            [
-                'python', '-m', 'spl.sot',
-                '--sot_id', str(sot_id),
-                '--db_url', db_url,
-                '--private_key', sot_wallet['private_key'],
-            ],
-            stdout=sot_log, stderr=sot_log, cwd=package_root_dir
-        )
-        await db_adapter.create_instance("sot", ServiceType.Sot.name, job_id, args.private_key, '', str(sot_process.pid))
-        logging.info(f"SOT service started with PID {sot_process.pid}")
-
-        if not await wait_for_health(args.sot_url):
-            logging.error("Error: SOT service did not become available within the timeout period.")
-            sot_process.terminate()
-            exit(1)
-
-        logging.info("Starting worker processes...")
-
-        for worker_idx in range(args.worker_count):
-            this_worker_wallets = worker_wallets[worker_idx * len(subnet_addresses):(worker_idx + 1) * len(subnet_addresses)]
-            command = [
-                'python', '-m', 'spl.worker',
-                '--task_types', '+'.join(list(subnet_addresses.keys())),
-                '--subnet_addresses', '+'.join(list(subnet_addresses.values())),
-                '--private_keys', '+'.join([x['private_key'] for x in this_worker_wallets]),
-                '--rpc_url', args.rpc_url,
-                '--sot_url', args.sot_url,
-                '--pool_address', pool_address,
-                '--group', str(args.group),
-                '--backend', args.backend,
-                '--db_url', db_url,
-            ]
-            if args.torch_compile:
-                command.append('--torch_compile')
-            worker_name = f'worker_{worker_idx}'
-            log_file_path = os.path.join(LOG_DIR, f"{worker_name}.log")
-            log_file = open(log_file_path, 'w')
-            worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file, cwd=package_root_dir)
-            await db_adapter.create_instance(worker_name, ServiceType.Worker.name, job_id, args.private_key, '', str(worker_process.pid))
-            logging.info(f"Started worker process {worker_idx} for tasks with command: {' '.join(command)}")
+        await db_adapter.create_perm(args.private_key, db_perm_id)
 
         try:
-            if not await wait_for_workers_to_sync(args.worker_count, args.sot_url):
-                logging.error("Error: Not all workers synced within the timeout period.")
-                await terminate_processes(db_adapter, job_id)
-                exit(1)
-
             logging.info("Starting master process...")
 
             master_log = open(os.path.join(LOG_DIR, 'master.log'), 'w')
             master_command = [
                 'python', '-m', 'spl.master',
-                '--rpc_url', args.rpc_url,
-                '--wallets', MASTER_WALLETS_FILE,
-                '--sot_url', args.sot_url,
-                '--subnet_addresses', args.subnet_addresses,
+                '--private_key', args.private_key,
                 '--max_concurrent_iterations', str(plugin.max_concurrent_iterations),
                 '--db_url', db_url,
                 '--num_workers', str(args.worker_count),
@@ -579,6 +493,8 @@ async def main():
             ]
             if args.detailed_logs:
                 master_command.append('--detailed_logs')
+            if args.torch_compile:
+                master_command.append('--torch_compile')
             master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log, cwd=package_root_dir)
             await db_adapter.create_instance("master", ServiceType.Master.name, job_id, args.private_key, '', str(master_process.pid))
             logging.info(f"Started master process with command: {' '.join(master_command)}")

@@ -81,15 +81,9 @@ subnet_in_db = None
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
-    parser.add_argument('--task_types', type=str, required=True, help="Types of tasks to process, separated by '+' if multiple")
-    parser.add_argument('--subnet_addresses', type=str, required=True, help="Subnet contract addresses")
+    parser.add_argument('--subnet_id', type=int, required=True, help="Subnet ID")
     parser.add_argument('--private_keys', type=str, required=True, help="Private keys of the worker's Ethereum accounts")
-    parser.add_argument('--rpc_url', type=str, default='http://localhost:8545', help="URL of the Ethereum RPC node")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
-    parser.add_argument('--pool_address', type=str, required=True, help="Pool contract address")
-    parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
-    parser.add_argument('--backend', type=str, default='nccl', help="Distributed backend to use (default: nccl, use 'gloo' for macOS)")
-    parser.add_argument('--layer_idx', type=int, help="Layer index for forward and backward tasks", required=False)
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
     parser.add_argument('--max_stakes', type=int, default=2, help="Maximum number of stakes to maintain")
     parser.add_argument('--poll_interval', type=int, default=1, help="Interval (in seconds) for polling the smart contract for new tasks")
@@ -100,17 +94,16 @@ def parse_args():
 
 args = parse_args()
 
-# Split combined task types if any
-task_types = args.task_types.split('+')
-args.task_types = task_types
+db_adapter = DBAdapterClient(args.db_url)
 
-subnet_addresses = args.subnet_addresses.split('+')
-args.subnet_addresses = subnet_addresses
+subnet = asyncio.run(db_adapter.get_subnet(args.subnet_id))
+
+args.subnet_addresses = [subnet.address]
 
 private_keys = args.private_keys.split('+')
 args.private_keys = private_keys
 
-web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(args.rpc_url))
+web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(subnet.rpc_url))
 web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
 
 worker_accounts = [web3.eth.account.from_key(key) for key in args.private_keys]
@@ -120,14 +113,13 @@ subnet_manager_abi = load_abi('SubnetManager')
 pool_abi = load_abi('Pool')
 
 contracts = [web3.eth.contract(address=address, abi=subnet_manager_abi) for address in args.subnet_addresses]
-pool_contract = web3.eth.contract(address=args.pool_address, abi=pool_abi)
+pool_contract = web3.eth.contract(address=subnet.pool_address, abi=pool_abi)
 
 model_initialized = False
 embedding_initialized = False
 latest_block_timestamps = defaultdict(lambda: 0)  # To store the latest block timestamp processed for each tensor
 processed_tasks = set()
 
-db_adapter = DBAdapterClient(args.db_url)
 
 class TaskQueue:
     def __init__(self):
@@ -274,7 +266,7 @@ async def deposit_stake():
     for private_key, subnet_id, stake_amount, token_contract, pool_contract, worker_address in wallets:
         await deposit_stake_without_approval(
             web3, pool_contract, private_key, subnet_id,
-            args.group, worker_address, stake_amount, args.max_stakes
+            subnet.solver_group, worker_address, stake_amount, args.max_stakes
         )
 
 async def handle_event(task_id, task, time_invoked, contract_index):
@@ -290,7 +282,7 @@ async def handle_event(task_id, task, time_invoked, contract_index):
 
     solver = task.solver
 
-    logging.info(f"Received event for task {args.task_types[contract_index]} and id {task_id} and layer {args.layer_idx}")
+    logging.info(f"Received event for task id {task_id}")
 
     if solver.lower() != worker_addresses[contract_index].lower():
         logging.debug("Solver address does not match worker address. Ignoring event.")
@@ -692,7 +684,7 @@ async def main():
     for private_key, token_contract in zip(args.private_keys, token_contracts):
         await approve_token_once(
             web3, token_contract, private_key,
-            args.pool_address, 2**256 - 1
+            subnet.pool_address, 2**256 - 1
         )
 
     logging.info("Starting tensor synchronization...")

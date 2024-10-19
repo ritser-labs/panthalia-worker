@@ -120,12 +120,14 @@ class DBAdapterClient:
     async def get_subnet_using_address(self, address: str) -> Optional[Subnet]:
         return await self._fetch_entity('/get_subnet_using_address', Subnet, params={'address': address})
 
-    async def create_subnet(self, address: str, rpc_url: str, distributor_address: str, pool_address: str) -> Optional[int]:
+    async def create_subnet(self, address: str, rpc_url: str, distributor_address: str, pool_address: str, token_address: str, solver_group: int) -> Optional[int]:
         data = {
             'address': address,
             'rpc_url': rpc_url,
             'distributor_address': distributor_address,
-            'pool_address': pool_address
+            'pool_address': pool_address,
+            'token_address': pool_address,
+            'solver_group': solver_group
         }
         response = await self._authenticated_request('POST', '/create_subnet', data=data)
         return self._extract_id(response, 'subnet_id')

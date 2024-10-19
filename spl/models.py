@@ -68,6 +68,8 @@ class Subnet(Serializable):
     rpc_url = Column(String, nullable=False)
     distributor_address = Column(String, nullable=False)
     pool_address = Column(String, nullable=False)
+    token_address = Column(String, nullable=False)
+    solver_group = Column(Integer, nullable=False)
 
 class Job(TimestampMixin, Serializable):
     __tablename__ = 'jobs'

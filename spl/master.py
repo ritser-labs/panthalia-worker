@@ -33,6 +33,10 @@ from .common import (
     MAX_SUBMIT_TASK_RETRY_DURATION,
     MAX_SELECT_SOLVER_TIME,
     TENSOR_NAME,
+    generate_wallets,
+    fund_wallets,
+    SOT_PRIVATE_PORT,
+    wait_for_health
 )
 from io import BytesIO
 import os
@@ -42,6 +46,20 @@ import uuid
 from .db.db_adapter_client import DBAdapterClient
 from .plugin_manager import get_plugin
 from typing import List, Dict
+import subprocess
+from .models import TaskStatus, ServiceType
+from .deploy.local_test_run import LOG_DIR, SOT_LOG_FILE, package_root_dir
+from .deploy.test_run import (
+    GPU_TYPE,
+    DOCKER_IMAGE,
+    get_log_file,
+    BASE_TEMPLATE_ID,
+    DOCKER_CMD
+)
+from .deploy.cloud_adapters.runpod import (
+    launch_instance_and_record_logs,
+    get_public_ip_and_port
+)
 
 class Master:
     def __init__(
@@ -576,20 +594,178 @@ def load_wallets(wallets_string):
     with open(wallets_string, "r") as file:
         return json.load(file)
 
-async def check_for_new_jobs(
-    rpc_url: str,
-    wallets: List[Dict[str, str]],
+async def launch_sot(db_adapter, job, deploy_type, db_url):
+    if deploy_type == 'local':
+        sot_url = f"http://localhost:{SOT_PRIVATE_PORT}"
+        sot_log = open(SOT_LOG_FILE, 'w')
+        sot_process = subprocess.Popen(
+            [
+                'python', '-m', 'spl.sot',
+                '--sot_id', str(sot_id),
+                '--db_url', db_url,
+                '--private_key', sot_wallet['private_key'],
+            ],
+            stdout=sot_log, stderr=sot_log, cwd=package_root_dir
+        )
+        instance_private_key = None
+        instance_pod_id = None
+        instance_pid = sot_process.pid
+    elif deploy_type == 'cloud':
+        sot_instance, sot_helpers = await launch_instance_and_record_logs(
+            name="sot",
+            gpu_type=GPU_TYPE,
+            container_disk_in_gb=40,
+            image=DOCKER_IMAGE,
+            gpu_count=1,
+            ports=f'{SOT_PRIVATE_PORT}/tcp',
+            log_file=get_log_file("sot"),
+            template_id=BASE_TEMPLATE_ID,
+            cmd=DOCKER_CMD,
+            env={
+                'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
+                'SERVICE_TYPE': 'sot',
+                'SOT_PRIVATE_PORT': str(SOT_PRIVATE_PORT),
+                'SOT_ID': sot_id,
+                'DB_URL': db_url,
+                'PRIVATE_KEY': sot_wallet['private_key'],
+            }
+        )
+        instance_private_key = sot_helpers['private_key']
+        instance_pod_id = sot_instance['id']
+        instance_pid = None
+        sot_ip, sot_port = await get_public_ip_and_port(sot_instance['id'], private_port=SOT_PRIVATE_PORT)
+        sot_url = f"http://{sot_ip}:{sot_port}"
+
+    await db_adapter.create_instance(
+        "sot",
+        ServiceType.Sot.name,
+        job.id,
+        instance_private_key,
+        instance_pod_id,
+        instance_pid
+    )
+    logging.info(f"SOT service started")
+
+    if not await wait_for_health(args.sot_url):
+        logging.error("Error: SOT service did not become available within the timeout period.")
+        sot_process.terminate()
+        exit(1)
+    sot_id = await db_adapter.create_sot(job.id, args.sot_url)
+    sot_db = await db_adapter.get_sot(job.id)
+    sot_perm_id = sot_db.perm
+    sot_wallet = generate_wallets(1)[0]
+    await db_adapter.create_perm(sot_wallet['address'], sot_perm_id)
+    await db_adapter.create_perm(sot_wallet['address'], DB_PERM_ID)
+    return sot_db, sot_url
+
+async def launch_worker(
+    worker_idx,
+    db_adapter, job, deploy_type,
+    subnet,
+    worker_private_key: str,
+    db_url: str,
     sot_url: str,
-    subnet_addresses: str,
+):
+    this_worker_wallets = [worker_private_key]
+    worker_name = f'worker_{worker_idx}'
+    private_keys = '+'.join([x['private_key'] for x in this_worker_wallets])
+    if deploy_type == 'local':
+        command = [
+            'python', '-m', 'spl.worker',
+            '--subnet_id', subnet.id,
+            '--private_keys', private_keys,
+            '--rpc_url', subnet.rpc_url,
+            '--sot_url', sot_url,
+            '--db_url', db_url,
+        ]
+        if args.torch_compile:
+            command.append('--torch_compile')
+        
+        if args.detailed_logs:
+            command.append('--detailed_logs')
+        log_file_path = os.path.join(LOG_DIR, f"{worker_name}.log")
+        log_file = open(log_file_path, 'w')
+        worker_process = subprocess.Popen(command, stdout=log_file, stderr=log_file, cwd=package_root_dir)
+        instance_private_key = None
+        instance_pod_id = None
+        instance_pid = worker_process.pid
+    elif deploy_type == 'cloud':
+        env = {
+            'GITHUB_TOKEN': os.environ.get('GITHUB_TOKEN', ''),
+            'SUBNET_ID': subnet.id,
+            'PRIVATE_KEYS': private_keys,
+            'RPC_URL': subnet.rpc_url,
+            'SOT_URL': sot_url,
+            'DB_URL': db_url,
+        }
+        if args.torch_compile:
+            env['TORCH_COMPILE'] = 'true'
+        if args.detailed_logs:
+            env['DETAILED_LOGS'] = 'true'
+        
+        worker_instance, worker_helpers = await launch_instance_and_record_logs(
+            name=worker_name,
+            gpu_type=GPU_TYPE,
+            image=DOCKER_IMAGE,
+            gpu_count=1,
+            ports='',
+            log_file=get_log_file(worker_name),
+            env=env,
+            template_id=BASE_TEMPLATE_ID,
+            cmd=DOCKER_CMD
+        )
+        instance_private_key = worker_helpers['private_key']
+        instance_pod_id = worker_instance['id']
+        instance_pid = None
+        # Create instance entry in the DB
+    await db_adapter.create_instance(
+        name=worker_name,
+        service_type=ServiceType.Worker.name,
+        job_id=job.id,
+        private_key=instance_private_key,
+        pod_id=instance_pod_id,
+        process_id=instance_pid
+    )
+    logging.info(f"Started worker process {worker_idx} for tasks with command: {' '.join(command)}")
+
+
+async def launch_workers(
+    db_adapter, job, deploy_type,
+    subnet,
+    db_url: str,
+    sot_url: str,
+):
+    web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(subnet.rpc_url))
+    worker_wallets = generate_wallets(args.worker_count * len(subnet_addresses))
+    await fund_wallets(
+        web3, args.private_key, worker_wallets,
+        subnet.token_contract, 1, 10000 * 10**18, subnet.distributor_address
+    )
+    worker_tasks = []
+    for i in range(args.worker_count):
+        worker_wallet = worker_wallets[i]
+        task = asyncio.create_task(launch_worker(
+            i,
+            db_adapter, job, deploy_type, subnet,
+            worker_wallet['private_key'], db_url,
+            sot_url
+        ))
+        worker_tasks.append(task)
+    await asyncio.gather(*worker_tasks)
+
+DB_PERM_ID = 1
+async def check_for_new_jobs(
+    private_key: str,
     db_url: str,
     max_concurrent_iterations: int,
     detailed_logs: bool,
     num_workers: int,
     deploy_type: str,
-    cloud_key: str,
+    num_master_wallets: int,
 ):
     jobs_processing = []
-    db_adapter = DBAdapterClient(db_url, wallets[0]["private_key"])
+    db_adapter = DBAdapterClient(db_url, private_key)
+    
     logger.info(f"Checking for new jobs")
     while True:
         new_jobs = await db_adapter.get_jobs_without_instances()
@@ -601,9 +777,34 @@ async def check_for_new_jobs(
                 continue
             jobs_processing.append(job.id)
             logger.info(f"Starting new job: {job.id}")
+            subnet = await db_adapter.get_subnet(job.subnet_id)
+            subnet_addresses = [subnet.address]
+
+            # SOT
+            sot_db, sot_url = await launch_sot(
+                db_adapter, job, deploy_type, db_url)
+            
+            # Workers
+            await launch_workers(
+                db_adapter, job, deploy_type, subnet,
+                db_url, sot_url
+            )
+
+            # Master
+            master_wallets = generate_wallets(num_master_wallets)
+            web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(subnet.rpc_url))
+            await fund_wallets(
+                web3,
+                private_key,
+                master_wallets,
+                subnet.token_address,
+                1,
+                10000 * 10**18,
+                subnet.distributor_address
+            )
             obj = Master(
-                rpc_url,
-                wallets,
+                subnet.rpc_url,
+                master_wallets,
                 sot_url,
                 subnet_addresses,
                 job.id,
@@ -624,28 +825,10 @@ if __name__ == "__main__":
         description="Master process for task submission"
     )
     parser.add_argument(
-        "--rpc_url",
+        "--private_key",
         type=str,
         required=True,
-        help="RPC URL for Ethereum node",
-    )
-    parser.add_argument(
-        "--wallets",
-        type=str,
-        required=True,
-        help="Path to wallets JSON file",
-    )
-    parser.add_argument(
-        "--sot_url",
-        type=str,
-        required=True,
-        help="Source of Truth URL",
-    )
-    parser.add_argument(
-        "--subnet_addresses",
-        type=str,
-        required=True,
-        help="Path to subnet addresses JSON file",
+        help="The wallet private key",
     )
     parser.add_argument(
         "--db_url",
@@ -670,15 +853,16 @@ if __name__ == "__main__":
         help="Number of workers to start for each job",
     )
     parser.add_argument(
+        "--num_master_wallets",
+        type=int,
+        help="Number of wallets to generate for the master",
+        default=70,
+    )
+    parser.add_argument(
         "--deploy_type",
         type=str,
         required=True,
         help="Type of deployment (disabled, local, cloud)",
-    )
-    parser.add_argument(
-        "--cloud_key",
-        type=str,
-        help="Cloud key for deployment",
     )
 
     args = parser.parse_args()
@@ -688,14 +872,11 @@ if __name__ == "__main__":
     logger.info(f'Starting master process')
 
     asyncio.run(check_for_new_jobs(
-        args.rpc_url,
-        load_wallets(args.wallets),
-        args.sot_url,
-        subnet_addresses,
+        args.private_key,
         args.db_url,
         args.max_concurrent_iterations,
         args.detailed_logs,
         args.num_workers,
         args.deploy_type,
-        args.cloud_key,
+        args.num_master_wallets,
     ))
