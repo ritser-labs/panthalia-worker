@@ -585,8 +585,9 @@ class Master:
         )
 
 def run_master_main(
-    obj: Master
+    *args
 ):
+    obj = Master(*args)
     asyncio.run(obj.run_main())
 
 
@@ -757,6 +758,11 @@ async def launch_workers(
     await asyncio.gather(*worker_tasks)
 
 DB_PERM_ID = 1
+# updated function to launch master process as an asyncio task
+async def run_master_task(*args):
+    await asyncio.to_thread(run_master_main, *args)
+
+# updated check_for_new_jobs function to handle concurrent jobs correctly
 async def check_for_new_jobs(
     private_key: str,
     db_url: str,
@@ -766,19 +772,16 @@ async def check_for_new_jobs(
     deploy_type: str,
     num_master_wallets: int,
 ):
-    jobs_processing = []
+    jobs_processing = {}
     db_adapter = DBAdapterClient(db_url, private_key)
     
     logger.info(f"Checking for new jobs")
     while True:
         new_jobs = await db_adapter.get_jobs_without_instances()
-        logger.info(1)
         for job in new_jobs:
-            logger.info(2)
             if job.id in jobs_processing:
-                logger.info(3)
                 continue
-            jobs_processing.append(job.id)
+
             logger.info(f"Starting new job: {job.id}")
             subnet = await db_adapter.get_subnet(job.subnet_id)
             subnet_addresses = [subnet.address]
@@ -808,7 +811,7 @@ async def check_for_new_jobs(
                 10000 * 10**18,
                 subnet.distributor_address
             )
-            obj = Master(
+            master_args = [
                 subnet.rpc_url,
                 master_wallets,
                 sot_url,
@@ -816,12 +819,19 @@ async def check_for_new_jobs(
                 job.id,
                 db_url,
                 db_adapter,
-                max_concurrent_iterations=max_concurrent_iterations,
-                detailed_logs=detailed_logs,
-            )
-            asyncio.to_thread(run_master_main, obj)
-            jobs_processing.remove(job.id)
-        logger.info(4)
+                max_concurrent_iterations,
+                detailed_logs,
+            ]
+
+            # run master in a non-blocking way
+            task = asyncio.create_task(run_master_task(master_args))
+            jobs_processing[job.id] = task
+
+        # clean up finished jobs
+        completed_jobs = [job_id for job_id, task in jobs_processing.items() if task.done()]
+        for job_id in completed_jobs:
+            jobs_processing.pop(job_id)
+
         await asyncio.sleep(1)
 
 if __name__ == "__main__":
