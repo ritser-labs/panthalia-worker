@@ -6,7 +6,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-USE_SECIMPORT = True
+USE_SECIMPORT = False
 
 
 # Define a global directory for plugins

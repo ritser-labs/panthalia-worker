@@ -467,6 +467,10 @@ async def launch_db_instance(state, db_adapter, is_reconnecting):
             'private_key': db_helpers['private_key'],
             'address': db_url
         }
+        db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb.name)
+        
+        assert db_perm_id == GUESS_DB_PERM_ID, f"Expected db_perm_id {GUESS_DB_PERM_ID}, got {db_perm_id}"
+
         save_state(state)
         logging.info(f"DB service started on {db_url}")
 
@@ -594,8 +598,6 @@ async def main():
         check_guessed_ids(subnet_id, GUESSED_SUBNET_ID, 'Subnet')
         check_guessed_ids(plugin_id, GUESSED_PLUGIN_ID, 'Plugin')
 
-        sot_perm_id = (await db_adapter.get_sot(1)).perm  # Assuming SOT ID is 1; adjust as needed
-        await db_adapter.create_perm(deployer_address, sot_perm_id)
         await db_adapter.create_perm(deployer_address, GUESS_DB_PERM_ID)
 
         logging.info('Generating wallets')

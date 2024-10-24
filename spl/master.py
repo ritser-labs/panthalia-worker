@@ -473,7 +473,7 @@ class Master:
 
     def sign_message(self, message):
         message = encode_defunct(text=message)
-        account = self.web3.eth.account.from_key(self.wallets[0]["private_key"])
+        account = self.web3.eth.account.from_key(args.private_key)
         signed_message = account.sign_message(message)
         return signed_message.signature.hex()
 
@@ -591,6 +591,7 @@ def load_wallets(wallets_string):
         return json.load(file)
 
 async def launch_sot(db_adapter, job, deploy_type, db_url):
+    logging.info(f"launch_sot")
     sot_wallet = generate_wallets(1)[0]
     sot_id = await db_adapter.create_sot(job.id, None)
     
@@ -651,7 +652,7 @@ async def launch_sot(db_adapter, job, deploy_type, db_url):
     await db_adapter.update_sot(sot_id, sot_url)
     sot_db = await db_adapter.get_sot(job.id)
     sot_perm_id = sot_db.perm
-    await db_adapter.create_perm(sot_wallet['address'], sot_perm_id)
+    await db_adapter.create_perm(args.private_key, sot_perm_id)
     await db_adapter.create_perm(sot_wallet['address'], DB_PERM_ID)
     return sot_db, sot_url
 

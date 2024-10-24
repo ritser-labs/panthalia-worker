@@ -37,7 +37,7 @@ BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 LAST_FUTURE_VERSION_FILE = os.path.join(STATE_DIR, 'last_future_version_number.json')
 plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
 DOCKER_IMAGE = 'zerogoliath/magnum:latest'
-DB_HOST = '0.0.0.0'
+DB_HOST = '127.0.0.1'
 db_url = f"http://{DB_HOST}:{DB_PORT}"
 RPC_URL = 'http://localhost:8545'
 
@@ -471,8 +471,6 @@ async def main():
         db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb.name)
         
         assert db_perm_id == GUESS_DB_PERM_ID, f"Expected db_perm_id {GUESS_DB_PERM_ID}, got {db_perm_id}"
-
-        sot_id = await db_adapter.create_sot(job_id, args.sot_url)
 
         plugin = await get_plugin(plugin_id, db_adapter)
 
