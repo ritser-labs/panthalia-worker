@@ -76,6 +76,7 @@ class Master:
         max_iterations=float('inf'),
         detailed_logs=False,
     ):
+        logger.info("Initializing Master")
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
         self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
         self.sot_url = sot_url
@@ -91,9 +92,6 @@ class Master:
         self.job_id = job_id  # Track the job ID
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
-
-        # Initialize contracts
-        asyncio.run(self.initialize())
 
         # Setup paths for loss data
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -451,6 +449,7 @@ class Master:
 
     async def run_main(self):
         logger.info("Starting main process")
+        await self.initialize()
         await self.approve_tokens_at_start()
 
         # Start the initial set of iterations
@@ -583,13 +582,6 @@ class Master:
         raise Exception(
             f"Failed to retrieve batch and targets URL after {self.max_retries} attempts."
         )
-
-def run_master_main(
-    *args
-):
-    obj = Master(*args)
-    asyncio.run(obj.run_main())
-
 
 
 def load_wallets(wallets_string):
@@ -760,7 +752,12 @@ async def launch_workers(
 DB_PERM_ID = 1
 # updated function to launch master process as an asyncio task
 async def run_master_task(*args):
-    await asyncio.to_thread(run_master_main, *args)
+    try:
+        logging.info("run_master_task")
+        obj = Master(*args)
+        await obj.run_main()
+    except Exception as e:
+        logging.error(f"Error in run_master_task: {e}")
 
 # updated check_for_new_jobs function to handle concurrent jobs correctly
 async def check_for_new_jobs(
@@ -787,21 +784,25 @@ async def check_for_new_jobs(
             subnet_addresses = [subnet.address]
 
             # SOT
+            logging.info(f"Starting SOT service")
             sot_db, sot_url = await launch_sot(
                 db_adapter, job, deploy_type, db_url)
             
             # Workers
+            logging.info(f"Starting worker processes")
             await launch_workers(
                 db_adapter, job, deploy_type, subnet,
                 db_url, sot_url
             )
 
             # Master
+            logging.info(f"Starting master process")
             master_wallets = generate_wallets(num_master_wallets)
             web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(subnet.rpc_url))
             token_contract = web3.eth.contract(
                 address=subnet.token_address, abi=load_abi('ERC20')
             )
+            logging.info(f"Funding master wallets")
             await fund_wallets(
                 web3,
                 private_key,
@@ -824,7 +825,8 @@ async def check_for_new_jobs(
             ]
 
             # run master in a non-blocking way
-            task = asyncio.create_task(run_master_task(master_args))
+            logger.info(f'Starting master process for job {job.id}')
+            task = asyncio.create_task(run_master_task(*master_args))
             jobs_processing[job.id] = task
 
         # clean up finished jobs
