@@ -61,6 +61,7 @@ from .deploy.cloud_adapters.runpod import (
     launch_instance_and_record_logs,
     get_public_ip_and_port
 )
+import traceback
 
 class Master:
     def __init__(
@@ -90,6 +91,7 @@ class Master:
         self.done = False
         self.max_iterations = max_iterations
         self.job_id = job_id  # Track the job ID
+        self.db_adapter = db_adapter
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
@@ -758,6 +760,8 @@ async def run_master_task(*args):
         await obj.run_main()
     except Exception as e:
         logging.error(f"Error in run_master_task: {e}")
+        traceback_str = traceback.format_exc()
+        logging.error(f"Traceback:\n{traceback_str}")
 
 # updated check_for_new_jobs function to handle concurrent jobs correctly
 async def check_for_new_jobs(
@@ -781,7 +785,7 @@ async def check_for_new_jobs(
 
             logger.info(f"Starting new job: {job.id}")
             subnet = await db_adapter.get_subnet(job.subnet_id)
-            subnet_addresses = [subnet.address]
+            subnet_addresses = {'subnet': subnet.address}
 
             # SOT
             logging.info(f"Starting SOT service")
