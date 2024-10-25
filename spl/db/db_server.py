@@ -76,14 +76,19 @@ def require_json_keys(*required_keys):
     return decorator
 
 # Helper for POST routes returning IDs
-def create_post_route_return_id(method, required_keys, id_key):
-    @requires_auth
-    @require_json_keys(*required_keys)
-    @handle_errors
+def create_post_route_return_id(method, required_keys, id_key, require_auth=True):
+    def decorator(handler_func):
+        if require_auth:
+            handler_func = requires_auth(handler_func)
+        handler_func = require_json_keys(*required_keys)(handler_func)
+        handler_func = handle_errors(handler_func)
+        return handler_func
+
     async def handler(data):
         entity_id = await method(**data)
         return jsonify({id_key: entity_id}), 200
-    return handler
+
+    return decorator(handler)
 
 # Helper for creating GET routes
 def create_get_route(entity_name, method, params):
@@ -119,6 +124,7 @@ app.route('/get_instances_by_job', methods=['GET'], endpoint='get_instances_by_j
 app.route('/get_tasks_for_job', methods=['GET'], endpoint='get_tasks_for_job_endpoint')(create_get_route('Task', db_adapter_server.get_tasks_with_pagination_for_job, ['job_id', 'offset', 'limit']))
 app.route('/get_all_instances', methods=['GET'], endpoint='get_all_instances_endpoint')(create_get_route('Instance', db_adapter_server.get_all_instances, []))
 app.route('/get_jobs_without_instances', methods=['GET'], endpoint='get_jobs_without_instances_endpoint')(create_get_route('Job', db_adapter_server.get_jobs_without_instances, []))
+app.route('/get_plugins', methods=['GET'], endpoint='get_plugins_endpoint')(create_get_route('Plugin', db_adapter_server.get_plugins, []))
 
 @app.route('/get_task_count_for_job', methods=['GET'], endpoint='get_task_count_for_job_endpoint')
 @require_params('job_id')
@@ -166,10 +172,20 @@ async def health_check():
 
 # Define POST routes
 app.route('/create_job', methods=['POST'], endpoint='create_job_endpoint')(
-    create_post_route_return_id(db_adapter_server.create_job, ['name', 'plugin_id', 'subnet_id', 'sot_url', 'iteration'], 'job_id')
+    create_post_route_return_id(
+        db_adapter_server.create_job,
+        ['name', 'plugin_id', 'subnet_id', 'sot_url', 'iteration'],
+        'job_id',
+        require_auth=False
+    )
 )
 app.route('/create_plugin', methods=['POST'], endpoint='create_plugin_endpoint')(
-    create_post_route_return_id(db_adapter_server.create_plugin, ['name', 'code'], 'plugin_id')
+    create_post_route_return_id(
+        db_adapter_server.create_plugin,
+        ['name', 'code'],
+        'plugin_id',
+        require_auth=False
+    )
 )
 app.route('/create_perm', methods=['POST'], endpoint='create_perm_endpoint')(
     create_post_route_return_id(db_adapter_server.create_perm, ['address', 'perm'], 'perm_id')
@@ -193,7 +209,6 @@ app.route('/create_sot', methods=['POST'], endpoint='create_sot_endpoint')(
     create_post_route_return_id(db_adapter_server.create_sot, ['job_id', 'url'], 'sot_id')
 )
 
-# NEW POST ROUTES FOR MISSED FUNCTIONS
 app.route('/set_last_nonce', methods=['POST'], endpoint='set_last_nonce_endpoint')(
     create_post_route_return_id(db_adapter_server.set_last_nonce, ['address', 'perm', 'last_nonce'], 'success')
 )

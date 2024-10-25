@@ -448,6 +448,13 @@ class DBAdapterServer:
             logger.debug(f"Retrieved {len(jobs_without_instances)} jobs without instances.")
             return jobs_without_instances
 
+    async def get_plugins(self):
+        async with AsyncSessionLocal() as session:
+            stmt = select(Plugin)
+            result = await session.execute(stmt)
+            plugins = result.scalars().all()
+            logger.debug(f"Retrieved {len(plugins)} plugins.")
+            return plugins
 
 # Instantiate the server adapter
 db_adapter_server = DBAdapterServer()
