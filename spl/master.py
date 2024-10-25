@@ -63,6 +63,7 @@ from .deploy.cloud_adapters.runpod import (
     get_public_ip_and_port
 )
 import traceback
+worker_counter = 0
 
 class Master:
     def __init__(
@@ -662,13 +663,15 @@ async def launch_sot(db_adapter, job, deploy_type, db_url):
     return sot_db, sot_url
 
 async def launch_worker(
-    worker_idx,
     db_adapter, job, deploy_type,
     subnet,
     worker_private_key: str,
     db_url: str,
     sot_url: str,
 ):
+    global worker_counter
+    worker_idx = worker_counter
+    worker_counter += 1
     this_worker_wallets = [worker_private_key]
     worker_name = f'worker_{worker_idx}'
     private_keys = '+'.join(this_worker_wallets)
@@ -749,7 +752,6 @@ async def launch_workers(
     for i in range(args.num_workers):
         worker_wallet = worker_wallets[i]
         task = asyncio.create_task(launch_worker(
-            i,
             db_adapter, job, deploy_type, subnet,
             worker_wallet['private_key'], db_url,
             sot_url
