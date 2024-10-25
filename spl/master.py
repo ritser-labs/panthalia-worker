@@ -353,13 +353,15 @@ class Master:
                 await self.db_adapter.update_time_solved(
                     task_id,
                     self.job_id,
-                    task.timeStatusChanged
+                    #task.timeStatusChanged
+                    int(time.time())
                 )
             if task.status == TaskStatus.SolverSelected.value:
                 await self.db_adapter.update_time_solver_selected(
                     task_id,
                     self.job_id,
-                    task.timeStatusChanged
+                    #task.timeStatusChanged
+                    int(time.time())
                 )
             if (
                 task.status == TaskStatus.SolutionSubmitted.value
