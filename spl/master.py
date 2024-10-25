@@ -37,7 +37,8 @@ from .common import (
     fund_wallets,
     SOT_PRIVATE_PORT,
     wait_for_health,
-    load_abi
+    load_abi,
+    TENSOR_NAME
 )
 from io import BytesIO
 import os
@@ -474,6 +475,7 @@ class Master:
     def sign_message(self, message):
         message = encode_defunct(text=message)
         account = self.web3.eth.account.from_key(args.private_key)
+        logger.info(f"signing with address {account.address}")
         signed_message = account.sign_message(message)
         return signed_message.signature.hex()
 
@@ -652,7 +654,8 @@ async def launch_sot(db_adapter, job, deploy_type, db_url):
     await db_adapter.update_sot(sot_id, sot_url)
     sot_db = await db_adapter.get_sot(job.id)
     sot_perm_id = sot_db.perm
-    await db_adapter.create_perm(args.private_key, sot_perm_id)
+    private_key_address = Account.from_key(args.private_key).address
+    await db_adapter.create_perm(private_key_address, sot_perm_id)
     await db_adapter.create_perm(sot_wallet['address'], DB_PERM_ID)
     return sot_db, sot_url
 
@@ -786,8 +789,8 @@ async def check_for_new_jobs(
 
             logger.info(f"Starting new job: {job.id}")
             subnet = await db_adapter.get_subnet(job.subnet_id)
-            subnet_addresses = {'subnet': subnet.address}
-
+            subnet_addresses = {}
+            subnet_addresses[TENSOR_NAME] = subnet.address
             # SOT
             logging.info(f"Starting SOT service")
             sot_db, sot_url = await launch_sot(
