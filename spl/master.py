@@ -74,9 +74,9 @@ class Master:
         job_id,  # Add job_id to interact with the database
         db_url,
         db_adapter,
-        max_concurrent_iterations=2,
-        max_iterations=float('inf'),
-        detailed_logs=False,
+        max_concurrent_iterations,
+        max_iterations,
+        detailed_logs,
     ):
         logger.info("Initializing Master")
         self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
@@ -829,6 +829,7 @@ async def check_for_new_jobs(
                 db_url,
                 db_adapter,
                 max_concurrent_iterations,
+                float('inf'),
                 detailed_logs,
             ]
 
