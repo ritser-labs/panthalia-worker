@@ -73,6 +73,7 @@ class Master:
         sot_url,
         subnet_addresses,
         job_id,  # Add job_id to interact with the database
+        subnet_id,
         db_url,
         db_adapter,
         max_concurrent_iterations,
@@ -93,6 +94,7 @@ class Master:
         self.done = False
         self.max_iterations = max_iterations
         self.job_id = job_id  # Track the job ID
+        self.subnet_id = subnet_id
         self.db_adapter = db_adapter
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -350,20 +352,23 @@ class Master:
             logger.info(
                 f"Expected status: {TaskStatus.SolutionSubmitted.value}"
             )
+            task_db = await self.db_adapter.get_task(task_id, self.subnet_id)
             if task.status == TaskStatus.SolutionSubmitted.value:
-                await self.db_adapter.update_time_solved(
-                    task_id,
-                    self.job_id,
-                    #task.timeStatusChanged
-                    int(time.time())
-                )
+                if task_db.time_solved is None:
+                    await self.db_adapter.update_time_solved(
+                        task_id,
+                        self.job_id,
+                        #task.timeStatusChanged
+                        int(time.time())
+                    )
             if task.status == TaskStatus.SolverSelected.value:
-                await self.db_adapter.update_time_solver_selected(
-                    task_id,
-                    self.job_id,
-                    #task.timeStatusChanged
-                    int(time.time())
-                )
+                if task_db.time_solver_selected is None:
+                    await self.db_adapter.update_time_solver_selected(
+                        task_id,
+                        self.job_id,
+                        #task.timeStatusChanged
+                        int(time.time())
+                    )
             if (
                 task.status == TaskStatus.SolutionSubmitted.value
                 or task.status == TaskStatus.ResolvedCorrect.value
@@ -830,6 +835,7 @@ async def check_for_new_jobs(
                 sot_url,
                 subnet_addresses,
                 job.id,
+                job.subnet_id,
                 db_url,
                 db_adapter,
                 max_concurrent_iterations,
