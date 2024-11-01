@@ -12,6 +12,7 @@ from web3.middleware import async_geth_poa_middleware
 from collections import defaultdict
 from .device import device
 from .common import (
+    download_file,
     Task, TaskStatus, load_abi, upload_tensor,
     async_transact_with_contract_function,
     TENSOR_NAME, PoolState, approve_token_once,
@@ -70,12 +71,6 @@ last_handle_event_timestamp_lock = asyncio.Lock()  # Lock for last_handle_event_
 # Initialize AsyncQueuedLock instances
 task_processing_lock = AsyncQueuedLock()
 upload_lock = AsyncQueuedLock()
-
-# Initialize a lock to prioritize tensor downloads
-tensor_download_lock = asyncio.Lock()
-
-# Initialize an event to signal tensor download in progress
-tensor_download_event = asyncio.Event()
 
 subnet_in_db = None
 
@@ -149,59 +144,6 @@ class TaskQueue:
             return len(self.queue)
 
 task_queue = TaskQueue()
-
-async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_type='batch_targets', tensor_name=None):
-    """
-    Downloads a file with retry logic and prioritizes tensor downloads over batch/targets downloads.
-    
-    Args:
-        url (str): The URL to download the file from.
-        retries (int): Number of retry attempts.
-        backoff (int): Backoff factor for retries.
-        chunk_timeout (int): Timeout for each chunk in seconds.
-        download_type (str): Type of download ('tensor' or 'batch_targets').
-    
-    Returns:
-        torch.Tensor: The downloaded tensor.
-    """
-    params = {'tensor_name': tensor_name} if tensor_name else None
-    for attempt in range(1, retries + 1):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params) as response:
-                    response.raise_for_status()
-
-                    if download_type == 'tensor':
-                        # Acquire tensor_download_lock to prioritize tensor downloads
-                        async with tensor_download_lock:
-                            # Signal that a tensor download is in progress
-                            tensor_download_event.clear()
-                            try:
-                                content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout, download_type=download_type)
-                            finally:
-                                # Clear the event after tensor download is complete
-                                tensor_download_event.set()
-                    elif download_type == 'batch_targets':
-                        # Wait for any ongoing tensor download to finish
-                        async with tensor_download_lock:
-                            pass  # Simply wait until tensor_download_lock is free
-                        content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout, download_type=download_type)
-                    else:
-                        raise ValueError("Invalid download_type specified.")
-
-                    return torch.load(content)
-
-        except asyncio.TimeoutError:
-            logging.error(f"Attempt {attempt}: Chunk download timed out.")
-        except aiohttp.ClientError as e:
-            logging.error(f"Attempt {attempt}: Client error: {e}")
-        except Exception as e:
-            logging.error(f"Attempt {attempt}: Unexpected error: {e}")
-
-        if attempt < retries:
-            await asyncio.sleep(backoff * attempt)
-
-    raise Exception(f"Failed to download file after {retries} attempts")
 
 def create_callback(encoder, pbar):
     def callback(monitor):
@@ -375,10 +317,9 @@ async def process_tasks():
                         weight_decay = task_params['weight_decay']
                         logging.debug(f"{task_id}: Executing training task")
                         time_synced = time.time()
-                        model, version_number = await initialize_tensor(TENSOR_NAME, plugin, sot_url)
-
-                        updates, loss = plugin.model_adapter.train_task(
-                            model, batch, targets, steps, max_lr, min_lr, T_0, weight_decay
+                        version_number, updates, loss = await plugin.model_adapter.train_task(
+                            TENSOR_NAME, sot_url, plugin.tensor_version_interval, plugin.expected_worker_time,
+                            batch, targets, steps, max_lr, min_lr, T_0, weight_decay
                         )
                         logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
                     finally:
@@ -490,140 +431,6 @@ async def report_sync_status():
     except aiohttp.ClientError as e:
         logging.error(f"Exception while reporting sync status: {e}")
 
-def time_until_next_version(tensor_version_interval):
-    return get_future_version_number(tensor_version_interval) - time.time()
-
-async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=5, download_type='batch_targets'):
-    """
-    Downloads data from the response stream with a timeout for each chunk.
-    Pauses if a tensor download is in progress.
-
-    Args:
-        response: The aiohttp response object.
-        chunk_size: The size of each chunk to download.
-        chunk_timeout: Timeout for each chunk in seconds.
-        download_type: Type of download ('tensor' or 'batch_targets').
-
-    Returns:
-        A BytesIO object containing the downloaded data.
-    """
-    start_time = time.time()
-    content = BytesIO()
-    
-    # Get the content length from the header, if available
-    content_length = response.headers.get('Content-Length', None)
-    if content_length:
-        total_size = int(content_length)
-        logging.debug(f"Total file size (Content-Length): {total_size} bytes")
-    else:
-        # No Content-Length header, could be chunked transfer encoding
-        total_size = None
-        logging.debug("No Content-Length header. Assuming chunked transfer encoding.")
-    
-    downloaded_size = 0
-    next_progress = 0.1
-
-    # Fetch each chunk with a timeout
-    while True:
-        try:
-            chunk = await asyncio.wait_for(response.content.read(chunk_size), timeout=chunk_timeout)
-        except asyncio.TimeoutError:
-            logging.error(f"Chunk download timed out after {chunk_timeout} seconds")
-            raise
-
-        if not chunk:
-            # No more chunks left to download
-            logging.debug("No more chunks to download. Download finished.")
-            break
-
-        if download_type == 'batch_targets':
-            await tensor_download_event.wait()
-
-        content.write(chunk)
-        downloaded_size += len(chunk)
-        #logging.debug(f"Downloaded chunk size: {len(chunk)} bytes. Total downloaded: {downloaded_size} bytes")
-
-        # If we have the total size, we can log progress
-        if total_size:
-            progress = downloaded_size / total_size
-            if progress >= next_progress:
-                logging.info(f"Downloaded {int(progress * 100)}%")
-                next_progress += 0.1
-
-    content.seek(0)  # Reset the stream position
-
-    # Validate that the entire content was downloaded, if we know the total size
-    if total_size and downloaded_size != total_size:
-        logging.error(f"Downloaded size ({downloaded_size}) does not match expected size ({total_size}).")
-        raise Exception(f"Incomplete download: expected {total_size} bytes but got {downloaded_size} bytes")
-
-    end_time = time.time()
-    logging.info(f"Download completed successfully in {start_time - end_time:.2f} seconds. Total size: {downloaded_size} bytes")
-    return content
-
-async def initialize_tensor(tensor_name, plugin, sot_url, retries=3, backoff=1, chunk_timeout=5):
-    logging.debug(f"Starting initialization for tensor: {tensor_name}")
-
-    init_start_time = time.time()
-    valid_version = False
-    max_iterations = 10
-    iterations = 0
-    timeout = aiohttp.ClientTimeout(total=200)
-
-    while not valid_version and iterations < max_iterations:
-        iterations += 1
-        logging.debug(f"Initialization loop iteration {iterations}")
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    f"{sot_url}/current_timestamp",
-                    params={'tensor_name': tensor_name}
-                ) as response:
-                    response.raise_for_status()
-                    version_number = (await response.json())['version_number']
-                    logging.debug(f"Received version_number: {version_number}")
-        except aiohttp.ClientError as e:
-            logging.error(f"Error fetching current_timestamp: {e}")
-            await asyncio.sleep(backoff * iterations)
-            continue
-
-        time_until_next = time_until_next_version(plugin.tensor_version_interval)
-        logging.debug(f"Time until next version: {time_until_next} seconds")
-
-        if time_until_next < plugin.expected_worker_time:
-            logging.debug(f'Not enough time left until next version. Waiting for {time_until_next} seconds.')
-            await asyncio.sleep(time_until_next)
-        else:
-            valid_version = True
-
-    if not valid_version:
-        raise RuntimeError("initialize_tensor: failed to get a valid version")
-
-    for attempt in range(1, retries + 1):
-        try:
-            url = f"{sot_url}/latest_state"
-            logging.debug(f"Requesting tensor {tensor_name} from URL: {url}")
-            fetch_start_time = time.time()
-
-            # Use the modified download_file with download_type='tensor'
-            tensor = await download_file(url, tensor_name=tensor_name, download_type='tensor')
-            download_end_time = time.time()
-            logging.debug(f"Downloaded in {download_end_time - fetch_start_time:.2f} seconds")
-
-            model = plugin.model_adapter.tensor_to_model(tensor.detach(), None)
-            model.train()
-
-            return model, version_number
-
-        except asyncio.TimeoutError:
-            logging.error(f"Attempt {attempt}: Chunk download timed out.")
-        except aiohttp.ClientError as e:
-            logging.error(f"Attempt {attempt}: Failed to fetch tensor {tensor_name}: {e}")
-        if attempt < retries:
-            await asyncio.sleep(backoff * attempt)
-
-    raise RuntimeError(f"initialize_tensor: Failed to initialize tensor {tensor_name} after {retries} attempts")
-
 async def fetch_task(task_id, contract_index):
     task_tuple = await contracts[contract_index].functions.getTask(task_id).call()
     task = Task(*task_tuple)
@@ -697,8 +504,6 @@ async def main():
     asyncio.create_task(reclaim_stakes())
     
     last_loop_time = time.time()
-    
-    tensor_download_event.set()
 
     while True:
         # Schedule processing tasks

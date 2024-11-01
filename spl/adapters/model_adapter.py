@@ -3,18 +3,24 @@ import logging
 import torch
 import time
 from ..device import device
+from ..common import get_future_version_number, download_file
 import torch.nn.functional as F
 from .model_config import BaseModelConfig, TransformerModelConfig
 import torch.distributed as dist
 from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 import os
+import aiohttp
+import asyncio
 
 class ModelAdapter(ABC):
     def __init__(self, model_config: BaseModelConfig):
         self.model_config = model_config
     
     @abstractmethod
-    def train_task(self, model, inputs, targets, steps, *args, **kwargs):
+    async def train_task(
+        self, TENSOR_NAME, sot_url, tensor_version_interval, expected_worker_time,
+        inputs, targets, steps, max_lr, min_lr, T_0, weight_decay
+    ):
         pass
     
     @abstractmethod
@@ -75,8 +81,13 @@ class StandardModelAdapter(ModelAdapter):
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss
 
-    def train_task(self, model, inputs, targets, steps, max_lr, min_lr, T_0, weight_decay):
+    async def train_task(
+        self, TENSOR_NAME, sot_url, tensor_version_interval, expected_worker_time,
+        inputs, targets, steps, max_lr, min_lr, T_0, weight_decay
+    ):
         logging.info("Starting train_task")
+        
+        model, version_number = await self.initialize_tensor(TENSOR_NAME, sot_url, tensor_version_interval, expected_worker_time)
 
         start_time = time.time()
         inputs = inputs.to(device, non_blocking=True)
@@ -137,9 +148,77 @@ class StandardModelAdapter(ModelAdapter):
 
         logging.info(f"Model task completed. Loss: {first_loss:.4f}. Total time taken: {time.time() - start_time:.2f} seconds")
         logging.info(f'Updates: {updates}')
-        return updates, first_loss
+        return version_number, updates, first_loss
 
-    
+    async def initialize_tensor(
+        self, tensor_name, sot_url, tensor_version_interval,
+        expected_worker_time, retries=3, backoff=1, chunk_timeout=5
+    ):
+        logging.debug(f"Starting initialization for tensor: {tensor_name}")
+
+        init_start_time = time.time()
+        valid_version = False
+        max_iterations = 10
+        iterations = 0
+        timeout = aiohttp.ClientTimeout(total=200)
+
+        while not valid_version and iterations < max_iterations:
+            iterations += 1
+            logging.debug(f"Initialization loop iteration {iterations}")
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        f"{sot_url}/current_timestamp",
+                        params={'tensor_name': tensor_name}
+                    ) as response:
+                        response.raise_for_status()
+                        version_number = (await response.json())['version_number']
+                        logging.debug(f"Received version_number: {version_number}")
+            except aiohttp.ClientError as e:
+                logging.error(f"Error fetching current_timestamp: {e}")
+                await asyncio.sleep(backoff * iterations)
+                continue
+
+            def time_until_next_version(tensor_version_interval):
+                return get_future_version_number(tensor_version_interval) - time.time()
+
+            time_until_next = time_until_next_version(tensor_version_interval)
+            logging.debug(f"Time until next version: {time_until_next} seconds")
+
+            if time_until_next < expected_worker_time:
+                logging.debug(f'Not enough time left until next version. Waiting for {time_until_next} seconds.')
+                await asyncio.sleep(time_until_next)
+            else:
+                valid_version = True
+
+        if not valid_version:
+            raise RuntimeError("initialize_tensor: failed to get a valid version")
+
+        for attempt in range(1, retries + 1):
+            try:
+                url = f"{sot_url}/latest_state"
+                logging.debug(f"Requesting tensor {tensor_name} from URL: {url}")
+                fetch_start_time = time.time()
+
+                # Use the modified download_file with download_type='tensor'
+                tensor = await download_file(url, tensor_name=tensor_name, download_type='tensor')
+                download_end_time = time.time()
+                logging.debug(f"Downloaded in {download_end_time - fetch_start_time:.2f} seconds")
+
+                model = self.tensor_to_model(tensor.detach(), None)
+                model.train()
+
+                return model, version_number
+
+            except asyncio.TimeoutError:
+                logging.error(f"Attempt {attempt}: Chunk download timed out.")
+            except aiohttp.ClientError as e:
+                logging.error(f"Attempt {attempt}: Failed to fetch tensor {tensor_name}: {e}")
+            if attempt < retries:
+                await asyncio.sleep(backoff * attempt)
+
+        raise RuntimeError(f"initialize_tensor: Failed to initialize tensor {tensor_name} after {retries} attempts")
+
     def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
         model = torch.compile(model)
         _ = self.forward(model, self.get_dummy_input())
