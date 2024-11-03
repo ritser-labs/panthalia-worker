@@ -8,37 +8,37 @@ import time
 import requests
 import asyncio
 import json
-import importlib
 from functools import partial
+import hashlib
 
-# configure logging
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# plugin management variables
+# Plugin management variables
 global_plugin_dir = '/tmp/my_plugins'
-docker_plugin_dir = '/plugins'
+docker_plugin_dir = '/app/plugin_code'  # Updated to match Dockerfile
 server_script_name = 'server.py'
 server_script_host = os.path.join(global_plugin_dir, server_script_name)
-server_script_container = f"/app/{server_script_name}"
+server_script_container = f"{docker_plugin_dir}/{server_script_name}"
 
-# docker and server configuration
-
-DOCKER_IMAGE = "pytorch/pytorch:1.7.0-cuda11.0-cudnn8-devel"
+# Docker and server configuration
+DOCKER_IMAGE = "panthalia_plugin"  # Updated to custom image name
+DOCKERFILE_PATH = "Dockerfile"
 CONTAINER_NAME_TEMPLATE = "secure_plugin_container_{plugin_id}"
 HOST_PORT_BASE = 8000
 CONTAINER_PORT = 8000
 
-# security options
+# Security options
 security_options = [
     "no-new-privileges:true",
 ]
 
-# resource limits
+# Resource limits
 mem_limit = "512m"
 pids_limit = 100
 
-# initialize docker client
+# Initialize Docker client
 docker_client = docker.from_env()
 
 # Cache for last plugin
@@ -118,12 +118,19 @@ async def get_plugin(plugin_id, db_adapter):
         async with aiofiles.open(init_file_path, mode='w') as f:
             await f.write('# Init file for plugin package\n')
         logger.info(f"Created __init__.py at {init_file_path}")
+    
+    host_port = get_port(plugin_id)
 
     # Write the server script inside the plugin directory
-    await write_server_script(plugin_id, plugin_package_dir)
+    await write_server_script(
+        plugin_id, plugin_package_dir, host_port)
+
+    # Ensure the custom Docker image is built
+    await ensure_docker_image()
 
     # Set up Docker and PluginProxy
-    plugin_proxy = await setup_docker_container(plugin_id, plugin_package_dir)
+    plugin_proxy = await setup_docker_container(
+        plugin_id, plugin_package_dir, host_port)
     last_plugin_proxy = plugin_proxy
     last_plugin_id = plugin_id
     logger.info(f'Plugin "{plugin_id}" is set up and ready to use.')
@@ -146,7 +153,6 @@ def setup_dir():
     if not os.path.exists(tmp_dir):
         os.makedirs(tmp_dir)
         logger.info(f"Created temporary directory at {tmp_dir}")
-
 
 def create_subdirectory(path):
     """
@@ -199,7 +205,7 @@ def setup_plugin_files(plugin_package_dir):
         dst = os.path.join(plugin_package_dir, global_target)
         copy_if_missing(src, dst)
 
-async def write_server_script(plugin_id, plugin_package_dir):
+async def write_server_script(plugin_id, plugin_package_dir, host_port):
     """
     Generate and write the server.py script within the plugin's directory.
     """
@@ -213,11 +219,13 @@ import os
 import json
 import traceback
 
-# Adjust the plugin directory as needed
+# adjust the plugin directory as needed
 PLUGIN_DIR = '{docker_plugin_dir}'
 if PLUGIN_DIR not in sys.path:
     sys.path.append(PLUGIN_DIR)
 
+# set the current package for the plugin_code package context
+current_package = __package__
 exported_plugin = None
 
 async def handle(request):
@@ -242,21 +250,23 @@ async def handle(request):
 
 async def init_plugin():
     global exported_plugin
-    # Import the plugin
+    # import the plugin as a module within the plugin_code package
     try:
-        plugin_module = importlib.import_module('plugin_{plugin_id}')  # Plugin module name
+        plugin_module_name = f".plugin_{plugin_id}"
+        plugin_module = importlib.import_module(plugin_module_name, package=current_package)
         exported_plugin = getattr(plugin_module, 'exported_plugin')
         
-        # Define a basic ping function for status check
+        # define a basic ping function for status check
         def __ping__():
             return {{'status': 'ok'}}
 
-        # Attach the ping function to the plugin
+        # attach the ping function to the plugin
         setattr(exported_plugin, '__ping__', __ping__)
 
-        # Initialize the plugin environment if required
+        # initialize the plugin environment if required
         if hasattr(exported_plugin, 'model_adapter'):
             exported_plugin.model_adapter.initialize_environment()
+        print("Plugin loaded successfully.")
     except Exception as e:
         print(f"Failed to load plugin: {{e}}")
 
@@ -269,7 +279,7 @@ async def init_app():
     return app
 
 if __name__ == '__main__':
-    web.run_app(init_app(), host='0.0.0.0', port=8000)
+    web.run_app(init_app(), host='0.0.0.0', port={host_port})
 """.strip()
 
     server_script_path = os.path.join(plugin_package_dir, server_script_name)
@@ -277,13 +287,51 @@ if __name__ == '__main__':
         await f.write(server_script_content)
     logger.info(f"Generated server script at {server_script_path}")
 
-async def setup_docker_container(plugin_id, plugin_package_dir):
+async def ensure_docker_image():
+    """
+    Ensure the custom Docker image is built before running containers.
+    """
+    logger.info("Ensuring Docker image is built.")
+    try:
+        # Check if image exists
+        docker_client.images.get(DOCKER_IMAGE)
+        logger.info(f"Docker image '{DOCKER_IMAGE}' already exists.")
+    except docker.errors.ImageNotFound:
+        logger.info(f"Docker image '{DOCKER_IMAGE}' not found. Building the image.")
+        # Build the image
+        await build_image()
+
+async def build_image():
+    """
+    Build the custom Docker image using the Dockerfile.
+    """
+    logger.info(f"Building Docker image '{DOCKER_IMAGE}'. This may take a while...")
+    try:
+        # Use the Docker SDK to build the image
+        image, logs = docker_client.images.build(
+            path=".",  # Context is current directory
+            dockerfile=DOCKERFILE_PATH,
+            tag=DOCKER_IMAGE,
+            rm=True
+        )
+        for chunk in logs:
+            if 'stream' in chunk:
+                for line in chunk['stream'].splitlines():
+                    logger.debug(line)
+        logger.info(f"Docker image '{DOCKER_IMAGE}' built successfully.")
+    except docker.errors.BuildError as e:
+        logger.error(f"Failed to build Docker image: {e}")
+        raise
+    except docker.errors.APIError as e:
+        logger.error(f"Docker API error during image build: {e}")
+        raise
+
+async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
     container_name = CONTAINER_NAME_TEMPLATE.format(plugin_id=plugin_id)
-    host_port = HOST_PORT_BASE + int(plugin_id)
 
     server_url = f"http://localhost:{host_port}/execute"
     tmp_dir = "/tmp"
-    
+
     try:
         # Check if container exists
         container = docker_client.containers.get(container_name)
@@ -293,6 +341,7 @@ async def setup_docker_container(plugin_id, plugin_package_dir):
     except docker.errors.NotFound:
         logger.info(f"Creating and starting container {container_name}")
         try:
+            # Mount the plugin directory
             container = docker_client.containers.run(
                 DOCKER_IMAGE,
                 name=container_name,
@@ -302,16 +351,16 @@ async def setup_docker_container(plugin_id, plugin_package_dir):
                 mem_limit=mem_limit,
                 pids_limit=pids_limit,
                 volumes={
-                    plugin_package_dir: {'bind': docker_plugin_dir, 'mode': 'rw'},  # Make plugin directory writable
+                    plugin_package_dir: {'bind': docker_plugin_dir, 'mode': 'rw'},  # Mount dynamic code
                     tmp_dir: {'bind': tmp_dir, 'mode': 'rw'}  # Ensure tmp directory is writable
                 },
                 environment={
                     "TMPDIR": tmp_dir,
                     "PIP_NO_CACHE_DIR": "off",
-                    "HOME": tmp_dir  # **Added this line to set HOME to /tmp**
+                    "HOME": tmp_dir  # Set HOME to /tmp
                 },
-                command=f"/bin/bash -c 'ls {docker_plugin_dir} && cat {docker_plugin_dir}/requirements.txt && python -m pip install --upgrade pip && python -m pip install -r {docker_plugin_dir}/requirements.txt && python {docker_plugin_dir}/{server_script_name}'",
                 user="nobody"  # Running as non-root user
+                # No need to specify command as it's defined in the Dockerfile
             )
             logger.info(f"Container {container_name} started with ID: {container.id}")
         except docker.errors.DockerException as e:
@@ -328,30 +377,42 @@ async def setup_docker_container(plugin_id, plugin_package_dir):
     logger.info(f"Plugin proxy created for plugin '{plugin_id}' at {server_url}")
     return plugin_proxy
 
+def get_port(plugin_id):
+    """
+    Generate a unique port number for the given plugin_id.
+    """
+    try:
+        # Attempt to convert plugin_id to int
+        return HOST_PORT_BASE + int(plugin_id)
+    except ValueError:
+        # If plugin_id is not an int, generate a hash-based port
+        hash_object = hashlib.sha256(str(plugin_id).encode())
+        hash_int = int(hash_object.hexdigest(), 16)
+        return HOST_PORT_BASE + (hash_int % 1000)  # Ports 8000-8999
 
 def wait_for_server(url, timeout=30):
-    logger.info(f"waiting for server at {url} to be ready...")
+    logger.info(f"Waiting for server at {url} to be ready...")
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
             response = requests.post(url, json={'function': '__ping__'})
             if response.status_code == 200 and 'result' in response.json():
-                logger.info("server is up and running.")
+                logger.info("Server is up and running.")
                 return True
         except requests.exceptions.ConnectionError:
             pass
         except json.JSONDecodeError:
             pass
         time.sleep(1)
-    logger.error("server did not start within the timeout period.")
+    logger.error("Server did not start within the timeout period.")
     return False
 
 def show_container_logs(container):
     try:
         logs = container.logs().decode('utf-8')
-        logger.info(f"container logs for {container.name}:\n{logs}")
+        logger.info(f"Container logs for {container.name}:\n{logs}")
     except docker.errors.DockerException as e:
-        logger.error(f"failed to retrieve logs for container {container.name}: {e}")
+        logger.error(f"Failed to retrieve logs for container {container.name}: {e}")
 
 async def teardown_docker_container(plugin_id):
     container_name = CONTAINER_NAME_TEMPLATE.format(plugin_id=plugin_id)
@@ -359,8 +420,8 @@ async def teardown_docker_container(plugin_id):
         container = docker_client.containers.get(container_name)
         container.stop()
         container.remove()
-        logger.info(f"container {container_name} stopped and removed.")
+        logger.info(f"Container {container_name} stopped and removed.")
     except docker.errors.NotFound:
-        logger.warning(f"container {container_name} not found during teardown.")
+        logger.warning(f"Container {container_name} not found during teardown.")
     except docker.errors.DockerException as e:
-        logger.error(f"error during teardown of container {container_name}: {e}")
+        logger.error(f"Error during teardown of container {container_name}: {e}")
