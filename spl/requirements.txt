@@ -13,6 +13,7 @@ quart
 requests-toolbelt
 Hypercorn
 quart-cors
+aiohttp
 
 aiosqlite
 sqlalchemy
