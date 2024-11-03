@@ -190,7 +190,8 @@ def setup_plugin_files(plugin_package_dir):
         'datasets': 'datasets',
         'tokenizer.py': 'tokenizer.py',
         'device.py': 'device.py',
-        'common.py': 'common.py'
+        'common.py': 'common.py',
+        'requirements.txt': 'requirements.txt'
     }
     
     for local, global_target in resources.items():
@@ -279,14 +280,7 @@ if __name__ == '__main__':
 async def setup_docker_container(plugin_id, plugin_package_dir):
     container_name = CONTAINER_NAME_TEMPLATE.format(plugin_id=plugin_id)
     host_port = HOST_PORT_BASE + int(plugin_id)
-    
-    # Ensure requirements.txt exists in the plugin directory
-    req_file_path = os.path.join(plugin_package_dir, 'requirements.txt')
-    if not os.path.exists(req_file_path):
-        async with aiofiles.open(req_file_path, mode='w') as f:
-            await f.write("")  # Create empty file if missing
-        logger.info(f"Created empty requirements.txt at {req_file_path}")
-    
+
     server_url = f"http://localhost:{host_port}/execute"
     tmp_dir = "/tmp"
     
@@ -316,7 +310,7 @@ async def setup_docker_container(plugin_id, plugin_package_dir):
                     "PIP_NO_CACHE_DIR": "off",
                     "HOME": tmp_dir  # **Added this line to set HOME to /tmp**
                 },
-                command=f"/bin/bash -c 'python -m pip install --user --no-cache-dir -r {docker_plugin_dir}/requirements.txt && python {docker_plugin_dir}/{server_script_name}'",
+                command=f"/bin/bash -c 'ls {docker_plugin_dir} && cat {docker_plugin_dir}/requirements.txt && python -m pip install --upgrade pip && python -m pip install -r {docker_plugin_dir}/requirements.txt && python {docker_plugin_dir}/{server_script_name}'",
                 user="nobody"  # Running as non-root user
             )
             logger.info(f"Container {container_name} started with ID: {container.id}")
