@@ -50,6 +50,7 @@ class PluginProxy:
     """
     Proxy class to interact with the remote plugin server.
     Supports recursive access to child objects by managing object IDs.
+    Handles coroutine functions by returning awaitable wrappers.
     """
     def __init__(self, host='localhost', port=HOST_PORT_BASE, object_id=None):
         self.__dict__['host'] = host
@@ -95,30 +96,64 @@ class PluginProxy:
                 raise Exception(result['error'])
             return result.get('result')
         except requests.exceptions.RequestException as e:
-            # added response details here
-            logger.error(f"Error during '{action}': {e}, response status: {response.status_code}, response text: {response.text}")
+            # Added response details here
+            try:
+                status_code = response.status_code
+                response_text = response.text
+            except:
+                status_code = 'No Response'
+                response_text = 'No Response'
+            logger.error(f"Error during '{action}': {e}, response status: {status_code}, response text: {response_text}")
             raise
 
     def __getattr__(self, name):
         """
         Handle dynamic attribute access and method calls.
         If the attribute is a method, return a callable that invokes the remote method.
+        If the attribute is an async method, return an awaitable coroutine.
         If the attribute is an object, return a new PluginProxy representing the child object.
+        If the attribute is a simple value, return it directly.
         """
-        # Attempt to get the attribute to determine if it's a method or an object/property
         try:
             attr = self.call_remote('get_attribute', attribute=name)
-            if isinstance(attr, dict) and attr.get('is_callable'):
-                # It's a callable method; return a callable proxy
-                def method(*args, **kwargs):
-                    return self.call_remote('call_function', function=name, args=args, kwargs=kwargs)
-                return method
-            elif isinstance(attr, dict) and 'object_id' in attr:
-                # It's an object; return a new PluginProxy
-                return PluginProxy(host=self.host, port=self.port, object_id=attr['object_id'])
+            if isinstance(attr, dict):
+                if attr.get('is_callable'):
+                    if attr.get('is_async'):
+                        # Return an async wrapper
+                        async def async_method(*args, **kwargs):
+                            # Use a separate thread to perform the blocking HTTP request
+                            loop = asyncio.get_event_loop()
+                            result = await loop.run_in_executor(
+                                None,
+                                partial(
+                                    self.call_remote,
+                                    'call_function',
+                                    function=name,
+                                    args=args,
+                                    kwargs=kwargs
+                                )
+                            )
+                            return result
+                        return async_method
+                    else:
+                        # Return a synchronous callable
+                        def method(*args, **kwargs):
+                            return self.call_remote('call_function', function=name, args=args, kwargs=kwargs)
+                        return method
+                elif 'object_id' in attr:
+                    # Return a new PluginProxy for the nested object
+                    return PluginProxy(host=self.host, port=self.port, object_id=attr['object_id'])
+                elif 'value' in attr:
+                    # Return the attribute's value directly
+                    return attr['value']
+                else:
+                    # Unexpected format
+                    logger.error(f"Unexpected attribute format for '{name}': {attr}")
+                    raise Exception(f"Unexpected attribute format for '{name}'")
             else:
-                # It's a property; return its value
-                return attr
+                # Unexpected format
+                logger.error(f"Unexpected attribute response for '{name}': {attr}")
+                raise Exception(f"Unexpected attribute response for '{name}'")
         except Exception as e:
             logger.error(f"Error accessing attribute '{name}': {e}")
             raise
@@ -269,7 +304,7 @@ def setup_plugin_files(plugin_package_dir):
 async def write_server_script(plugin_id, plugin_package_dir, host_port):
     """
     Generate and write the server.py script within the plugin's directory.
-    Enhanced to handle object references for recursive proxying.
+    Enhanced to handle object references for recursive proxying and coroutine functions.
     """
     server_script_content = f'''
 import asyncio
@@ -345,7 +380,10 @@ async def handle():
             if not callable(func):
                 return jsonify(error=f'{{func_name}} is not callable'), 400
 
-            result = func(*args, **kwargs)
+            if asyncio.iscoroutinefunction(func):
+                result = await func(*args, **kwargs)  # Await coroutine functions
+            else:
+                result = func(*args, **kwargs)
 
             # If the result is an object, register it and return its object_id
             if isinstance(result, (int, float, str, bool, list, dict, type(None))):
@@ -360,15 +398,19 @@ async def handle():
             if attr is None:
                 return jsonify(error=f'Attribute {{attr_name}} not found'), 404
             
-            # If the attribute is callable, indicate it
+            # If the attribute is callable, indicate it and if it's a coroutine
+            response = {{'is_callable': callable(attr)}}
             if callable(attr):
-                return jsonify(result={{'is_callable': True}})
-            elif isinstance(attr, (int, float, str, bool, list, dict, type(None))):
-                return jsonify(result=attr)
-            else:
+                response['is_async'] = asyncio.iscoroutinefunction(attr)
+            
+            if isinstance(attr, (int, float, str, bool, list, dict, type(None))):
+                response['value'] = attr
+            elif not callable(attr):
                 # If it's an object, register it and return its object_id
                 new_object_id = register_object(attr)
-                return jsonify(result={{'object_id': new_object_id}})
+                response['object_id'] = new_object_id
+            
+            return jsonify(result=response)
         
         elif action == 'set_attribute':
             attr_name = data['attribute']
@@ -400,12 +442,12 @@ async def init_plugin():
         exported_plugin = getattr(plugin_module, 'exported_plugin')
         
         # Define a basic ping function for status check
-        def __ping__():
+        async def __ping__():
             return {{'status': 'ok'}}
-
+        
         # Attach the ping function to the plugin
         setattr(exported_plugin, '__ping__', __ping__)
-
+        
         # Initialize the plugin environment if required
         if hasattr(exported_plugin, 'model_adapter'):
             exported_plugin.model_adapter.initialize_environment()
