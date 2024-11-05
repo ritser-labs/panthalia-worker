@@ -13,7 +13,7 @@ import hashlib
 import threading
 
 # Configure logging
-#logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Plugin management variables
@@ -47,7 +47,7 @@ last_plugin_proxy = None
 
 class PluginProxy:
     def __init__(self, host='localhost', port=HOST_PORT_BASE):
-        self.url = f"http://{host}:{port}/execute"
+        self.__dict__['url'] = f"http://{host}:{port}/execute"
 
     def serialize_data(self, data):
         try:
@@ -63,24 +63,43 @@ class PluginProxy:
             logger.error(f"deserialization error: {e}")
             raise
 
-    def call_function(self, function_name, *args, **kwargs):
-        payload = {
-            'function': function_name,
-            'args': args,
-            'kwargs': kwargs
-        }
+    def call_remote(self, action, **kwargs):
+        payload = {'action': action}
+        payload.update(kwargs)
         try:
             response = requests.post(self.url, json=payload)
             response.raise_for_status()
             return self.deserialize_data(response.text)
         except requests.exceptions.RequestException as e:
-            logger.error(f"error calling function {function_name}: {e}")
+            logger.error(f"error during '{action}': {e}")
             raise
 
     def __getattr__(self, name):
-        def wrapper(*args, **kwargs):
-            return self.call_function(name, *args, **kwargs)
-        return wrapper
+        """
+        Handle dynamic attribute access and method calls.
+        """
+        def method(*args, **kwargs):
+            return self.call_remote('call_function', function=name, args=args, kwargs=kwargs)
+
+        # To check if the attribute is a method or a property, you might need additional logic.
+        # For simplicity, we'll assume that if it's called, it's a method; otherwise, it's a property.
+        # Alternatively, you can implement a separate endpoint to list available attributes.
+        return method
+
+    def __getattribute__(self, name):
+        # Handle internal attributes normally
+        if name in ('url', 'serialize_data', 'deserialize_data', 'call_remote', '__dict__', '__class__'):
+            return super().__getattribute__(name)
+        else:
+            # Treat as attribute access
+            return self.call_remote('get_attribute', attribute=name).get('result')
+
+    def __setattr__(self, name, value):
+        if name in ('url', 'serialize_data', 'deserialize_data', 'call_remote', '__dict__', '__class__'):
+            super().__setattr__(name, value)
+        else:
+            # Treat as attribute setting
+            self.call_remote('set_attribute', attribute=name, value=value)
 
 async def get_plugin(plugin_id, db_adapter):
     """
@@ -218,12 +237,12 @@ import json
 import traceback
 from quart import Quart, jsonify, request
 
-# adjust the plugin directory as needed
+# Adjust the plugin directory as needed
 PLUGIN_DIR = '{docker_plugin_dir}'
 if PLUGIN_DIR not in sys.path:
     sys.path.append(PLUGIN_DIR)
 
-# set the current package for the plugin_code package context
+# Set the current package for the plugin_code package context
 current_package = __package__
 exported_plugin = None
 
@@ -233,39 +252,63 @@ app = Quart(__name__)
 async def handle():
     try:
         data = await request.get_json()
-        func_name = data['function']
-        args = data.get('args', [])
-        kwargs = data.get('kwargs', {{}})
-        
+        action = data.get('action')
+
         if not exported_plugin:
             return jsonify(error='Plugin not loaded'), 500
-        
-        func = getattr(exported_plugin, func_name, None)
-        if not func:
-            return jsonify(error=f'Function {{func_name}} not found'), 404
-        
-        result = func(*args, **kwargs)
-        return jsonify(result=result)
+
+        if action == 'call_function':
+            func_name = data['function']
+            args = data.get('args', [])
+            kwargs = data.get('kwargs', {{}})
+            
+            func = getattr(exported_plugin, func_name, None)
+            if not func:
+                return jsonify(error=f'Function {{func_name}} not found'), 404
+            
+            if not callable(func):
+                return jsonify(error=f'{{func_name}} is not callable'), 400
+
+            result = func(*args, **kwargs)
+            return jsonify(result=result)
+
+        elif action == 'get_attribute':
+            attr_name = data['attribute']
+            attr = getattr(exported_plugin, attr_name, None)
+            if attr is None:
+                return jsonify(error=f'Attribute {{attr_name}} not found'), 404
+            # Handle serializing complex objects if necessary
+            return jsonify(result=attr)
+
+        elif action == 'set_attribute':
+            attr_name = data['attribute']
+            value = data['value']
+            setattr(exported_plugin, attr_name, value)
+            return jsonify(result='Attribute set successfully')
+
+        else:
+            return jsonify(error='Invalid action'), 400
+
     except Exception as e:
         traceback.print_exc()
         return jsonify(error=str(e)), 500
 
 async def init_plugin():
     global exported_plugin
-    # import the plugin as a module within the plugin_code package
+    # Import the plugin as a module within the plugin_code package
     try:
         plugin_module_name = f".plugin_{plugin_id}"
         plugin_module = importlib.import_module(plugin_module_name, package=current_package)
         exported_plugin = getattr(plugin_module, 'exported_plugin')
         
-        # define a basic ping function for status check
+        # Define a basic ping function for status check
         def __ping__():
             return {{'status': 'ok'}}
 
-        # attach the ping function to the plugin
+        # Attach the ping function to the plugin
         setattr(exported_plugin, '__ping__', __ping__)
 
-        # initialize the plugin environment if required
+        # Initialize the plugin environment if required
         if hasattr(exported_plugin, 'model_adapter'):
             exported_plugin.model_adapter.initialize_environment()
         print("Plugin loaded successfully.")
@@ -279,8 +322,7 @@ async def startup():
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8001)
 """.strip()
-
-
+    
     server_script_path = os.path.join(plugin_package_dir, server_script_name)
     async with aiofiles.open(server_script_path, mode='w') as f:
         await f.write(server_script_content)
@@ -394,14 +436,15 @@ def wait_for_server(url, timeout=30):
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
-            response = requests.post(url, json={'function': '__ping__'})
-            if response.status_code == 200 and 'result' in response.json():
-                logger.info("Server is up and running.")
-                return True
-        except requests.exceptions.ConnectionError:
-            pass
-        except json.JSONDecodeError:
-            pass
+            # Ping the server by calling the __ping__ function
+            response = requests.post(url, json={'action': 'call_function', 'function': '__ping__'})
+            if response.status_code == 200:
+                result = response.json().get('result')
+                if result and result.get('status') == 'ok':
+                    logger.info("Server is up and running.")
+                    return True
+        except (requests.exceptions.ConnectionError, json.JSONDecodeError) as e:
+            logger.debug(f"Ping attempt failed: {e}")
         time.sleep(1)
     logger.error("Server did not start within the timeout period.")
     return False
