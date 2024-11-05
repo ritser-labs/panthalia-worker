@@ -95,7 +95,8 @@ class PluginProxy:
                 raise Exception(result['error'])
             return result.get('result')
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error during '{action}': {e}")
+            # added response details here
+            logger.error(f"Error during '{action}': {e}, response status: {response.status_code}, response text: {response.text}")
             raise
 
     def __getattr__(self, name):
@@ -130,6 +131,17 @@ class PluginProxy:
             super().__setattr__(name, value)
         else:
             self.call_remote('set_attribute', attribute=name, value=value)
+
+    def __del__(self):
+        """
+        Destructor to release the object_id on the server to prevent memory leaks.
+        """
+        if self.object_id:
+            try:
+                self.call_remote('release_object')
+                logger.info(f"Released object_id {self.object_id} on server.")
+            except Exception as e:
+                logger.error(f"Failed to release object_id {self.object_id}: {e}")
 
 async def get_plugin(plugin_id, db_adapter):
     """
@@ -266,6 +278,7 @@ import sys
 import os
 import json
 import traceback
+import logging
 from quart import Quart, jsonify, request
 import uuid  # Import uuid for object ID generation
 
@@ -277,6 +290,8 @@ if PLUGIN_DIR not in sys.path:
 # Set the current package for the plugin_code package context
 current_package = __package__
 exported_plugin = None
+
+logger = logging.getLogger(__name__)
 
 app = Quart(__name__)
 
@@ -291,6 +306,16 @@ def register_object(obj):
     object_registry[object_id] = obj
     return object_id
 
+def unregister_object(object_id):
+    """
+    Unregister an object by its ID.
+    """
+    if object_id in object_registry:
+        del object_registry[object_id]
+        logger.info(f"Unregistered object_id {{object_id}}.")
+    else:
+        logger.warning(f"Attempted to unregister non-existent object_id {{object_id}}.")
+
 @app.route('/execute', methods=['POST'])
 async def handle():
     try:
@@ -298,10 +323,10 @@ async def handle():
         action = data.get('action')
         object_id = data.get('object_id', None)
 
-        if not exported_plugin:
+        if not exported_plugin and action != 'release_object':
             return jsonify(error='Plugin not loaded'), 500
 
-        if object_id:
+        if object_id and action != 'release_object':
             target = object_registry.get(object_id, None)
             if not target:
                 return jsonify(error=f'Invalid object_id: {{object_id}}'), 404
@@ -351,6 +376,14 @@ async def handle():
             setattr(target, attr_name, value)
             return jsonify(result='Attribute set successfully')
         
+        elif action == 'release_object':
+            obj_id = data.get('object_id')
+            if obj_id:
+                unregister_object(obj_id)
+                return jsonify(result='Object released successfully')
+            else:
+                return jsonify(error='No object_id provided'), 400
+
         else:
             return jsonify(error='Invalid action'), 400
 
@@ -387,7 +420,7 @@ async def startup():
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8001)
 '''.strip()
-
+    
     server_script_path = os.path.join(plugin_package_dir, server_script_name)
     async with aiofiles.open(server_script_path, mode='w') as f:
         await f.write(server_script_content)
@@ -441,6 +474,7 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
     try:
         # Check if container exists
         container = docker_client.containers.get(container_name)
+        logger.info(f"Container {container_name} already exists.")
         if container.status != 'running':
             container.start()
             logger.info(f"Started existing container {container_name}")
