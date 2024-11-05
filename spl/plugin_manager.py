@@ -11,6 +11,7 @@ import json
 from functools import partial
 import hashlib
 import threading
+import uuid  # Added for unique object IDs
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -46,59 +47,88 @@ last_plugin_id = None
 last_plugin_proxy = None
 
 class PluginProxy:
-    def __init__(self, host='localhost', port=HOST_PORT_BASE):
-        self.__dict__['url'] = f"http://{host}:{port}/execute"
+    """
+    Proxy class to interact with the remote plugin server.
+    Supports recursive access to child objects by managing object IDs.
+    """
+    def __init__(self, host='localhost', port=HOST_PORT_BASE, object_id=None):
+        self.__dict__['host'] = host
+        self.__dict__['port'] = port
+        self.__dict__['object_id'] = object_id
+        self.__dict__['base_url'] = f"http://{host}:{port}/execute"
 
     def serialize_data(self, data):
         try:
             return json.dumps(data)
         except (TypeError, OverflowError) as e:
-            logger.error(f"serialization error: {e}")
+            logger.error(f"Serialization error: {e}")
             raise
 
     def deserialize_data(self, data):
         try:
             return json.loads(data)
         except json.JSONDecodeError as e:
-            logger.error(f"deserialization error: {e}")
+            logger.error(f"Deserialization error: {e}")
             raise
 
-    def call_remote(self, action, **kwargs):
+    def call_remote(self, action, function=None, args=None, kwargs=None, attribute=None, value=None):
         payload = {'action': action}
-        payload.update(kwargs)
+        if self.object_id:
+            payload['object_id'] = self.object_id
+        if function:
+            payload['function'] = function
+        if args:
+            payload['args'] = args
+        if kwargs:
+            payload['kwargs'] = kwargs
+        if attribute:
+            payload['attribute'] = attribute
+        if value is not None:
+            payload['value'] = value
+
         try:
-            response = requests.post(self.url, json=payload)
+            response = requests.post(self.base_url, json=payload)
             response.raise_for_status()
-            return self.deserialize_data(response.text)
+            result = self.deserialize_data(response.text)
+            if 'error' in result:
+                logger.error(f"Error during '{action}': {result['error']}")
+                raise Exception(result['error'])
+            return result.get('result')
         except requests.exceptions.RequestException as e:
-            logger.error(f"error during '{action}': {e}")
+            logger.error(f"Error during '{action}': {e}")
             raise
 
     def __getattr__(self, name):
         """
         Handle dynamic attribute access and method calls.
+        If the attribute is a method, return a callable that invokes the remote method.
+        If the attribute is an object, return a new PluginProxy representing the child object.
         """
-        def method(*args, **kwargs):
-            return self.call_remote('call_function', function=name, args=args, kwargs=kwargs)
-
-        # To check if the attribute is a method or a property, you might need additional logic.
-        # For simplicity, we'll assume that if it's called, it's a method; otherwise, it's a property.
-        # Alternatively, you can implement a separate endpoint to list available attributes.
-        return method
-
-    def __getattribute__(self, name):
-        # Handle internal attributes normally
-        if name in ('url', 'serialize_data', 'deserialize_data', 'call_remote', '__dict__', '__class__'):
-            return super().__getattribute__(name)
-        else:
-            # Treat as attribute access
-            return self.call_remote('get_attribute', attribute=name).get('result')
+        # Attempt to get the attribute to determine if it's a method or an object/property
+        try:
+            attr = self.call_remote('get_attribute', attribute=name)
+            if isinstance(attr, dict) and attr.get('is_callable'):
+                # It's a callable method; return a callable proxy
+                def method(*args, **kwargs):
+                    return self.call_remote('call_function', function=name, args=args, kwargs=kwargs)
+                return method
+            elif isinstance(attr, dict) and 'object_id' in attr:
+                # It's an object; return a new PluginProxy
+                return PluginProxy(host=self.host, port=self.port, object_id=attr['object_id'])
+            else:
+                # It's a property; return its value
+                return attr
+        except Exception as e:
+            logger.error(f"Error accessing attribute '{name}': {e}")
+            raise
 
     def __setattr__(self, name, value):
-        if name in ('url', 'serialize_data', 'deserialize_data', 'call_remote', '__dict__', '__class__'):
+        """
+        Handle setting attributes on the remote object.
+        """
+        if name in ('host', 'port', 'object_id', 'base_url'):
             super().__setattr__(name, value)
         else:
-            # Treat as attribute setting
             self.call_remote('set_attribute', attribute=name, value=value)
 
 async def get_plugin(plugin_id, db_adapter):
@@ -137,7 +167,7 @@ async def get_plugin(plugin_id, db_adapter):
         async with aiofiles.open(init_file_path, mode='w') as f:
             await f.write('# Init file for plugin package\n')
         logger.info(f"Created __init__.py at {init_file_path}")
-    
+
     host_port = get_port(plugin_id)
 
     # Write the server script inside the plugin directory
@@ -227,8 +257,9 @@ def setup_plugin_files(plugin_package_dir):
 async def write_server_script(plugin_id, plugin_package_dir, host_port):
     """
     Generate and write the server.py script within the plugin's directory.
+    Enhanced to handle object references for recursive proxying.
     """
-    server_script_content = f"""
+    server_script_content = f'''
 import asyncio
 import importlib
 import sys
@@ -236,9 +267,10 @@ import os
 import json
 import traceback
 from quart import Quart, jsonify, request
+import uuid  # Import uuid for object ID generation
 
 # Adjust the plugin directory as needed
-PLUGIN_DIR = '{docker_plugin_dir}'
+PLUGIN_DIR = "{docker_plugin_dir}"
 if PLUGIN_DIR not in sys.path:
     sys.path.append(PLUGIN_DIR)
 
@@ -248,21 +280,40 @@ exported_plugin = None
 
 app = Quart(__name__)
 
+# Object registry to manage object references
+object_registry = {{}}
+
+def register_object(obj):
+    """
+    Register an object and return its unique ID.
+    """
+    object_id = str(uuid.uuid4())
+    object_registry[object_id] = obj
+    return object_id
+
 @app.route('/execute', methods=['POST'])
 async def handle():
     try:
         data = await request.get_json()
         action = data.get('action')
+        object_id = data.get('object_id', None)
 
         if not exported_plugin:
             return jsonify(error='Plugin not loaded'), 500
+
+        if object_id:
+            target = object_registry.get(object_id, None)
+            if not target:
+                return jsonify(error=f'Invalid object_id: {{object_id}}'), 404
+        else:
+            target = exported_plugin
 
         if action == 'call_function':
             func_name = data['function']
             args = data.get('args', [])
             kwargs = data.get('kwargs', {{}})
             
-            func = getattr(exported_plugin, func_name, None)
+            func = getattr(target, func_name, None)
             if not func:
                 return jsonify(error=f'Function {{func_name}} not found'), 404
             
@@ -270,22 +321,36 @@ async def handle():
                 return jsonify(error=f'{{func_name}} is not callable'), 400
 
             result = func(*args, **kwargs)
-            return jsonify(result=result)
 
+            # If the result is an object, register it and return its object_id
+            if isinstance(result, (int, float, str, bool, list, dict, type(None))):
+                return jsonify(result=result)
+            else:
+                new_object_id = register_object(result)
+                return jsonify(result={{'object_id': new_object_id}})
+        
         elif action == 'get_attribute':
             attr_name = data['attribute']
-            attr = getattr(exported_plugin, attr_name, None)
+            attr = getattr(target, attr_name, None)
             if attr is None:
                 return jsonify(error=f'Attribute {{attr_name}} not found'), 404
-            # Handle serializing complex objects if necessary
-            return jsonify(result=attr)
-
+            
+            # If the attribute is callable, indicate it
+            if callable(attr):
+                return jsonify(result={{'is_callable': True}})
+            elif isinstance(attr, (int, float, str, bool, list, dict, type(None))):
+                return jsonify(result=attr)
+            else:
+                # If it's an object, register it and return its object_id
+                new_object_id = register_object(attr)
+                return jsonify(result={{'object_id': new_object_id}})
+        
         elif action == 'set_attribute':
             attr_name = data['attribute']
             value = data['value']
-            setattr(exported_plugin, attr_name, value)
+            setattr(target, attr_name, value)
             return jsonify(result='Attribute set successfully')
-
+        
         else:
             return jsonify(error='Invalid action'), 400
 
@@ -321,8 +386,8 @@ async def startup():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8001)
-""".strip()
-    
+'''.strip()
+
     server_script_path = os.path.join(plugin_package_dir, server_script_name)
     async with aiofiles.open(server_script_path, mode='w') as f:
         await f.write(server_script_content)
@@ -440,7 +505,7 @@ def wait_for_server(url, timeout=30):
             response = requests.post(url, json={'action': 'call_function', 'function': '__ping__'})
             if response.status_code == 200:
                 result = response.json().get('result')
-                if result and result.get('status') == 'ok':
+                if isinstance(result, dict) and result.get('status') == 'ok':
                     logger.info("Server is up and running.")
                     return True
         except (requests.exceptions.ConnectionError, json.JSONDecodeError) as e:
