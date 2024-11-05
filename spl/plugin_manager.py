@@ -10,9 +10,10 @@ import asyncio
 import json
 from functools import partial
 import hashlib
+import threading
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+#logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Plugin management variables
@@ -27,7 +28,6 @@ DOCKER_IMAGE = "panthalia_plugin"  # Updated to custom image name
 DOCKERFILE_PATH = "Dockerfile"
 CONTAINER_NAME_TEMPLATE = "secure_plugin_container_{plugin_id}"
 HOST_PORT_BASE = 8000
-CONTAINER_PORT = 8000
 
 # Security options
 security_options = [
@@ -210,14 +210,13 @@ async def write_server_script(plugin_id, plugin_package_dir, host_port):
     Generate and write the server.py script within the plugin's directory.
     """
     server_script_content = f"""
-import aiohttp
-from aiohttp import web
 import asyncio
 import importlib
 import sys
 import os
 import json
 import traceback
+from quart import Quart, jsonify, request
 
 # adjust the plugin directory as needed
 PLUGIN_DIR = '{docker_plugin_dir}'
@@ -228,25 +227,28 @@ if PLUGIN_DIR not in sys.path:
 current_package = __package__
 exported_plugin = None
 
-async def handle(request):
+app = Quart(__name__)
+
+@app.route('/execute', methods=['POST'])
+async def handle():
     try:
-        data = await request.json()
+        data = await request.get_json()
         func_name = data['function']
         args = data.get('args', [])
         kwargs = data.get('kwargs', {{}})
         
         if not exported_plugin:
-            return web.json_response({{'error': 'Plugin not loaded'}}, status=500)
+            return jsonify(error='Plugin not loaded'), 500
         
         func = getattr(exported_plugin, func_name, None)
         if not func:
-            return web.json_response({{'error': f'Function {{func_name}} not found'}}, status=404)
+            return jsonify(error=f'Function {{func_name}} not found'), 404
         
         result = func(*args, **kwargs)
-        return web.json_response({{'result': result}})
+        return jsonify(result=result)
     except Exception as e:
         traceback.print_exc()
-        return web.json_response({{'error': str(e)}}, status=500)
+        return jsonify(error=str(e)), 500
 
 async def init_plugin():
     global exported_plugin
@@ -270,17 +272,14 @@ async def init_plugin():
     except Exception as e:
         print(f"Failed to load plugin: {{e}}")
 
-async def init_app():
-    app = web.Application()
-    app.add_routes([
-        web.post('/execute', handle)
-    ])
+@app.before_serving
+async def startup():
     await init_plugin()
-    return app
 
 if __name__ == '__main__':
-    web.run_app(init_app(), host='0.0.0.0', port={host_port})
+    app.run(host='0.0.0.0', port=8001)
 """.strip()
+
 
     server_script_path = os.path.join(plugin_package_dir, server_script_name)
     async with aiofiles.open(server_script_path, mode='w') as f:
@@ -347,21 +346,21 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
                 name=container_name,
                 detach=True,
                 security_opt=security_options,
-                network_mode="host",
+                ports={'8001/tcp': host_port},  # Map container's 8001 to host_port
                 mem_limit=mem_limit,
                 pids_limit=pids_limit,
                 volumes={
-                    plugin_package_dir: {'bind': docker_plugin_dir, 'mode': 'rw'},  # Mount dynamic code
-                    tmp_dir: {'bind': tmp_dir, 'mode': 'rw'}  # Ensure tmp directory is writable
+                    plugin_package_dir: {'bind': docker_plugin_dir, 'mode': 'rw'},
+                    tmp_dir: {'bind': tmp_dir, 'mode': 'rw'}
                 },
                 environment={
                     "TMPDIR": tmp_dir,
                     "PIP_NO_CACHE_DIR": "off",
-                    "HOME": tmp_dir  # Set HOME to /tmp
+                    "HOME": tmp_dir
                 },
-                user="nobody"  # Running as non-root user
-                # No need to specify command as it's defined in the Dockerfile
+                user="nobody"
             )
+
             logger.info(f"Container {container_name} started with ID: {container.id}")
         except docker.errors.DockerException as e:
             logger.error(f"Failed to start Docker container: {e}")
