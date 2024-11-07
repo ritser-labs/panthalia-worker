@@ -18,7 +18,7 @@ RUN python3 -m pip install --upgrade pip && \
     -r requirements.txt
 
 # Expose the server port
-EXPOSE 8000
+EXPOSE 8001
 
 # Define the command to run the server script
 CMD ["python", "-m", "plugin_code.server"]
