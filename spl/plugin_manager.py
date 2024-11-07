@@ -90,13 +90,13 @@ class PluginProxy:
 
         try:
             response = requests.post(self.base_url, json=payload)
-            response.raise_for_status()
             result = self.deserialize_data(response.text)
             if 'error' in result:
-                logger.error(f"Error during '{action}' for '{function}': {result['error']}")
                 if result['error'] == 'StopAsyncIteration':
                     raise StopAsyncIteration
+                logger.error(f"Error during '{action}' for '{function}': {result['error']}")
                 raise Exception(result['error'])
+            response.raise_for_status()
             return result.get('result')
         except requests.exceptions.RequestException as e:
             # Added response details here
@@ -328,7 +328,7 @@ if PLUGIN_DIR not in sys.path:
     sys.path.append(PLUGIN_DIR)
 
 # Set the current package for the plugin_code package context
-current_package = '{plugin_package_name}'
+current_package = __package__
 exported_plugin = None
 
 logger = logging.getLogger(__name__)
@@ -475,13 +475,17 @@ async def startup():
     await init_plugin()
 
 if __name__ == '__main__':
-    import uvicorn
-    uvicorn.run(
-        'server:app',
+    from uvicorn import Config, Server
+    loop = asyncio.new_event_loop()
+    config = Config(
+        app=app,
         host='0.0.0.0',
         port={host_port},
-        log_level='info'
+        log_level='info',
+        loop=loop
     )
+    server = Server(config)
+    loop.run_until_complete(server.serve())
 '''.strip()
     
     server_script_path = os.path.join(plugin_package_dir, server_script_name)

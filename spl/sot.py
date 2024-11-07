@@ -271,7 +271,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         
         plugin.model_adapter.initialize_environment('gloo')
         await initialize_all_tensors()
-        plugin.dataset.initialize_dataset()
+        await plugin.dataset.initialize_dataset()
         logging.info(f'Loading initial batches for service')
 
 

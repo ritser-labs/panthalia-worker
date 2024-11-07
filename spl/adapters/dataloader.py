@@ -221,7 +221,7 @@ class LanguageDataLoader:
             self.executor, _tokenize_and_split_sync_batch, text, max_seq_len, self.model_config.tokenizer
         )
 
-    def initialize_dataset(self):
+    async def initialize_dataset(self):
         """
         Initializes the dataset and sets up the executor for processing.
         To be implemented by subclasses.
@@ -318,7 +318,7 @@ class ShakespeareDataLoader(LanguageDataLoader):
         self.block_size = block_size
         super().__init__(model_config, buffer_size, max_seq_len, batch_size)
 
-    def init_dataset(self):
+    async def init_dataset(self):
         """
         ShakespeareDataLoader does not use a streaming dataset.
         Initialization is handled differently.
@@ -348,7 +348,7 @@ class LowercaseAlphabetDataLoader(LanguageDataLoader):
         self.alphabet = list('abcdefghijklmnopqrstuvwxyz')
         super().__init__(model_config, buffer_size, max_seq_len, batch_size)
 
-    def init_dataset(self):
+    async def init_dataset(self):
         """
         LowercaseAlphabetDataLoader does not use an external dataset.
         Initialization is not required.
