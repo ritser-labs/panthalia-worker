@@ -92,7 +92,7 @@ class PluginProxy:
             response.raise_for_status()
             result = self.deserialize_data(response.text)
             if 'error' in result:
-                logger.error(f"Error during '{action}': {result['error']}")
+                logger.error(f"Error during '{action}' for '{function}': {result['error']}")
                 raise Exception(result['error'])
             return result.get('result')
         except requests.exceptions.RequestException as e:
@@ -433,6 +433,10 @@ async def handle():
         traceback.print_exc()
         return jsonify(error=str(e)), 500
 
+@app.route('/health', methods=['GET'])
+async def health_check():
+    return jsonify(status='ok')
+
 async def init_plugin():
     global exported_plugin
     # Import the plugin as a module within the plugin_code package
@@ -460,7 +464,13 @@ async def startup():
     await init_plugin()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8001)
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
+        
+    config = Config()
+    config.bind = ['0.0.0.0:8001']
+    config.loglevel = 'info'
+    asyncio.run(serve(app, config))
 '''.strip()
     
     server_script_path = os.path.join(plugin_package_dir, server_script_name)
@@ -579,8 +589,10 @@ def wait_for_server(url, timeout=30):
         try:
             # Ping the server by calling the __ping__ function
             response = requests.post(url, json={'action': 'call_function', 'function': '__ping__'})
+            logger.info(f"Server response: {response.text}")
             if response.status_code == 200:
                 result = response.json().get('result')
+                logger.info(f'wait_for_server response: {result}')
                 if isinstance(result, dict) and result.get('status') == 'ok':
                     logger.info("Server is up and running.")
                     return True
