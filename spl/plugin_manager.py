@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 # Plugin management variables
 global_plugin_dir = '/tmp/my_plugins'
-docker_plugin_dir = '/app/plugin_code'  # Updated to match Dockerfile
+plugin_package_name = 'plugin_code'
+docker_plugin_dir = f'/app/{plugin_package_name}'  # Updated to match Dockerfile
 server_script_name = 'server.py'
 server_script_host = os.path.join(global_plugin_dir, server_script_name)
 server_script_container = f"{docker_plugin_dir}/{server_script_name}"
@@ -307,6 +308,7 @@ async def write_server_script(plugin_id, plugin_package_dir, host_port):
     """
     Generate and write the server.py script within the plugin's directory.
     Enhanced to handle object references for recursive proxying and coroutine functions.
+    Configured to use multiple workers to maximize concurrency.
     """
     server_script_content = f'''
 import asyncio
@@ -318,6 +320,7 @@ import traceback
 import logging
 from quart import Quart, jsonify, request
 import uuid  # Import uuid for object ID generation
+from functools import partial
 
 # Adjust the plugin directory as needed
 PLUGIN_DIR = "{docker_plugin_dir}"
@@ -325,7 +328,7 @@ if PLUGIN_DIR not in sys.path:
     sys.path.append(PLUGIN_DIR)
 
 # Set the current package for the plugin_code package context
-current_package = __package__
+current_package = '{plugin_package_name}'
 exported_plugin = None
 
 logger = logging.getLogger(__name__)
@@ -386,11 +389,11 @@ async def handle():
                 if asyncio.iscoroutinefunction(func):
                     result = await func(*args, **kwargs)  # Await coroutine functions
                 else:
-                    result = func(*args, **kwargs)
+                    # Offload blocking functions to a thread pool
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, partial(func, *args, **kwargs))
             except StopAsyncIteration:
                 return jsonify(error='StopAsyncIteration'), 500
-            except Exception as e:
-                return jsonify(error=str(e)), 500
 
             # If the result is an object, register it and return its object_id
             if isinstance(result, (int, float, str, bool, list, dict, type(None))):
@@ -437,8 +440,9 @@ async def handle():
             return jsonify(error='Invalid action'), 400
 
     except Exception as e:
-        traceback.print_exc()
-        return jsonify(error=str(e)), 500
+        error_trace = traceback.format_exc()
+        logger.error(f"Exception occurred: {{error_trace}}")
+        return jsonify(error=str(e), traceback=error_trace), 500
 
 @app.route('/health', methods=['GET'])
 async def health_check():
@@ -471,13 +475,13 @@ async def startup():
     await init_plugin()
 
 if __name__ == '__main__':
-    from hypercorn.asyncio import serve
-    from hypercorn.config import Config
-        
-    config = Config()
-    config.bind = ['0.0.0.0:8001']
-    config.loglevel = 'info'
-    asyncio.run(serve(app, config))
+    import uvicorn
+    uvicorn.run(
+        'server:app',
+        host='0.0.0.0',
+        port={host_port},
+        log_level='info'
+    )
 '''.strip()
     
     server_script_path = os.path.join(plugin_package_dir, server_script_name)

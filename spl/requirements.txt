@@ -12,6 +12,7 @@ runpod
 quart
 requests-toolbelt
 Hypercorn
+uvicorn
 quart-cors
 aiohttp
 
