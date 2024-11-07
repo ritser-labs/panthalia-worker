@@ -93,6 +93,8 @@ class PluginProxy:
             result = self.deserialize_data(response.text)
             if 'error' in result:
                 logger.error(f"Error during '{action}' for '{function}': {result['error']}")
+                if result['error'] == 'StopAsyncIteration':
+                    raise StopAsyncIteration
                 raise Exception(result['error'])
             return result.get('result')
         except requests.exceptions.RequestException as e:
@@ -380,10 +382,15 @@ async def handle():
             if not callable(func):
                 return jsonify(error=f'{{func_name}} is not callable'), 400
 
-            if asyncio.iscoroutinefunction(func):
-                result = await func(*args, **kwargs)  # Await coroutine functions
-            else:
-                result = func(*args, **kwargs)
+            try:
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(*args, **kwargs)  # Await coroutine functions
+                else:
+                    result = func(*args, **kwargs)
+            except StopAsyncIteration:
+                return jsonify(error='StopAsyncIteration'), 500
+            except Exception as e:
+                return jsonify(error=str(e)), 500
 
             # If the result is an object, register it and return its object_id
             if isinstance(result, (int, float, str, bool, list, dict, type(None))):
