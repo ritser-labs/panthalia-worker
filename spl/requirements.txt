@@ -15,6 +15,7 @@ Hypercorn
 uvicorn
 quart-cors
 aiohttp
+safetensors
 
 aiosqlite
 sqlalchemy

@@ -18,6 +18,7 @@ import shutil
 import asyncio
 import logging
 import aiofiles
+import docker
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
@@ -133,6 +134,22 @@ def delete_directory_contents(directory):
             logging.debug(f"Error deleting directory {directory}: {e}")
 
 async def terminate_processes(db_adapter, job_id):
+    # Initialize the Docker client
+    docker_client = docker.from_env()
+
+    # Fetch all running Docker containers
+    containers = docker_client.containers.list()
+
+    # Filter and stop containers whose image name is "panthalia_plugin"
+    for container in containers:
+        if "panthalia_plugin" in container.image.tags:
+            try:
+                container.stop()
+                logging.info(f"Stopped Docker container with image: {container.image.tags}")
+            except Exception as e:
+                logging.error(f"Error stopping Docker container with image {container.image.tags}: {e}")
+
+    # Terminate the processes as before
     instances = await db_adapter.get_all_instances()
     for instance in instances:
         try:
@@ -148,6 +165,7 @@ async def terminate_processes(db_adapter, job_id):
             logging.info(f"Process {instance.name} (PID {pid}) was killed forcefully.")
         except Exception as e:
             logging.error(f"Error terminating process {instance.name}: {e}")
+
 
 def reset_logs(log_dir):
     """Delete all log files in the log directory except for the LOG_FILE, which is truncated (reset)."""

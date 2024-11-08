@@ -12,6 +12,7 @@ from functools import partial
 import hashlib
 import threading
 import uuid  # Added for unique object IDs
+from .serialize import serialize_data, deserialize_data
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -28,7 +29,7 @@ server_script_container = f"{docker_plugin_dir}/{server_script_name}"
 # Docker and server configuration
 DOCKER_IMAGE = "panthalia_plugin"  # Updated to custom image name
 DOCKERFILE_PATH = "Dockerfile"
-CONTAINER_NAME_TEMPLATE = "secure_plugin_container_{plugin_id}"
+CONTAINER_NAME_TEMPLATE = "panthalia_plugin_{plugin_id}"
 HOST_PORT_BASE = 8000
 
 # Security options
@@ -52,26 +53,13 @@ class PluginProxy:
     Proxy class to interact with the remote plugin server.
     Supports recursive access to child objects by managing object IDs.
     Handles coroutine functions by returning awaitable wrappers.
+    Adds safetensor serialization support.
     """
     def __init__(self, host='localhost', port=HOST_PORT_BASE, object_id=None):
         self.__dict__['host'] = host
         self.__dict__['port'] = port
         self.__dict__['object_id'] = object_id
         self.__dict__['base_url'] = f"http://{host}:{port}/execute"
-
-    def serialize_data(self, data):
-        try:
-            return json.dumps(data)
-        except (TypeError, OverflowError) as e:
-            logger.error(f"Serialization error: {e}")
-            raise
-
-    def deserialize_data(self, data):
-        try:
-            return json.loads(data)
-        except json.JSONDecodeError as e:
-            logger.error(f"Deserialization error: {e}")
-            raise
 
     def call_remote(self, action, function=None, args=None, kwargs=None, attribute=None, value=None):
         payload = {'action': action}
@@ -80,24 +68,33 @@ class PluginProxy:
         if function:
             payload['function'] = function
         if args:
-            payload['args'] = args
+            # Serialize args
+            payload['args'] = serialize_data(args)
         if kwargs:
-            payload['kwargs'] = kwargs
+            # Serialize kwargs
+            payload['kwargs'] = serialize_data(kwargs)
         if attribute:
             payload['attribute'] = attribute
         if value is not None:
-            payload['value'] = value
+            # Serialize value
+            payload['value'] = serialize_data(value)
 
         try:
-            response = requests.post(self.base_url, json=payload)
-            result = self.deserialize_data(response.text)
-            if 'error' in result:
+            headers = {'Content-Type': 'application/json'}
+            response = requests.post(self.base_url, json=payload, headers=headers)
+            logger.info(f'Response json: {response.json()}')
+            logger.info(f'Type of response: {type(response.json())}')
+            result_serialized = response.json().get('result')
+            if result_serialized is None:
+                raise Exception("No 'result' in response.")
+            result = deserialize_data(result_serialized)
+            if isinstance(result, dict) and 'error' in result:
                 if result['error'] == 'StopAsyncIteration':
                     raise StopAsyncIteration
                 logger.error(f"Error during '{action}' for '{function}': {result['error']}")
                 raise Exception(result['error'])
-            response.raise_for_status()
-            return result.get('result')
+            logger.info(f"Response for '{action}': {result}")
+            return result
         except requests.exceptions.RequestException as e:
             # Added response details here
             try:
@@ -107,6 +104,12 @@ class PluginProxy:
                 status_code = 'No Response'
                 response_text = 'No Response'
             logger.error(f"Error during '{action}': {e}, response status: {status_code}, response text: {response_text}")
+            raise
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to decode JSON response: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during '{action}': {e}")
             raise
 
     def __getattr__(self, name):
@@ -124,6 +127,9 @@ class PluginProxy:
                     if attr.get('is_async'):
                         # Return an async wrapper
                         async def async_method(*args, **kwargs):
+                            # Serialize args and kwargs
+                            serialized_args = serialize_data(args) if args else None
+                            serialized_kwargs = serialize_data(kwargs) if kwargs else None
                             # Use a separate thread to perform the blocking HTTP request
                             loop = asyncio.get_event_loop()
                             result = await loop.run_in_executor(
@@ -147,8 +153,11 @@ class PluginProxy:
                     # Return a new PluginProxy for the nested object
                     return PluginProxy(host=self.host, port=self.port, object_id=attr['object_id'])
                 elif 'value' in attr:
-                    # Return the attribute's value directly
-                    return attr['value']
+                    # Deserialize the value if it's serialized
+                    value = attr['value']
+                    if isinstance(value, dict) and 'type' in value and 'data' in value:
+                        return deserialize_data(value)
+                    return value
                 else:
                     # Unexpected format
                     logger.error(f"Unexpected attribute format for '{name}': {attr}")
@@ -168,7 +177,9 @@ class PluginProxy:
         if name in ('host', 'port', 'object_id', 'base_url'):
             super().__setattr__(name, value)
         else:
-            self.call_remote('set_attribute', attribute=name, value=value)
+            # Serialize the value before sending
+            serialized_value = serialize_data(value)
+            self.call_remote('set_attribute', attribute=name, value=serialized_value)
 
     def __del__(self):
         """
@@ -219,10 +230,6 @@ async def get_plugin(plugin_id, db_adapter):
         logger.info(f"Created __init__.py at {init_file_path}")
 
     host_port = get_port(plugin_id)
-
-    # Write the server script inside the plugin directory
-    await write_server_script(
-        plugin_id, plugin_package_dir, host_port)
 
     # Ensure the custom Docker image is built
     await ensure_docker_image()
@@ -296,202 +303,15 @@ def setup_plugin_files(plugin_package_dir):
         'tokenizer.py': 'tokenizer.py',
         'device.py': 'device.py',
         'common.py': 'common.py',
-        'requirements.txt': 'requirements.txt'
+        'serialize.py': 'serialize.py',
+        'requirements.txt': 'requirements.txt',
+        'plugin_server.py': 'server.py'
     }
     
     for local, global_target in resources.items():
         src = os.path.join(os.path.dirname(__file__), local)
         dst = os.path.join(plugin_package_dir, global_target)
         copy_if_missing(src, dst)
-
-async def write_server_script(plugin_id, plugin_package_dir, host_port):
-    """
-    Generate and write the server.py script within the plugin's directory.
-    Enhanced to handle object references for recursive proxying and coroutine functions.
-    Configured to use multiple workers to maximize concurrency.
-    """
-    server_script_content = f'''
-import asyncio
-import importlib
-import sys
-import os
-import json
-import traceback
-import logging
-from quart import Quart, jsonify, request
-import uuid  # Import uuid for object ID generation
-from functools import partial
-
-# Adjust the plugin directory as needed
-PLUGIN_DIR = "{docker_plugin_dir}"
-if PLUGIN_DIR not in sys.path:
-    sys.path.append(PLUGIN_DIR)
-
-# Set the current package for the plugin_code package context
-current_package = __package__
-exported_plugin = None
-
-logger = logging.getLogger(__name__)
-
-app = Quart(__name__)
-
-# Object registry to manage object references
-object_registry = {{}}
-
-def register_object(obj):
-    """
-    Register an object and return its unique ID.
-    """
-    object_id = str(uuid.uuid4())
-    object_registry[object_id] = obj
-    return object_id
-
-def unregister_object(object_id):
-    """
-    Unregister an object by its ID.
-    """
-    if object_id in object_registry:
-        del object_registry[object_id]
-        logger.info(f"Unregistered object_id {{object_id}}.")
-    else:
-        logger.warning(f"Attempted to unregister non-existent object_id {{object_id}}.")
-
-@app.route('/execute', methods=['POST'])
-async def handle():
-    try:
-        data = await request.get_json()
-        action = data.get('action')
-        object_id = data.get('object_id', None)
-
-        if not exported_plugin and action != 'release_object':
-            return jsonify(error='Plugin not loaded'), 500
-
-        if object_id and action != 'release_object':
-            target = object_registry.get(object_id, None)
-            if not target:
-                return jsonify(error=f'Invalid object_id: {{object_id}}'), 404
-        else:
-            target = exported_plugin
-
-        if action == 'call_function':
-            func_name = data['function']
-            args = data.get('args', [])
-            kwargs = data.get('kwargs', {{}})
-            
-            func = getattr(target, func_name, None)
-            if not func:
-                return jsonify(error=f'Function {{func_name}} not found'), 404
-            
-            if not callable(func):
-                return jsonify(error=f'{{func_name}} is not callable'), 400
-
-            try:
-                if asyncio.iscoroutinefunction(func):
-                    result = await func(*args, **kwargs)  # Await coroutine functions
-                else:
-                    # Offload blocking functions to a thread pool
-                    loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(None, partial(func, *args, **kwargs))
-            except StopAsyncIteration:
-                return jsonify(error='StopAsyncIteration'), 500
-
-            # If the result is an object, register it and return its object_id
-            if isinstance(result, (int, float, str, bool, list, dict, type(None))):
-                return jsonify(result=result)
-            else:
-                new_object_id = register_object(result)
-                return jsonify(result={{'object_id': new_object_id}})
-        
-        elif action == 'get_attribute':
-            attr_name = data['attribute']
-            attr = getattr(target, attr_name, None)
-            if attr is None:
-                return jsonify(error=f'Attribute {{attr_name}} not found'), 404
-            
-            # If the attribute is callable, indicate it and if it's a coroutine
-            response = {{'is_callable': callable(attr)}}
-            if callable(attr):
-                response['is_async'] = asyncio.iscoroutinefunction(attr)
-            
-            if isinstance(attr, (int, float, str, bool, list, dict, type(None))):
-                response['value'] = attr
-            elif not callable(attr):
-                # If it's an object, register it and return its object_id
-                new_object_id = register_object(attr)
-                response['object_id'] = new_object_id
-            
-            return jsonify(result=response)
-        
-        elif action == 'set_attribute':
-            attr_name = data['attribute']
-            value = data['value']
-            setattr(target, attr_name, value)
-            return jsonify(result='Attribute set successfully')
-        
-        elif action == 'release_object':
-            obj_id = data.get('object_id')
-            if obj_id:
-                unregister_object(obj_id)
-                return jsonify(result='Object released successfully')
-            else:
-                return jsonify(error='No object_id provided'), 400
-
-        else:
-            return jsonify(error='Invalid action'), 400
-
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        logger.error(f"Exception occurred: {{error_trace}}")
-        return jsonify(error=str(e), traceback=error_trace), 500
-
-@app.route('/health', methods=['GET'])
-async def health_check():
-    return jsonify(status='ok')
-
-async def init_plugin():
-    global exported_plugin
-    # Import the plugin as a module within the plugin_code package
-    try:
-        plugin_module_name = f".plugin_{plugin_id}"
-        plugin_module = importlib.import_module(plugin_module_name, package=current_package)
-        exported_plugin = getattr(plugin_module, 'exported_plugin')
-        
-        # Define a basic ping function for status check
-        async def __ping__():
-            return {{'status': 'ok'}}
-        
-        # Attach the ping function to the plugin
-        setattr(exported_plugin, '__ping__', __ping__)
-        
-        # Initialize the plugin environment if required
-        if hasattr(exported_plugin, 'model_adapter'):
-            exported_plugin.model_adapter.initialize_environment()
-        print("Plugin loaded successfully.")
-    except Exception as e:
-        print(f"Failed to load plugin: {{e}}")
-
-@app.before_serving
-async def startup():
-    await init_plugin()
-
-if __name__ == '__main__':
-    from uvicorn import Config, Server
-    loop = asyncio.new_event_loop()
-    config = Config(
-        app=app,
-        host='0.0.0.0',
-        port={host_port},
-        log_level='info',
-        loop=loop
-    )
-    server = Server(config)
-    loop.run_until_complete(server.serve())
-'''.strip()
-    
-    server_script_path = os.path.join(plugin_package_dir, server_script_name)
-    async with aiofiles.open(server_script_path, mode='w') as f:
-        await f.write(server_script_content)
-    logger.info(f"Generated server script at {server_script_path}")
 
 async def ensure_docker_image():
     """
@@ -564,9 +384,13 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
                 environment={
                     "TMPDIR": tmp_dir,
                     "PIP_NO_CACHE_DIR": "off",
-                    "HOME": tmp_dir
+                    "HOME": tmp_dir,
+                    "PLUGIN_ID": str(plugin_id),
+                    "PORT": str(host_port),
+                    "DOCKER_PLUGIN_DIR": docker_plugin_dir
                 },
-                user="nobody"
+                user="nobody",
+                device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])]
             )
 
             logger.info(f"Container {container_name} started with ID: {container.id}")
@@ -600,20 +424,37 @@ def get_port(plugin_id):
 def wait_for_server(url, timeout=30):
     logger.info(f"Waiting for server at {url} to be ready...")
     start_time = time.time()
+
     while time.time() - start_time < timeout:
         try:
-            # Ping the server by calling the __ping__ function
-            response = requests.post(url, json={'action': 'call_function', 'function': '__ping__'})
-            logger.info(f"Server response: {response.text}")
+            # Create the payload with a ping action
+            payload = {
+                'action': 'call_function',
+                'function': '__ping__',
+                'args': [],
+                'kwargs': {}
+            }
+            headers = {'Content-Type': 'application/json'}
+
+            response = requests.post(url, json=payload, headers=headers)
+            logger.info(f"Server raw response: {response.text}")
+
             if response.status_code == 200:
-                result = response.json().get('result')
-                logger.info(f'wait_for_server response: {result}')
+                response_obj = response.json()
+                result_serialized = response_obj.get('result')
+                if result_serialized is None:
+                    logger.debug("No 'result' in response.")
+                    continue
+                result = deserialize_data(result_serialized)
+                logger.info(f'wait_for_server deserialized response: {result}')
+                
                 if isinstance(result, dict) and result.get('status') == 'ok':
                     logger.info("Server is up and running.")
                     return True
-        except (requests.exceptions.ConnectionError, json.JSONDecodeError) as e:
+        except (requests.exceptions.ConnectionError, json.JSONDecodeError, ValueError) as e:
             logger.debug(f"Ping attempt failed: {e}")
         time.sleep(1)
+
     logger.error("Server did not start within the timeout period.")
     return False
 
