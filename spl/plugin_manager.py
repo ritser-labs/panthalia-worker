@@ -376,8 +376,7 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
                 detach=True,
                 security_opt=security_options,
                 ports={
-                    '8001/tcp': host_port, # Map container's 8001 to host_port
-                    '5001/tcp': 5001  # SOT
+                    '8001/tcp': host_port # Map container's 8001 to host_port
                 },
                 mem_limit=mem_limit,
                 pids_limit=pids_limit,
@@ -394,7 +393,8 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
                     "DOCKER_PLUGIN_DIR": docker_plugin_dir
                 },
                 user="nobody",
-                device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])]
+                device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])],
+                extra_hosts={"host.docker.internal": "host-gateway"}
             )
 
             logger.info(f"Container {container_name} started with ID: {container.id}")

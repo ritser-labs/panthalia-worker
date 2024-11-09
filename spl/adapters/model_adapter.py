@@ -87,6 +87,9 @@ class StandardModelAdapter(ModelAdapter):
     ):
         logging.info("Starting train_task")
         
+        # this is so janky bruh
+        sot_url = sot_url.replace('localhost', 'host.docker.internal')
+        
         model, version_number = await self.initialize_tensor(TENSOR_NAME, sot_url, tensor_version_interval, expected_worker_time)
 
         start_time = time.time()
