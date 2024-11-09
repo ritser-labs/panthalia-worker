@@ -29,7 +29,7 @@ def serialize_data(obj):
 
 def deserialize_data(data):
     try:
-        logging.info(f"Deserializing: {data}")
+        #logging.info(f"Deserializing: {data}")
 
         if 'type' not in data or 'data' not in data:
             raise ValueError("Serialized data must have 'type' and 'data' keys")

@@ -27,6 +27,7 @@ logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 app = Quart(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 * 1024  # 100 GB limit
 
 # Object registry to manage object references
 object_registry = {}
@@ -53,7 +54,7 @@ def unregister_object(object_id):
 async def handle():
     try:
         payload = await request.get_json()
-        logger.debug(f"Received payload: {payload}")
+        #logger.debug(f"Received payload: {payload}")
         action = payload.get('action')
 
         # Directly access 'action' and other non-serialized fields

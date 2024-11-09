@@ -13,13 +13,14 @@ import hashlib
 import threading
 import uuid  # Added for unique object IDs
 from .serialize import serialize_data, deserialize_data
+import tempfile
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Plugin management variables
-global_plugin_dir = '/tmp/my_plugins'
+global_plugin_dir = tempfile.mkdtemp() # /tmp/my_plugins
 plugin_package_name = 'plugin_code'
 docker_plugin_dir = f'/app/{plugin_package_name}'  # Updated to match Dockerfile
 server_script_name = 'server.py'
@@ -38,7 +39,7 @@ security_options = [
 ]
 
 # Resource limits
-mem_limit = "512m"
+mem_limit = "16g"
 pids_limit = 100
 
 # Initialize Docker client
@@ -82,8 +83,8 @@ class PluginProxy:
         try:
             headers = {'Content-Type': 'application/json'}
             response = requests.post(self.base_url, json=payload, headers=headers)
-            logger.info(f'Response json: {response.json()}')
-            logger.info(f'Type of response: {type(response.json())}')
+            #logger.info(f'Response json: {response.json()}')
+            #logger.info(f'Type of response: {type(response.json())}')
             result_serialized = response.json().get('result')
             if result_serialized is None:
                 raise Exception("No 'result' in response.")
@@ -93,7 +94,7 @@ class PluginProxy:
                     raise StopAsyncIteration
                 logger.error(f"Error during '{action}' for '{function}': {result['error']}")
                 raise Exception(result['error'])
-            logger.info(f"Response for '{action}': {result}")
+            #logger.info(f"Response for '{action}': {result}")
             return result
         except requests.exceptions.RequestException as e:
             # Added response details here
@@ -374,7 +375,10 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
                 name=container_name,
                 detach=True,
                 security_opt=security_options,
-                ports={'8001/tcp': host_port},  # Map container's 8001 to host_port
+                ports={
+                    '8001/tcp': host_port, # Map container's 8001 to host_port
+                    '5001/tcp': 5001  # SOT
+                },
                 mem_limit=mem_limit,
                 pids_limit=pids_limit,
                 volumes={
