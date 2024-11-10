@@ -502,7 +502,7 @@ async def main():
             master_command = [
                 'python', '-m', 'spl.master',
                 '--private_key', args.private_key,
-                '--max_concurrent_iterations', str(plugin.max_concurrent_iterations),
+                '--max_concurrent_iterations', str(await plugin.get('max_concurrent_iterations')),
                 '--db_url', db_url,
                 '--num_workers', str(args.worker_count),
                 '--deploy_type', 'local',

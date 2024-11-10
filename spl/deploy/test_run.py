@@ -612,7 +612,7 @@ async def main():
             'RANK': '0',
             'WORLD_SIZE': '1',
             'PRIVATE_KEY': args.private_key,
-            'MAX_CONCURRENT_ITERATIONS': str(plugin.max_concurrent_iterations),
+            'MAX_CONCURRENT_ITERATIONS': str(await plugin.get('max_concurrent_iterations')),
             'DB_URL': db_url,
             'NUM_WORKERS': str(args.worker_count),
             'DEPLOY_TYPE': 'cloud',

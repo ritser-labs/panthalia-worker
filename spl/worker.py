@@ -317,10 +317,13 @@ async def process_tasks():
                         weight_decay = task_params['weight_decay']
                         logging.debug(f"{task_id}: Executing training task")
                         time_synced = time.time()
-                        version_number, updates, loss = await plugin.model_adapter.train_task(
-                            TENSOR_NAME, sot_url, plugin.tensor_version_interval, plugin.expected_worker_time,
+                        result = await plugin.call_submodule(
+                            'model_adapter', 'train_task',
+                            TENSOR_NAME, sot_url, await plugin.get('tensor_version_interval'), await plugin.get('expected_worker_time'),
                             batch, targets, steps, max_lr, min_lr, T_0, weight_decay
                         )
+                        logging.debug(f'{task_id}: Unpacking values from {result}')
+                        version_number, updates, loss = result
                         logging.info(f"{task_id}: Updates tensor memory size: {tensor_memory_size(updates):.2f} MB")
                     finally:
                         await task_processing_lock.release()

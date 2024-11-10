@@ -186,7 +186,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
 
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
-                name, get_current_version_number(plugin.tensor_version_interval))
+                name, get_current_version_number(await plugin.get('tensor_version_interval')))
 
         file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
         if os.path.exists(file_path):
@@ -196,7 +196,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         if TENSOR_NAME not in name:
             raise ValueError(f"Unsupported tensor name: {name}")
 
-        tensor = plugin.model_adapter.init_tensor(zero_init)
+        tensor = await plugin.call_submodule('model_adapter', 'init_tensor', zero_init)
 
         torch.save(tensor, file_path)
         block_timestamps[name] = sync_version_number
@@ -216,41 +216,6 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         await initialize_tensor(TENSOR_NAME, zero_init=False)
         await initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
 
-    async def load_next_batch():
-        """Load the next batch from the dataset."""
-        batch = []
-        targets = []
-        global dataset_iterator
-        async with dataset_lock:
-            if dataset_iterator is None:
-                dataset_iterator = plugin.dataset.__aiter__()
-
-            try:
-                for _ in range(plugin.batch_size):
-                    inputs, target_tokens = await dataset_iterator.__anext__()
-                    if isinstance(inputs, list):
-                        inputs = torch.tensor(inputs)
-                    if isinstance(target_tokens, list):
-                        target_tokens = torch.tensor(target_tokens)
-                    batch.append(inputs)
-                    targets.append(target_tokens)
-            except StopAsyncIteration:
-                logging.info("Dataset iterator exhausted.")
-                dataset_iterator = None  # Reset the iterator
-
-        if not batch:
-            return None, None  # No more data
-
-        batch_tensor = torch.stack(batch)
-        targets_tensor = torch.stack(targets)
-        timestamp = int(time.time())
-        random_suffix = random.randint(1000, 9999)
-        batch_filename = f'batch_{timestamp}_{random_suffix}.pt'
-        targets_filename = f'targets_{timestamp}_{random_suffix}.pt'
-        await asyncio.to_thread(torch.save, batch_tensor, os.path.join(temp_dir, batch_filename))
-        await asyncio.to_thread(torch.save, targets_tensor, os.path.join(temp_dir, targets_filename))
-        return batch_filename, targets_filename
-
     async def initialize_service():
         nonlocal plugin_id, plugin, sot_db_obj, job_id, perm_db, db_adapter
         logging.info("Initializing distributed environment and tensors")
@@ -268,10 +233,9 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
 
         logging.info(
             f"Initializing service for SOT {sot_id}, job {job_id}, plugin {plugin_id}, perm {perm_db}")
-        
-        plugin.model_adapter.initialize_environment('gloo')
+
         await initialize_all_tensors()
-        await plugin.dataset.initialize_dataset()
+        await plugin.call_submodule('dataset', 'initialize_dataset')
         logging.info(f'Loading initial batches for service')
 
 
@@ -327,7 +291,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         logging.info("Accessing /get_batch endpoint")
         try:
             # Retrieve the next batch of token pairs
-            token_pairs = await plugin.dataset.__anext__()  # This should return a list of token pairs
+            token_pairs = await plugin.call_submodule('dataset', '__anext__')
 
             if not token_pairs:
                 logging.info("No more batches available in /get_batch.")
@@ -408,7 +372,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
 
     async def fix_outdated_last_future_version_number(tensor_name, last_future_version_number):
         value = last_future_version_number.get(tensor_name, 0)
-        current_version_number = get_current_version_number(plugin.tensor_version_interval)
+        current_version_number = get_current_version_number(await plugin.get('tensor_version_interval'))
         if value < current_version_number:
             if os.path.exists(os.path.join(state_dir, f'{tensor_name}_{value}.pt')):
                 for f in f'{tensor_name}', f'{tensor_name}_adam_m':
@@ -423,7 +387,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
     async def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         await update_timestamp_lock.acquire()
         try:
-            future_version_number = get_future_version_number(plugin.tensor_version_interval)
+            future_version_number = get_future_version_number(await plugin.get('tensor_version_interval'))
             old_block_timestamp = None
 
             await fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
@@ -513,7 +477,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         last_future_version_number = await load_json(last_future_version_file, {}, last_future_version_file_lock)
         iteration_number = await load_json(iteration_number_file, {}, iteration_number_file_lock)
 
-        future_version_number = get_future_version_number(plugin.tensor_version_interval)
+        future_version_number = get_future_version_number(await plugin.get('tensor_version_interval'))
 
         if data['version_number'] != block_timestamps.get(tensor_name, 0):
             delta = block_timestamps.get(tensor_name, 0) - data['version_number']

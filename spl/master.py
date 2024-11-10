@@ -403,7 +403,7 @@ class Master:
         self.iteration += 1
         logger.info(f"Starting iteration {iteration_number}")
 
-        learning_params = self.plugin.get_master_learning_hyperparameters(iteration_number)
+        learning_params = await self.plugin.get_master_learning_hyperparameters(iteration_number)
         logger.info(
             f"Learning parameters for iteration {iteration_number}: {learning_params}"
         )

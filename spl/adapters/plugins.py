@@ -1,4 +1,5 @@
 import math
+import asyncio
 
 
 class StandardPlugin:
@@ -84,3 +85,43 @@ class StandardPlugin:
             'weight_decay': self.outer_weight_decay,
             't': t,
         }
+        
+    async def call_submodule(self, target, func_name, *args, **kwargs):
+        """
+        Call an arbitrary function on model_adapter or dataset, handling async functions.
+
+        Args:
+            target (str): Either "model_adapter" or "dataset".
+            func_name (str): The name of the function to call.
+            *args: Positional arguments for the function.
+            **kwargs: Keyword arguments for the function.
+        
+        Returns:
+            The result of the function call.
+        """
+        if target not in ["model_adapter", "dataset"]:
+            raise ValueError("Target must be 'model_adapter' or 'dataset'")
+
+        obj = getattr(self, target)
+        if not hasattr(obj, func_name):
+            raise AttributeError(f"{target} has no function '{func_name}'")
+
+        func = getattr(obj, func_name)
+
+        # check if the function is coroutine
+        if asyncio.iscoroutinefunction(func):
+            return await func(*args, **kwargs)
+        else:
+            return func(*args, **kwargs)
+
+    def get(self, key):
+        """
+        Get a value from the plugin object.
+
+        Args:
+            key (str): The key to retrieve.
+
+        Returns:
+            The value associated with the key.
+        """
+        return getattr(self, key)

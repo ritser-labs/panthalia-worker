@@ -5,22 +5,20 @@ import shutil
 import logging
 import docker
 import time
-import requests
 import asyncio
 import json
 from functools import partial
 import hashlib
-import threading
-import uuid  # Added for unique object IDs
-from .serialize import serialize_data, deserialize_data
 import tempfile
+from .serialize import serialize_data, deserialize_data
+import aiohttp  # Added for asynchronous HTTP requests
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Plugin management variables
-global_plugin_dir = tempfile.mkdtemp() # /tmp/my_plugins
+global_plugin_dir = tempfile.mkdtemp()  # e.g., /tmp/my_plugins
 plugin_package_name = 'plugin_code'
 docker_plugin_dir = f'/app/{plugin_package_name}'  # Updated to match Dockerfile
 server_script_name = 'server.py'
@@ -52,146 +50,65 @@ last_plugin_proxy = None
 class PluginProxy:
     """
     Proxy class to interact with the remote plugin server.
-    Supports recursive access to child objects by managing object IDs.
-    Handles coroutine functions by returning awaitable wrappers.
-    Adds safetensor serialization support.
+    Allows direct async function calls and returns their results.
     """
-    def __init__(self, host='localhost', port=HOST_PORT_BASE, object_id=None):
-        self.__dict__['host'] = host
-        self.__dict__['port'] = port
-        self.__dict__['object_id'] = object_id
-        self.__dict__['base_url'] = f"http://{host}:{port}/execute"
+    def __init__(self, host='localhost', port=HOST_PORT_BASE):
+        self.host = host
+        self.port = port
+        self.base_url = f"http://{host}:{port}/execute"
+        self.session = aiohttp.ClientSession()  # Initialize aiohttp session
 
-    def call_remote(self, action, function=None, args=None, kwargs=None, attribute=None, value=None):
-        payload = {'action': action}
-        if self.object_id:
-            payload['object_id'] = self.object_id
-        if function:
-            payload['function'] = function
-        if args:
-            # Serialize args
-            payload['args'] = serialize_data(args)
-        if kwargs:
-            # Serialize kwargs
-            payload['kwargs'] = serialize_data(kwargs)
-        if attribute:
-            payload['attribute'] = attribute
-        if value is not None:
-            # Serialize value
-            payload['value'] = serialize_data(value)
+    async def call_remote(self, function, args=None, kwargs=None):
+        payload = {
+            'action': 'call_function',
+            'function': function,
+            'args': serialize_data(args) if args else [],
+            'kwargs': serialize_data(kwargs) if kwargs else {}
+        }
 
         try:
             headers = {'Content-Type': 'application/json'}
-            response = requests.post(self.base_url, json=payload, headers=headers)
-            #logger.info(f'Response json: {response.json()}')
-            #logger.info(f'Type of response: {type(response.json())}')
-            result_serialized = response.json().get('result')
-            if result_serialized is None:
-                raise Exception("No 'result' in response.")
-            result = deserialize_data(result_serialized)
-            if isinstance(result, dict) and 'error' in result:
-                if result['error'] == 'StopAsyncIteration':
-                    raise StopAsyncIteration
-                logger.error(f"Error during '{action}' for '{function}': {result['error']}")
-                raise Exception(result['error'])
-            #logger.info(f"Response for '{action}': {result}")
-            return result
-        except requests.exceptions.RequestException as e:
-            # Added response details here
-            try:
-                status_code = response.status_code
-                response_text = response.text
-            except:
-                status_code = 'No Response'
-                response_text = 'No Response'
-            logger.error(f"Error during '{action}': {e}, response status: {status_code}, response text: {response_text}")
+            async with self.session.post(self.base_url, json=payload, headers=headers) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logger.error(f"HTTP error {response.status}: {text}")
+                    raise Exception(f"HTTP error {response.status}: {text}")
+
+                response_obj = await response.json()
+                result_serialized = response_obj.get('result')
+                if result_serialized is None:
+                    raise Exception("No 'result' in response.")
+
+                result = deserialize_data(result_serialized)
+                if isinstance(result, dict) and 'error' in result:
+                    logger.error(f"Error during function '{function}': {result['error']}")
+                    raise Exception(result['error'])
+
+                return result
+        except aiohttp.ClientError as e:
+            logger.error(f"Request exception during function '{function}': {e}")
             raise
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode JSON response: {e}")
+            logger.error(f"JSON decode error during function '{function}': {e}")
             raise
         except Exception as e:
-            logger.error(f"Unexpected error during '{action}': {e}")
+            logger.error(f"Unexpected error during function '{function}': {e}")
             raise
 
     def __getattr__(self, name):
         """
-        Handle dynamic attribute access and method calls.
-        If the attribute is a method, return a callable that invokes the remote method.
-        If the attribute is an async method, return an awaitable coroutine.
-        If the attribute is an object, return a new PluginProxy representing the child object.
-        If the attribute is a simple value, return it directly.
+        Allows direct async method calls as attributes.
+        Example: await proxy.some_function(args) -> calls 'some_function' remotely.
         """
-        try:
-            attr = self.call_remote('get_attribute', attribute=name)
-            if isinstance(attr, dict):
-                if attr.get('is_callable'):
-                    if attr.get('is_async'):
-                        # Return an async wrapper
-                        async def async_method(*args, **kwargs):
-                            # Serialize args and kwargs
-                            serialized_args = serialize_data(args) if args else None
-                            serialized_kwargs = serialize_data(kwargs) if kwargs else None
-                            # Use a separate thread to perform the blocking HTTP request
-                            loop = asyncio.get_event_loop()
-                            result = await loop.run_in_executor(
-                                None,
-                                partial(
-                                    self.call_remote,
-                                    'call_function',
-                                    function=name,
-                                    args=args,
-                                    kwargs=kwargs
-                                )
-                            )
-                            return result
-                        return async_method
-                    else:
-                        # Return a synchronous callable
-                        def method(*args, **kwargs):
-                            return self.call_remote('call_function', function=name, args=args, kwargs=kwargs)
-                        return method
-                elif 'object_id' in attr:
-                    # Return a new PluginProxy for the nested object
-                    return PluginProxy(host=self.host, port=self.port, object_id=attr['object_id'])
-                elif 'value' in attr:
-                    # Deserialize the value if it's serialized
-                    value = attr['value']
-                    if isinstance(value, dict) and 'type' in value and 'data' in value:
-                        return deserialize_data(value)
-                    return value
-                else:
-                    # Unexpected format
-                    logger.error(f"Unexpected attribute format for '{name}': {attr}")
-                    raise Exception(f"Unexpected attribute format for '{name}'")
-            else:
-                # Unexpected format
-                logger.error(f"Unexpected attribute response for '{name}': {attr}")
-                raise Exception(f"Unexpected attribute response for '{name}'")
-        except Exception as e:
-            logger.error(f"Error accessing attribute '{name}': {e}")
-            raise
+        async def method(*args, **kwargs):
+            return await self.call_remote(name, args=args, kwargs=kwargs)
+        return method
 
-    def __setattr__(self, name, value):
+    async def close(self):
         """
-        Handle setting attributes on the remote object.
+        Close the aiohttp session when done.
         """
-        if name in ('host', 'port', 'object_id', 'base_url'):
-            super().__setattr__(name, value)
-        else:
-            # Serialize the value before sending
-            serialized_value = serialize_data(value)
-            self.call_remote('set_attribute', attribute=name, value=serialized_value)
-
-    def __del__(self):
-        """
-        Destructor to release the object_id on the server to prevent memory leaks.
-        """
-        if self.object_id:
-            try:
-                self.call_remote('release_object')
-                logger.info(f"Released object_id {self.object_id} on server.")
-            except Exception as e:
-                logger.error(f"Failed to release object_id {self.object_id}: {e}")
+        await self.session.close()
 
 async def get_plugin(plugin_id, db_adapter):
     """
@@ -209,6 +126,7 @@ async def get_plugin(plugin_id, db_adapter):
     # If a different plugin was previously loaded, stop its container
     if last_plugin_proxy is not None:
         await teardown_docker_container(last_plugin_id)
+        await last_plugin_proxy.close()  # Close the aiohttp session
         last_plugin_proxy = None
         last_plugin_id = None
 
@@ -254,7 +172,7 @@ def setup_dir():
     if global_plugin_dir not in sys.path:
         sys.path.append(global_plugin_dir)
         logger.info(f"Added {global_plugin_dir} to sys.path")
-    
+
     # Ensure /tmp directory exists
     tmp_dir = "/tmp"
     if not os.path.exists(tmp_dir):
@@ -308,7 +226,7 @@ def setup_plugin_files(plugin_package_dir):
         'requirements.txt': 'requirements.txt',
         'plugin_server.py': 'server.py'
     }
-    
+
     for local, global_target in resources.items():
         src = os.path.join(os.path.dirname(__file__), local)
         dst = os.path.join(plugin_package_dir, global_target)
@@ -376,7 +294,7 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
                 detach=True,
                 security_opt=security_options,
                 ports={
-                    '8001/tcp': host_port # Map container's 8001 to host_port
+                    f'{host_port}/tcp': host_port  # Map container's 8000 to host_port
                 },
                 mem_limit=mem_limit,
                 pids_limit=pids_limit,
@@ -402,12 +320,12 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
             logger.error(f"Failed to start Docker container: {e}")
             raise
 
-    if not wait_for_server(server_url):
+    if not await wait_for_server(server_url):
         show_container_logs(container)
         logger.error("Exiting due to server startup failure.")
         await teardown_docker_container(plugin_id)
         raise Exception("Docker container server failed to start.")
-    
+
     plugin_proxy = PluginProxy(host='localhost', port=host_port)
     logger.info(f"Plugin proxy created for plugin '{plugin_id}' at {server_url}")
     return plugin_proxy
@@ -425,39 +343,37 @@ def get_port(plugin_id):
         hash_int = int(hash_object.hexdigest(), 16)
         return HOST_PORT_BASE + (hash_int % 1000)  # Ports 8000-8999
 
-def wait_for_server(url, timeout=30):
+async def wait_for_server(url, timeout=30):
     logger.info(f"Waiting for server at {url} to be ready...")
     start_time = time.time()
 
-    while time.time() - start_time < timeout:
-        try:
-            # Create the payload with a ping action
-            payload = {
-                'action': 'call_function',
-                'function': '__ping__',
-                'args': [],
-                'kwargs': {}
-            }
-            headers = {'Content-Type': 'application/json'}
+    async with aiohttp.ClientSession() as session:
+        while time.time() - start_time < timeout:
+            try:
+                # Create the payload with a health_check action
+                payload = {
+                    'action': 'health_check'
+                }
+                headers = {'Content-Type': 'application/json'}
 
-            response = requests.post(url, json=payload, headers=headers)
-            logger.info(f"Server raw response: {response.text}")
+                async with session.post(url, json=payload, headers=headers) as response:
+                    logger.debug(f"Server raw response: {await response.text()}")
 
-            if response.status_code == 200:
-                response_obj = response.json()
-                result_serialized = response_obj.get('result')
-                if result_serialized is None:
-                    logger.debug("No 'result' in response.")
-                    continue
-                result = deserialize_data(result_serialized)
-                logger.info(f'wait_for_server deserialized response: {result}')
-                
-                if isinstance(result, dict) and result.get('status') == 'ok':
-                    logger.info("Server is up and running.")
-                    return True
-        except (requests.exceptions.ConnectionError, json.JSONDecodeError, ValueError) as e:
-            logger.debug(f"Ping attempt failed: {e}")
-        time.sleep(1)
+                    if response.status == 200:
+                        response_obj = await response.json()
+                        result_serialized = response_obj.get('result')
+                        if result_serialized is None:
+                            logger.debug("No 'result' in response.")
+                            continue
+                        result = deserialize_data(result_serialized)
+                        logger.debug(f'wait_for_server deserialized response: {result}')
+
+                        if isinstance(result, dict) and result.get('status') == 'ok':
+                            logger.info("Server is up and running.")
+                            return True
+            except (aiohttp.ClientError, json.JSONDecodeError, ValueError) as e:
+                logger.debug(f"Ping attempt failed: {e}")
+            await asyncio.sleep(1)
 
     logger.error("Server did not start within the timeout period.")
     return False
