@@ -16,8 +16,8 @@ uvicorn
 quart-cors
 aiohttp
 safetensors
+supertokens-python
 
 aiosqlite
 sqlalchemy
 sqlalchemy[asyncio]
-secimport
