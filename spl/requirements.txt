@@ -17,6 +17,7 @@ quart-cors
 aiohttp
 safetensors
 auth0-python
+python-jose
 
 aiosqlite
 sqlalchemy

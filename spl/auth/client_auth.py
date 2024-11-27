@@ -7,9 +7,9 @@ import webbrowser
 from aiohttp import web
 
 # configurations
-AUTH0_DOMAIN = 'your-domain.auth0.com'
-CLIENT_ID = 'your-client-id'
-AUDIENCE = 'your-api-identifier'
+AUTH0_DOMAIN = os.environ['PANTHALIA_AUTH0_DOMAIN']
+CLIENT_ID = os.environ['PANTHALIA_AUTH0_CLIENT_ID']
+AUDIENCE = os.environ['PANTHALIA_AUTH0_AUDIENCE']
 REDIRECT_URI = 'http://localhost:5000/callback'
 AUTH_SCOPES = 'openid profile email offline_access'
 

@@ -1,5 +1,3 @@
-# Updated models.py with separate bid and ask relationships in Task
-
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from sqlalchemy import Column, Integer, String, ForeignKey, Text, UniqueConstraint, DateTime, Enum, Float, Boolean, JSON
@@ -100,8 +98,20 @@ class Task(TimestampMixin, Serializable):
     time_solver_selected = Column(DateTime, nullable=True)
 
     job = relationship("Job", back_populates="tasks")
-    bid = relationship("Order", primaryjoin="and_(Task.id == Order.task_id, Order.order_type == 'bid')", uselist=False)
-    ask = relationship("Order", primaryjoin="and_(Task.id == Order.task_id, Order.order_type == 'ask')", uselist=False)
+    bid = relationship(
+        "Order",
+        primaryjoin="and_(Task.id == Order.task_id, Order.order_type == 'bid')",
+        uselist=False,
+        back_populates="task",
+        overlaps="ask",
+    )
+    ask = relationship(
+        "Order",
+        primaryjoin="and_(Task.id == Order.task_id, Order.order_type == 'ask')",
+        uselist=False,
+        back_populates="task",
+        overlaps="bid",
+    )
     account = relationship("Account", back_populates="task")
 
 class StateUpdate(Serializable):
@@ -156,8 +166,8 @@ class Order(Serializable):
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
 
     subnet = relationship("Subnet", back_populates="orders")
-    task = relationship("Task", back_populates="order", uselist=False)
-    account = relationship("Account", back_populates="order", uselist=False)
+    task = relationship("Task", back_populates="bid", overlaps="ask")  # Adjusts bid/ask back_populates
+    account = relationship("Account", back_populates="orders", uselist=False)  # Updated line
 
 class Account(Serializable):
     __tablename__ = 'accounts'
@@ -183,7 +193,6 @@ class AccountTransaction(Serializable):
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
     
     account = relationship("Account", back_populates="transactions")
-
 
 # Database initialization
 async def init_db():

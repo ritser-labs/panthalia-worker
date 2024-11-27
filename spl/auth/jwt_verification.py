@@ -1,10 +1,10 @@
-import json
+import os
 import requests
 from jose import jwt
 from functools import lru_cache
 
-AUTH0_DOMAIN = 'your-domain.auth0.com'
-API_AUDIENCE = 'your-api-identifier'
+AUTH0_DOMAIN = os.environ['PANTHALIA_AUTH0_DOMAIN']
+API_AUDIENCE = os.environ['PANTHALIA_AUTH0_AUDIENCE']
 ALGORITHMS = ['RS256']
 
 @lru_cache()

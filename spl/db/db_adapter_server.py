@@ -139,8 +139,7 @@ class DBAdapterServer:
                 order_type=order_type,
                 account_id=account.id,
                 price=price,
-                user_id=user_id,
-                subnet_id=subnet_id
+                user_id=user_id
             )
             session.add(new_order)
             await session.commit()

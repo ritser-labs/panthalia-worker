@@ -136,7 +136,7 @@ def create_get_route(entity_name, method, params, require_user_auth=False):
             return jsonify({'error': f'{entity_name} not found'}), 404
     
     if require_user_auth:
-        handler_func = requires_user_auth(handler_func)
+        handler = requires_user_auth(handler)
 
     return require_params(*params)(handle_errors(handler))
 
