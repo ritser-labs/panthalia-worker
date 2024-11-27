@@ -1,4 +1,4 @@
-# models.py
+# Updated models.py with separate bid and ask relationships in Task
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
@@ -9,22 +9,17 @@ import os
 import asyncio
 import enum
 
-# Get the directory of the script
+# Database setup
 script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Compute the parent directory
 parent_dir = os.path.abspath(os.path.join(script_dir, os.pardir))
-
-# Construct the database path relative to the parent directory
 db_path = os.path.join(parent_dir, "sqlite.db")
-
-# Modify DATABASE_URL to use the computed db_path
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
+# Enum definitions
 class ServiceType(enum.Enum):
     Anvil = "anvil"
     Db = "db"
@@ -32,44 +27,48 @@ class ServiceType(enum.Enum):
     Sot = "sot"
     Worker = "worker"
 
+class PermType(enum.Enum):
+    ModifyDb = 0
+    ModifySot = 1
+
+class OrderType(enum.Enum):
+    Bid = "bid"
+    Ask = "ask"
+
+class AccountTxnType(enum.Enum):
+    Deposit = "deposit"
+    Withdrawal = "withdrawal"
+
+# Mixins and base classes
 class Serializable(Base):
     __abstract__ = True
-
     def as_dict(self):
         result = {}
         for c in self.__table__.columns:
             value = getattr(self, c.name)
-            # If the value is an Enum, serialize it as its name
-            if isinstance(value, enum.Enum):
-                result[c.name] = value.name
-            else:
-                result[c.name] = value
+            result[c.name] = value.name if isinstance(value, enum.Enum) else value
         return result
-
-
-class PermType(enum.Enum):
-    ModifyDb = 0
-    ModifySot = 1
 
 class TimestampMixin:
     last_updated = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
+# Models
 class Plugin(TimestampMixin, Serializable):
     __tablename__ = 'plugins'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     code = Column(Text, nullable=False)
+    jobs = relationship("Job", back_populates="plugin")
 
 class Subnet(Serializable):
     __tablename__ = 'subnets'
     id = Column(Integer, primary_key=True, index=True)
-    address = Column(String, nullable=False)
-    rpc_url = Column(String, nullable=False)
-    distributor_address = Column(String, nullable=False)
-    pool_address = Column(String, nullable=False)
-    token_address = Column(String, nullable=False)
-    solver_group = Column(Integer, nullable=False)
+    dispute_period = Column(Integer, nullable=False)
+    solve_period = Column(Integer, nullable=False)
+    stake_multiplier = Column(Float, nullable=False)
+    jobs = relationship("Job", back_populates="subnet")
+    orders = relationship("Order", back_populates="subnet")
 
 class Job(TimestampMixin, Serializable):
     __tablename__ = 'jobs'
@@ -77,29 +76,33 @@ class Job(TimestampMixin, Serializable):
     name = Column(String, index=True, nullable=False)
     plugin_id = Column(Integer, ForeignKey('plugins.id'), nullable=False)
     subnet_id = Column(Integer, ForeignKey('subnets.id'), nullable=False)
+    user_id = Column(String, nullable=False, index=True)
     sot_url = Column(String, nullable=False)
     done = Column(Boolean, nullable=False, default=False)
     iteration = Column(Integer, nullable=False)
 
-    plugin = relationship("Plugin", backref="jobs")
-    subnet = relationship("Subnet", backref="jobs")
+    plugin = relationship("Plugin", back_populates="jobs")
+    subnet = relationship("Subnet", back_populates="jobs")
     instances = relationship("Instance", back_populates="job")
+    tasks = relationship("Task", back_populates="job")
+    state_updates = relationship("StateUpdate", back_populates="job")
+    sots = relationship("Sot", back_populates="job")
 
 class Task(TimestampMixin, Serializable):
     __tablename__ = 'tasks'
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
-    subnet_task_id = Column(Integer, nullable=False)
     job_iteration = Column(Integer, nullable=False)
     status = Column(Enum(TaskStatus), nullable=False)
+    params = Column(String, nullable=False)
     result = Column(JSON, nullable=True)
-    solver_address = Column(String, nullable=True)
     time_solved = Column(DateTime, nullable=True)
     time_solver_selected = Column(DateTime, nullable=True)
-    
-    __table_args__ = (UniqueConstraint('job_id', 'subnet_task_id', name='_job_task_uc'),)
 
-    job = relationship("Job", backref="tasks")
+    job = relationship("Job", back_populates="tasks")
+    bid = relationship("Order", primaryjoin="and_(Task.id == Order.task_id, Order.order_type == 'bid')", uselist=False)
+    ask = relationship("Order", primaryjoin="and_(Task.id == Order.task_id, Order.order_type == 'ask')", uselist=False)
+    account = relationship("Account", back_populates="task")
 
 class StateUpdate(Serializable):
     __tablename__ = 'state_updates'
@@ -107,8 +110,7 @@ class StateUpdate(Serializable):
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
     data = Column(JSON, nullable=False)
     submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-    job = relationship("Job", backref="state_updates")
+    job = relationship("Job", back_populates="state_updates")
 
 class Perm(Serializable):
     __tablename__ = 'perms'
@@ -123,8 +125,7 @@ class Sot(Serializable):
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
     perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
     url = Column(String)
-
-    job = relationship("Job", backref="sots")
+    job = relationship("Job", back_populates="sots")
 
 class PermDescription(Serializable):
     __tablename__ = 'perm_descriptions'
@@ -140,17 +141,58 @@ class Instance(Serializable):
     private_key = Column(String)
     pod_id = Column(String)
     process_id = Column(Integer)
-    
     job = relationship("Job", back_populates="instances")
 
+class Order(Serializable):
+    __tablename__ = 'orders'
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    order_type = Column(Enum(OrderType), nullable=False)  # Distinguishes between Bid and Ask
+    price = Column(Float, nullable=False, index=True)
+    subnet_id = Column(Integer, ForeignKey('subnets.id'), nullable=False)
+    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
+    submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
+
+    subnet = relationship("Subnet", back_populates="orders")
+    task = relationship("Task", back_populates="order", uselist=False)
+    account = relationship("Account", back_populates="order", uselist=False)
+
+class Account(Serializable):
+    __tablename__ = 'accounts'
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    amount = Column(Float, nullable=False)
+    available = Column(Float, nullable=False)
+    current_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
+    deposited_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expiry = Column(DateTime)
+
+    task = relationship("Task", back_populates="account")
+    orders = relationship("Order", back_populates="account", uselist=True)
+    transactions = relationship("AccountTransaction", back_populates="account")
+
+class AccountTransaction(Serializable):
+    __tablename__ = 'account_transactions'
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
+    user_id = Column(String, nullable=False, index=True, unique=True)
+    amount = Column(Float, nullable=False)
+    transaction_type = Column(Enum(AccountTxnType), nullable=False)  # "deposit" or "withdrawal"
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    account = relationship("Account", back_populates="transactions")
+
+
+# Database initialization
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-# Run the initialization and an example operation
+# Main function to run the initialization
 async def main():
-    await init_db()  # Create tables
+    await init_db()
 
-# Run the main function
 if __name__ == "__main__":
     asyncio.run(main())

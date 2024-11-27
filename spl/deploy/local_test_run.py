@@ -31,7 +31,6 @@ MASTER_WALLETS_FILE = os.path.join(DATA_DIR, 'master_wallets.json')
 DEPLOY_SCRIPT = os.path.join(parent_dir, 'script', 'Deploy.s.sol')
 LOG_DIR = os.path.join(parent_dir, 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
-ANVIL_LOG_FILE = os.path.join(LOG_DIR, 'anvil.log')
 SOT_LOG_FILE = os.path.join(LOG_DIR, 'sot.log')
 DB_LOG_FILE = os.path.join(LOG_DIR, 'db.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
@@ -40,7 +39,6 @@ plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
 DOCKER_IMAGE = 'zerogoliath/magnum:latest'
 DB_HOST = '127.0.0.1'
 db_url = f"http://{DB_HOST}:{DB_PORT}"
-RPC_URL = 'http://localhost:8545'
 
 GUESS_DB_PERM_ID = 1
 
@@ -71,13 +69,8 @@ if not any(isinstance(handler, logging.StreamHandler) for handler in logger.hand
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
-    parser.add_argument('--subnet_addresses', type=str, required=True, help="Path to the subnet addresses JSON file")
-    parser.add_argument('--deployment_config', type=str, required=True, help="Path to the deployment configuration JSON file")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the deployer's Ethereum account")
-    parser.add_argument('--group', type=int, required=True, help="Group for depositing stake")
-    parser.add_argument('--local_storage_dir', type=str, default='data', help="Directory for local storage of files")
-    parser.add_argument('--forge_script', type=str, default=DEPLOY_SCRIPT, help="Path to the Forge deploy script")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
     parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
     parser.add_argument('--worker_count', type=int, default=1, help="Number of workers to start")
@@ -331,53 +324,6 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
     os._exit(0)  # Force exit the program
 
 
-async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
-    contracts = {}
-    filters = {}
-    tasks = {}
-
-    # Load the contracts and set up filters for events
-    for task_type, address in subnet_addresses.items():
-        abi = load_abi('SubnetManager')
-        contracts[task_type] = web3.eth.contract(address=address, abi=abi)
-
-        # Create filters for task-related events
-        filters[task_type] = {
-            'TaskRequestSubmitted': await contracts[task_type].events.TaskRequestSubmitted.create_filter(fromBlock='latest'),
-            'SolutionSubmitted': await contracts[task_type].events.SolutionSubmitted.create_filter(fromBlock='latest'),
-            'SolverSelected': await contracts[task_type].events.SolverSelected.create_filter(fromBlock='latest'),
-            'TaskResolved': await contracts[task_type].events.TaskResolved.create_filter(fromBlock='latest')
-        }
-
-    # Main tracking loop
-    while True:
-        for task_type, contract_filters in filters.items():
-            for event_name, event_filter in contract_filters.items():
-                new_entries = await event_filter.get_new_entries()
-                for event in new_entries:
-                    task_id = event['args']['taskId']
-                    if task_type not in tasks:
-                        tasks[task_type] = {}
-                    if event_name == 'TaskRequestSubmitted':
-                        tasks[task_type][task_id] = {'active': True, 'solver_selected': False}
-                    elif event_name == 'SolverSelected':
-                        if task_id in tasks[task_type]:
-                            tasks[task_type][task_id]['solver_selected'] = True
-                    elif event_name == 'SolutionSubmitted':
-                        if task_id in tasks[task_type]:
-                            tasks[task_type][task_id]['active'] = False
-                    elif event_name == 'TaskResolved':
-                        if task_id in tasks[task_type]:
-                            tasks[task_type][task_id]['active'] = False
-
-        # Update the task counts
-        for task_type in subnet_addresses.keys():
-            active_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['active'])
-            solver_selected_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['solver_selected'] and task['active'])
-            task_counts[task_type] = (solver_selected_tasks, active_tasks)
-
-        await asyncio.sleep(0.5)  # Polling interval
-
 async def set_interval_mining(web3, interval):
     """Set the mining interval on the Ethereum node."""
     await web3.provider.make_request('evm_setIntervalMining', [interval])
@@ -421,67 +367,22 @@ async def main():
         delete_old_tensor_files(STATE_DIR, BLOCK_TIMESTAMPS_FILE, LAST_FUTURE_VERSION_FILE)
         delete_directory_contents(TEMP_DIR)
 
-        # Start anvil process
-        logging.info("Starting anvil...")
-        anvil_log = open(ANVIL_LOG_FILE, 'w')
-        anvil_process = subprocess.Popen(['anvil'], stdout=anvil_log, stderr=anvil_log, cwd=package_root_dir)
-        instance_id = await db_adapter.create_instance("anvil", ServiceType.Anvil.name, None, args.private_key, '', str(anvil_process.pid))
-        logging.info(f"Anvil started with PID {anvil_process.pid}")
-
         # Start Flask server in a separate thread
         flask_thread = threading.Thread(target=lambda: app.run(port=5002))
         flask_thread.start()
 
         logging.info("Starting deployment...")
 
-        os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
-        os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
-        os.environ['SOT_URL'] = args.sot_url
-
         logging.info(f'Time in string: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
         
-        web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(RPC_URL))
-        if not await wait_for_rpc_available(web3):
-            exit(1)
-
-        await set_interval_mining(web3, 1)
-
-        # Run the deployment command
-        deploy_command = [
-            'forge', 'script', os.path.basename(args.forge_script),
-            '--broadcast', '--rpc-url', RPC_URL,
-            '--private-key', args.private_key, '-vv'
-        ]
-        subprocess.run(deploy_command, cwd=os.path.dirname(args.forge_script), check=True)
-
-        logging.info("Deployment completed successfully.")
-
-        with open(args.subnet_addresses, 'r') as file:
-            subnet_addresses = json.load(file)
-
-        with open(args.deployment_config, 'r') as file:
-            deployment_config = json.load(file)
-
-        pool_address = deployment_config['pool']
-        distributor_contract_address = deployment_config['distributor']
-
-        deployer_account = web3.eth.account.from_key(args.private_key)
-        deployer_address = deployer_account.address
-        pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
-        token_address = await pool_contract.functions.token().call()
-        token_contract = web3.eth.contract(address=token_address, abi=load_abi('ERC20'))
-
         async with aiofiles.open(plugin_file, mode='r') as f:
             code = await f.read()
         plugin_id = await db_adapter.create_plugin('plugin', code)
         
         subnet_id = await db_adapter.create_subnet(
-            list(subnet_addresses.values())[0],
-            RPC_URL,
-            distributor_contract_address,
-            pool_address,
-            token_address,
-            args.group
+            5 * 60,
+            2 * 60,
+            10
         )
         
         job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)

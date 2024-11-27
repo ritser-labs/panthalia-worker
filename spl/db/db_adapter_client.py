@@ -11,12 +11,20 @@ from typing import Optional, List, Type, TypeVar, Dict, Any
 from ..models import (
     Job, Plugin, Subnet, Task, TaskStatus, Perm, Sot, Instance, ServiceType, Base, PermType
 )
+from ..auth.client_auth import get_auth_header
 from datetime import datetime
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 # Generic Type for SQLAlchemy models
 T = TypeVar('T', bound=Base)
+
+class AuthMethod(Enum):
+    NONE = 0
+    JWT = 1
+    KEY = 2
+    
 
 class DBAdapterClient:
     def __init__(self, base_url, private_key=None):
@@ -40,14 +48,18 @@ class DBAdapterClient:
         signed_message = account.sign_message(message_defunct)
         return signed_message.signature.hex()
 
-    async def _authenticated_request(self, method: str, endpoint: str, data=None, params=None):
+    async def _authenticated_request(self, method: str, endpoint: str, data=None, params=None, auth_method=AuthMethod.KEY):
         url = f"{self.base_url}{endpoint}"
         headers = {}
 
-        if method.upper() != 'GET' and self.private_key:
-            message = self._generate_message(endpoint, data)
-            signature = self._sign_message(message)
-            headers = {"Authorization": f"{message}:{signature}"}
+        if auth_method == AuthMethod.KEY:
+            if method.upper() != 'GET' and self.private_key:
+                message = self._generate_message(endpoint, data)
+                signature = self._sign_message(message)
+                headers = {"Authorization": f"{message}:{signature}"}
+        elif auth_method == AuthMethod.JWT:
+            headers = await get_auth_header()
+            
 
         async with aiohttp.ClientSession() as session:
             try:
@@ -123,21 +135,30 @@ class DBAdapterClient:
     async def get_subnet(self, subnet_id: int) -> Optional[Subnet]:
         return await self._fetch_entity('/get_subnet', Subnet, params={'subnet_id': subnet_id})
 
-    async def create_subnet(self, address: str, rpc_url: str, distributor_address: str, pool_address: str, token_address: str, solver_group: int) -> Optional[int]:
+    async def create_subnet(self, dispute_period: int, solve_period: int, stake_multiplier: float) -> Optional[int]:
         data = {
-            'address': address,
-            'rpc_url': rpc_url,
-            'distributor_address': distributor_address,
-            'pool_address': pool_address,
-            'token_address': token_address,
-            'solver_group': solver_group
+            'dispute_period': dispute_period,
+            'solve_period': solve_period,
+            'stake_multiplier': stake_multiplier
         }
         response = await self._authenticated_request('POST', '/create_subnet', data=data)
         return self._extract_id(response, 'subnet_id')
 
     # --- TASKS ---
-    async def get_task(self, subnet_task_id: int, subnet_id: int) -> Optional[Task]:
-        return await self._fetch_entity('/get_task', Task, params={'subnet_task_id': subnet_task_id, 'subnet_id': subnet_id})
+    async def get_task(self, task_id: int, subnet_id: int) -> Optional[Task]:
+        return await self._fetch_entity('/get_task', Task, params={'task_id': task_id, 'subnet_id': subnet_id})
+    
+    async def get_assigned_tasks(self) -> Optional[int]:
+        response = await self._authenticated_request(
+            'GET', '/get_assigned_tasks', params={},
+            auth_method=AuthMethod.JWT)
+        return response.get('assigned_tasks')
+    
+    async def get_num_orders(self, subnet_id: int, order_type: str) -> Optional[int]:
+        response = await self._authenticated_request(
+            'GET', '/get_num_orders', params={'subnet_id': subnet_id, 'order_type': order_type},
+            auth_method=AuthMethod.JWT)
+        return response.get('num_orders')
 
     async def get_tasks_for_job(self, job_id: int, offset: int = 0, limit: int = 20) -> Optional[List[Task]]:
         params = {'job_id': job_id, 'offset': offset, 'limit': limit}
@@ -160,37 +181,19 @@ class DBAdapterClient:
         params = {'job_id': job_id, 'statuses': statuses}
         return await self._fetch_entity('/get_last_task_with_status', Task, params=params)
 
-    async def create_task(self, job_id: int, subnet_task_id: int, job_iteration: int, status: str) -> Optional[int]:
+    async def create_task(self, job_id: int, job_iteration: int, status: str, params: str) -> Optional[int]:
         data = {
             'job_id': job_id,
-            'subnet_task_id': subnet_task_id,
             'job_iteration': job_iteration,
-            'status': status
+            'status': status,
+            'params': params
         }
         response = await self._authenticated_request('POST', '/create_task', data=data)
         return self._extract_id(response, 'task_id')
 
-    async def update_time_solved(self, subnet_task_id: int, job_id: int, time_solved: int) -> bool:
+    async def update_task_status(self, task_id: int, job_id: int, status: str, result=None, solver_address=None) -> bool:
         data = {
-            'subnet_task_id': subnet_task_id,
-            'job_id': job_id,
-            'time_solved': time_solved
-        }
-        response = await self._authenticated_request('POST', '/update_time_solved', data=data)
-        return 'success' in response
-
-    async def update_time_solver_selected(self, subnet_task_id: int, job_id: int, time_solver_selected: int) -> bool:
-        data = {
-            'subnet_task_id': subnet_task_id,
-            'job_id': job_id,
-            'time_solver_selected': time_solver_selected
-        }
-        response = await self._authenticated_request('POST', '/update_time_solver_selected', data=data)
-        return 'success' in response
-
-    async def update_task_status(self, subnet_task_id: int, job_id: int, status: str, result=None, solver_address=None) -> bool:
-        data = {
-            'subnet_task_id': subnet_task_id,
+            'task_id': task_id,
             'job_id': job_id,
             'status': status,
             'result': result,
@@ -198,6 +201,54 @@ class DBAdapterClient:
         }
         response = await self._authenticated_request('POST', '/update_task_status', data=data)
         return 'success' in response
+
+    # --- ORDERS ---
+    async def create_order(self, task_id: int, subnet_id: int, order_type: str, price: float) -> Optional[int]:
+        data = {
+            'task_id': task_id,
+            'subnet_id': subnet_id,
+            'order_type': order_type,
+            'price': price
+        }
+        response = await self._authenticated_request('POST', '/create_order', data=data, auth_method=AuthMethod.JWT)
+        return self._extract_id(response, 'order_id')
+    
+    async def create_bids_and_tasks(self, job_id: int, num_tasks: int, price: float, params: str) -> Optional[List[Dict[str, int]]]:
+        data = {
+            'job_id': job_id,
+            'num_tasks': num_tasks,
+            'price': price,
+            'params': params
+        }
+        response = await self._authenticated_request('POST', '/create_bids_and_tasks', data=data)
+        if 'error' in response:
+            logger.error(f"Error creating bids and tasks: {response['error']}")
+            return None
+        return response.get('created_items')
+
+
+    async def delete_order(self, order_id: int) -> bool:
+        data = {
+            'order_id': order_id
+        }
+        response = await self._authenticated_request('POST', '/delete_order', data=data)
+        return 'success' in response
+
+    # --- STAKES ---
+    async def deposit_account(self,  amount: float) -> bool:
+        data = {
+            'amount': amount
+        }
+        response = await self._authenticated_request('POST', '/deposit_account', data=data, auth_method=AuthMethod.JWT)
+        return 'success' in response
+
+    async def withdraw_account(self, amount: float) -> bool:
+        data = {
+            'amount': amount
+        }
+        response = await self._authenticated_request('POST', '/withdraw_account', data=data, auth_method=AuthMethod.JWT)
+        return 'success' in response
+
 
     # --- PERMISSIONS ---
     async def get_perm(self, address: str, perm: int) -> Optional[Perm]:

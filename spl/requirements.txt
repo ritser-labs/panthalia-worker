@@ -16,7 +16,7 @@ uvicorn
 quart-cors
 aiohttp
 safetensors
-supertokens-python
+auth0-python
 
 aiosqlite
 sqlalchemy

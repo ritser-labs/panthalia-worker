@@ -25,3 +25,14 @@ def requires_user_auth(func):
         
         return func(*args, **kwargs)
     return wrapper
+
+def get_user_id():
+    """
+    Retrieves the user's unique identifier (sub) from the JWT payload.
+
+    Returns:
+        str: The user ID from the JWT payload, or None if not authenticated.
+    """
+    if not hasattr(g, 'user') or not g.user:
+        return None
+    return g.user.get('sub')

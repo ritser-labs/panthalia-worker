@@ -41,7 +41,7 @@ class StandardPlugin:
         self.inner_weight_decay = inner_weight_decay
         self.preload_batch_count = preload_batch_count
     
-    def get_master_learning_hyperparameters(self, current_master_iteration):
+    def get_master_learning_hyperparameters(self):
         return {
             'steps': self.num_steps,
             'max_lr': self.inner_max_lr,

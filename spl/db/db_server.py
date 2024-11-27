@@ -6,9 +6,12 @@ import logging
 from .db_adapter_server import db_adapter_server
 from ..api_auth import requires_authentication
 from ..models import PermType, TaskStatus, ServiceType
+from ..auth.view import requires_user_auth
 from quart_cors import cors
 import os
 from functools import wraps
+from quart import g
+
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -75,11 +78,13 @@ def require_json_keys(*required_keys):
         return wrapper
     return decorator
 
-# Helper for POST routes returning IDs
-def create_post_route_return_id(method, required_keys, id_key, require_auth=True):
+# helper for POST routes that return IDs
+def create_post_route_return_id(method, required_keys, id_key, require_auth=True, require_user_auth=False):
     def decorator(handler_func):
         if require_auth:
             handler_func = requires_auth(handler_func)
+        if require_user_auth:
+            handler_func = requires_user_auth(handler_func)
         handler_func = require_json_keys(*required_keys)(handler_func)
         handler_func = handle_errors(handler_func)
         return handler_func
@@ -90,8 +95,31 @@ def create_post_route_return_id(method, required_keys, id_key, require_auth=True
 
     return decorator(handler)
 
+
+# helper for POST routes that don't return IDs
+def create_post_route(method, required_keys, require_auth=True, require_user_auth=False):
+    def decorator(handler_func):
+        if require_auth:
+            handler_func = requires_auth(handler_func)
+        if require_user_auth:
+            handler_func = requires_user_auth(handler_func)
+        handler_func = require_json_keys(*required_keys)(handler_func)
+        handler_func = handle_errors(handler_func)
+        return handler_func
+
+    async def handler(data):
+        result = await method(**data)
+        if result is None:
+            return jsonify({'success': True}), 200
+        else:
+            return jsonify(result), 200
+
+    return decorator(handler)
+
+
+
 # Helper for creating GET routes
-def create_get_route(entity_name, method, params):
+def create_get_route(entity_name, method, params, require_user_auth=False):
     async def handler(*args, **kwargs):
         query_params = {p: request.args.get(p) for p in params}
         entity = await method(**query_params)
@@ -106,6 +134,9 @@ def create_get_route(entity_name, method, params):
             return jsonify(entity.as_dict()), 200
         else:
             return jsonify({'error': f'{entity_name} not found'}), 404
+    
+    if require_user_auth:
+        handler_func = requires_user_auth(handler_func)
 
     return require_params(*params)(handle_errors(handler))
 
@@ -115,7 +146,9 @@ app.route('/get_job', methods=['GET'], endpoint='get_job_endpoint')(create_get_r
 app.route('/get_plugin', methods=['GET'], endpoint='get_plugin_endpoint')(create_get_route('Plugin', db_adapter_server.get_plugin, ['plugin_id']))
 app.route('/get_subnet_using_address', methods=['GET'], endpoint='get_subnet_using_address_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet_using_address, ['address']))
 app.route('/get_subnet', methods=['GET'], endpoint='get_subnet_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet, ['subnet_id']))
-app.route('/get_task', methods=['GET'], endpoint='get_task_endpoint')(create_get_route('Task', db_adapter_server.get_task, ['subnet_task_id', 'subnet_id']))
+app.route('/get_task', methods=['GET'], endpoint='get_task_endpoint')(create_get_route('Task', db_adapter_server.get_task, ['task_id', 'subnet_id']))
+app.route('/get_assigned_tasks', methods=['GET'], endpoint='get_assigned_tasks_endpoint')(create_get_route('Task', db_adapter_server.get_assigned_tasks, [], require_user_auth=True))
+app.route('/get_num_orders', methods=['GET'], endpoint='get_num_orders_endpoint')(create_get_route('int', db_adapter_server.get_num_orders, ['subnet_id', 'order_type'], require_user_auth=True))
 app.route('/get_perm', methods=['GET'], endpoint='get_perm_endpoint')(create_get_route('Permission', db_adapter_server.get_perm, ['address', 'perm']))
 app.route('/get_sot', methods=['GET'], endpoint='get_sot_endpoint')(create_get_route('SOT', db_adapter_server.get_sot, ['id']))
 app.route('/get_sot_by_job_id', methods=['GET'], endpoint='get_sot_by_job_id_endpoint')(create_get_route('SOT', db_adapter_server.get_sot_by_job_id, ['job_id']))
@@ -193,11 +226,63 @@ app.route('/create_perm', methods=['POST'], endpoint='create_perm_endpoint')(
 app.route('/create_perm_description', methods=['POST'], endpoint='create_perm_description_endpoint')(
     create_post_route_return_id(db_adapter_server.create_perm_description, ['perm_type'], 'perm_description_id')
 )
+# updated create_task endpoint
 app.route('/create_task', methods=['POST'], endpoint='create_task_endpoint')(
-    create_post_route_return_id(db_adapter_server.create_task, ['job_id', 'subnet_task_id', 'job_iteration', 'status'], 'task_id')
+    create_post_route_return_id(
+        db_adapter_server.create_task,
+        ['job_id', 'job_iteration', 'status', 'params'],
+        'task_id',
+        require_user_auth=True
+    )
 )
+
+app.route('/create_bids_and_tasks', methods=['POST'], endpoint='create_bids_and_tasks_endpoint')(
+    create_post_route(
+        db_adapter_server.create_bids_and_tasks,
+        ['job_id', 'num_tasks', 'price', 'params'],
+        require_auth=True
+    )
+)
+
+# create_order endpoint
+app.route('/create_order', methods=['POST'], endpoint='create_order_endpoint')(
+    create_post_route_return_id(
+        db_adapter_server.create_order,
+        ['task_id', 'subnet_id', 'order_type', 'price'],
+        'order_id',
+        require_user_auth=True
+    )
+)
+
+# delete_order endpoint
+app.route('/delete_order', methods=['POST'], endpoint='delete_order_endpoint')(
+    create_post_route(
+        db_adapter_server.delete_order,
+        ['order_id'],
+        require_user_auth=True
+    )
+)
+
+# deposit_account endpoint
+app.route('/deposit_account', methods=['POST'], endpoint='deposit_account_endpoint')(
+    create_post_route(
+        db_adapter_server.deposit_account,
+        ['amount'],
+        require_user_auth=True
+    )
+)
+
+# withdraw_account endpoint
+app.route('/withdraw_account', methods=['POST'], endpoint='withdraw_account_endpoint')(
+    create_post_route(
+        db_adapter_server.withdraw_account,
+        ['amount'],
+        require_user_auth=True
+    )
+)
+
 app.route('/create_subnet', methods=['POST'], endpoint='create_subnet_endpoint')(
-    create_post_route_return_id(db_adapter_server.create_subnet, ['address', 'rpc_url', 'distributor_address', 'pool_address', 'token_address', 'solver_group'], 'subnet_id')
+    create_post_route_return_id(db_adapter_server.create_subnet, ['dispute_period', 'solve_period', 'stake_multiplier'], 'subnet_id')
 )
 app.route('/create_state_update', methods=['POST'], endpoint='create_state_update_endpoint')(
     create_post_route_return_id(db_adapter_server.create_state_update, ['job_id', 'data'], 'state_update_id')
@@ -218,14 +303,8 @@ app.route('/update_job_iteration', methods=['POST'], endpoint='update_job_iterat
 app.route('/mark_job_as_done', methods=['POST'], endpoint='mark_job_as_done_endpoint')(
     create_post_route_return_id(db_adapter_server.mark_job_as_done, ['job_id'], 'success')
 )
-app.route('/update_time_solved', methods=['POST'], endpoint='update_time_solved_endpoint')(
-    create_post_route_return_id(db_adapter_server.update_time_solved, ['subnet_task_id', 'job_id', 'time_solved'], 'success')
-)
-app.route('/update_time_solver_selected', methods=['POST'], endpoint='update_time_solver_selected_endpoint')(
-    create_post_route_return_id(db_adapter_server.update_time_solver_selected, ['subnet_task_id', 'job_id', 'time_solver_selected'], 'success')
-)
 app.route('/update_task_status', methods=['POST'], endpoint='update_task_status_endpoint')(
-    create_post_route_return_id(db_adapter_server.update_task_status, ['subnet_task_id', 'job_id', 'status'], 'success')
+    create_post_route_return_id(db_adapter_server.update_task_status, ['task_id', 'job_id', 'status'], 'success')
 )
 app.route('/update_instance', methods=['POST'], endpoint='update_instance_endpoint')(
     create_post_route_return_id(db_adapter_server.update_instance, ['instance_id'], 'success')
