@@ -53,7 +53,7 @@ class DBAdapterClient:
         headers = {}
 
         if auth_method == AuthMethod.KEY:
-            if method.upper() != 'GET' and self.private_key:
+            if self.private_key:
                 message = self._generate_message(endpoint, data)
                 signature = self._sign_message(message)
                 headers = {"Authorization": f"{message}:{signature}"}
