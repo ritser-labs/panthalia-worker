@@ -22,7 +22,7 @@ T = TypeVar('T', bound=Base)
 
 class AuthMethod(Enum):
     NONE = 0
-    JWT = 1
+    USER = 1
     KEY = 2
     
 
@@ -57,7 +57,7 @@ class DBAdapterClient:
                 message = self._generate_message(endpoint, data)
                 signature = self._sign_message(message)
                 headers = {"Authorization": f"{message}:{signature}"}
-        elif auth_method == AuthMethod.JWT:
+        elif auth_method == AuthMethod.USER:
             headers = await get_auth_header()
             
 
@@ -151,13 +151,13 @@ class DBAdapterClient:
     async def get_assigned_tasks(self) -> Optional[int]:
         response = await self._authenticated_request(
             'GET', '/get_assigned_tasks', params={},
-            auth_method=AuthMethod.JWT)
+            auth_method=AuthMethod.USER)
         return response.get('assigned_tasks')
     
     async def get_num_orders(self, subnet_id: int, order_type: str) -> Optional[int]:
         response = await self._authenticated_request(
             'GET', '/get_num_orders', params={'subnet_id': subnet_id, 'order_type': order_type},
-            auth_method=AuthMethod.JWT)
+            auth_method=AuthMethod.USER)
         return response.get('num_orders')
 
     async def get_tasks_for_job(self, job_id: int, offset: int = 0, limit: int = 20) -> Optional[List[Task]]:
@@ -210,7 +210,7 @@ class DBAdapterClient:
             'order_type': order_type,
             'price': price
         }
-        response = await self._authenticated_request('POST', '/create_order', data=data, auth_method=AuthMethod.JWT)
+        response = await self._authenticated_request('POST', '/create_order', data=data, auth_method=AuthMethod.USER)
         return self._extract_id(response, 'order_id')
     
     async def create_bids_and_tasks(self, job_id: int, num_tasks: int, price: float, params: str) -> Optional[List[Dict[str, int]]]:
@@ -239,14 +239,14 @@ class DBAdapterClient:
         data = {
             'amount': amount
         }
-        response = await self._authenticated_request('POST', '/deposit_account', data=data, auth_method=AuthMethod.JWT)
+        response = await self._authenticated_request('POST', '/deposit_account', data=data, auth_method=AuthMethod.USER)
         return 'success' in response
 
     async def withdraw_account(self, amount: float) -> bool:
         data = {
             'amount': amount
         }
-        response = await self._authenticated_request('POST', '/withdraw_account', data=data, auth_method=AuthMethod.JWT)
+        response = await self._authenticated_request('POST', '/withdraw_account', data=data, auth_method=AuthMethod.USER)
         return 'success' in response
 
 
