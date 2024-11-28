@@ -65,7 +65,6 @@ class Master:
         job_id,  # Add job_id to interact with the database
         subnet_id,
         db_adapter,
-        max_concurrent_iterations,
         max_iterations,
         detailed_logs,
     ):
@@ -74,7 +73,6 @@ class Master:
         self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
         self.sot_url = sot_url
         self.subnet_addresses = subnet_addresses
-        self.max_concurrent_iterations = max_concurrent_iterations
         self.iteration = 0  # Track the number of iterations
         self.losses = []  # Initialize loss list
         self.loss_queue = queue.Queue()
@@ -138,6 +136,7 @@ class Master:
             (await self.db_adapter.get_job(self.job_id)).plugin_id,
             self.db_adapter
         )
+        self.max_concurrent_iterations = await self.plugin.get("max_concurrent_iterations")
         logger.info('Initialized plugin')
 
 
@@ -578,7 +577,6 @@ async def run_master_task(*args):
 async def check_for_new_jobs(
     private_key: str,
     db_url: str,
-    max_concurrent_iterations: int,
     detailed_logs: bool,
     num_workers: int,
     deploy_type: str,
@@ -622,7 +620,6 @@ async def check_for_new_jobs(
                 job.id,
                 job.subnet_id,
                 db_adapter,
-                max_concurrent_iterations,
                 float('inf'),
                 detailed_logs,
             ]
@@ -656,12 +653,6 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="URL for the database",
-    )
-    parser.add_argument(
-        "--max_concurrent_iterations",
-        type=int,
-        default=4,
-        help="Maximum number of concurrent iterations",
     )
     parser.add_argument(
         "--detailed_logs",
@@ -698,7 +689,6 @@ if __name__ == "__main__":
     asyncio.run(check_for_new_jobs(
         args.private_key,
         args.db_url,
-        args.max_concurrent_iterations,
         args.detailed_logs,
         args.num_workers,
         args.deploy_type,

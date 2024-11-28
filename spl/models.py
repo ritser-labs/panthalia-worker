@@ -177,7 +177,6 @@ class Account(Serializable):
     available = Column(Float, nullable=False)
     current_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
     deposited_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    expiry = Column(DateTime)
 
     task = relationship("Task", back_populates="account")
     orders = relationship("Order", back_populates="account", uselist=True)

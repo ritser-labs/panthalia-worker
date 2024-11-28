@@ -126,7 +126,7 @@ def delete_directory_contents(directory):
         except Exception as e:
             logging.debug(f"Error deleting directory {directory}: {e}")
 
-async def terminate_processes(db_adapter, job_id):
+async def terminate_processes(db_adapter):
     # Initialize the Docker client
     docker_client = docker.from_env()
 
@@ -198,7 +198,7 @@ def fetch_latest_loss(sot_url):
 
     return latest_loss_cache['value']
 
-async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
+async def monitor_processes(stdscr, db_adapter, task_counts):
     global args
     logger = logging.getLogger()
     for handler in logger.handlers:
@@ -309,7 +309,7 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
         elif key == curses.KEY_RESIZE:
             last_resize = time.time()
         elif key == ord('q'):
-            await terminate_processes(db_adapter, job_id)
+            await terminate_processes(db_adapter)
             break
 
         if last_resize and time.time() - last_resize > 0.1:
@@ -328,8 +328,8 @@ async def set_interval_mining(web3, interval):
     """Set the mining interval on the Ethereum node."""
     await web3.provider.make_request('evm_setIntervalMining', [interval])
 
-def run_monitor_processes(stdscr, db_adapter, job_id, task_counts):
-    asyncio.run(monitor_processes(stdscr, db_adapter, job_id, task_counts))
+def run_monitor_processes(stdscr, db_adapter, task_counts):
+    asyncio.run(monitor_processes(stdscr, db_adapter, task_counts))
 
 async def main():
     global base_url
@@ -375,23 +375,15 @@ async def main():
 
         logging.info(f'Time in string: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
         
-        async with aiofiles.open(plugin_file, mode='r') as f:
-            code = await f.read()
-        plugin_id = await db_adapter.create_plugin('plugin', code)
-        
         subnet_id = await db_adapter.create_subnet(
             5 * 60,
             2 * 60,
             10
         )
-        
-        job_id = await db_adapter.create_job('test_job', plugin_id, subnet_id, args.sot_url, 0)
 
         db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb.name)
         
         assert db_perm_id == GUESS_DB_PERM_ID, f"Expected db_perm_id {GUESS_DB_PERM_ID}, got {db_perm_id}"
-
-        plugin = await get_plugin(plugin_id, db_adapter)
 
 
         await db_adapter.create_perm(args.private_key, db_perm_id)
@@ -403,7 +395,6 @@ async def main():
             master_command = [
                 'python', '-m', 'spl.master',
                 '--private_key', args.private_key,
-                '--max_concurrent_iterations', str(await plugin.get('max_concurrent_iterations')),
                 '--db_url', db_url,
                 '--num_workers', str(args.worker_count),
                 '--deploy_type', 'local',
@@ -418,15 +409,15 @@ async def main():
 
             logging.info("Master process started.")
 
-            curses_thread = threading.Thread(target=curses.wrapper, args=(run_monitor_processes, db_adapter, job_id, task_counts))
+            curses_thread = threading.Thread(target=curses.wrapper, args=(run_monitor_processes, db_adapter, task_counts))
             curses_thread.start()
         except Exception as e:
             logging.error(f"Error: {e}", exc_info=True)
-            await terminate_processes(db_adapter, job_id)
+            await terminate_processes(db_adapter)
             exit(1)
     except Exception as e:
         logging.error(f"Error: {e}", exc_info=True)
-        await terminate_processes(db_adapter, job_id)
+        await terminate_processes(db_adapter)
         exit(1)
     finally:
         for instance in await db_adapter.get_all_instances():

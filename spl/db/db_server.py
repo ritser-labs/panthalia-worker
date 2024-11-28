@@ -6,11 +6,12 @@ import logging
 from .db_adapter_server import db_adapter_server
 from ..api_auth import requires_authentication
 from ..models import PermType, TaskStatus, ServiceType
-from ..auth.view import requires_user_auth
+from ..auth.server_auth import requires_user_auth
 from quart_cors import cors
 import os
 from functools import wraps
 from quart import g
+from .db_adapter_client import AuthMethod
 
 
 logging.basicConfig(
@@ -79,11 +80,11 @@ def require_json_keys(*required_keys):
     return decorator
 
 # helper for POST routes that return IDs
-def create_post_route_return_id(method, required_keys, id_key, require_auth=True, require_user_auth=False):
+def create_post_route_return_id(method, required_keys, id_key, auth_method=AuthMethod.KEY):
     def decorator(handler_func):
-        if require_auth:
+        if auth_method == AuthMethod.KEY:
             handler_func = requires_auth(handler_func)
-        if require_user_auth:
+        elif auth_method == AuthMethod.JWT:
             handler_func = requires_user_auth(handler_func)
         handler_func = require_json_keys(*required_keys)(handler_func)
         handler_func = handle_errors(handler_func)
@@ -97,11 +98,11 @@ def create_post_route_return_id(method, required_keys, id_key, require_auth=True
 
 
 # helper for POST routes that don't return IDs
-def create_post_route(method, required_keys, require_auth=True, require_user_auth=False):
+def create_post_route(method, required_keys, auth_method=AuthMethod.KEY):
     def decorator(handler_func):
-        if require_auth:
+        if auth_method == AuthMethod.KEY:
             handler_func = requires_auth(handler_func)
-        if require_user_auth:
+        elif auth_method == AuthMethod.JWT:
             handler_func = requires_user_auth(handler_func)
         handler_func = require_json_keys(*required_keys)(handler_func)
         handler_func = handle_errors(handler_func)
@@ -119,7 +120,7 @@ def create_post_route(method, required_keys, require_auth=True, require_user_aut
 
 
 # Helper for creating GET routes
-def create_get_route(entity_name, method, params, require_user_auth=False):
+def create_get_route(entity_name, method, params, auth_method=AuthMethod.NONE):
     async def handler(*args, **kwargs):
         query_params = {p: request.args.get(p) for p in params}
         entity = await method(**query_params)
@@ -135,7 +136,7 @@ def create_get_route(entity_name, method, params, require_user_auth=False):
         else:
             return jsonify({'error': f'{entity_name} not found'}), 404
     
-    if require_user_auth:
+    if auth_method == AuthMethod.JWT:
         handler = requires_user_auth(handler)
 
     return require_params(*params)(handle_errors(handler))
@@ -147,8 +148,8 @@ app.route('/get_plugin', methods=['GET'], endpoint='get_plugin_endpoint')(create
 app.route('/get_subnet_using_address', methods=['GET'], endpoint='get_subnet_using_address_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet_using_address, ['address']))
 app.route('/get_subnet', methods=['GET'], endpoint='get_subnet_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet, ['subnet_id']))
 app.route('/get_task', methods=['GET'], endpoint='get_task_endpoint')(create_get_route('Task', db_adapter_server.get_task, ['task_id', 'subnet_id']))
-app.route('/get_assigned_tasks', methods=['GET'], endpoint='get_assigned_tasks_endpoint')(create_get_route('Task', db_adapter_server.get_assigned_tasks, [], require_user_auth=True))
-app.route('/get_num_orders', methods=['GET'], endpoint='get_num_orders_endpoint')(create_get_route('int', db_adapter_server.get_num_orders, ['subnet_id', 'order_type'], require_user_auth=True))
+app.route('/get_assigned_tasks', methods=['GET'], endpoint='get_assigned_tasks_endpoint')(create_get_route('Task', db_adapter_server.get_assigned_tasks, [], auth_method=AuthMethod.JWT))
+app.route('/get_num_orders', methods=['GET'], endpoint='get_num_orders_endpoint')(create_get_route('int', db_adapter_server.get_num_orders, ['subnet_id', 'order_type'], auth_method=AuthMethod.JWT))
 app.route('/get_perm', methods=['GET'], endpoint='get_perm_endpoint')(create_get_route('Permission', db_adapter_server.get_perm, ['address', 'perm']))
 app.route('/get_sot', methods=['GET'], endpoint='get_sot_endpoint')(create_get_route('SOT', db_adapter_server.get_sot, ['id']))
 app.route('/get_sot_by_job_id', methods=['GET'], endpoint='get_sot_by_job_id_endpoint')(create_get_route('SOT', db_adapter_server.get_sot_by_job_id, ['job_id']))
@@ -209,7 +210,7 @@ app.route('/create_job', methods=['POST'], endpoint='create_job_endpoint')(
         db_adapter_server.create_job,
         ['name', 'plugin_id', 'subnet_id', 'sot_url', 'iteration'],
         'job_id',
-        require_auth=False
+        auth_method=AuthMethod.JWT
     )
 )
 app.route('/create_plugin', methods=['POST'], endpoint='create_plugin_endpoint')(
@@ -217,7 +218,7 @@ app.route('/create_plugin', methods=['POST'], endpoint='create_plugin_endpoint')
         db_adapter_server.create_plugin,
         ['name', 'code'],
         'plugin_id',
-        require_auth=False
+        auth_method=AuthMethod.JWT
     )
 )
 app.route('/create_perm', methods=['POST'], endpoint='create_perm_endpoint')(
@@ -232,7 +233,7 @@ app.route('/create_task', methods=['POST'], endpoint='create_task_endpoint')(
         db_adapter_server.create_task,
         ['job_id', 'job_iteration', 'status', 'params'],
         'task_id',
-        require_user_auth=True
+        auth_method=AuthMethod.JWT
     )
 )
 
@@ -240,7 +241,7 @@ app.route('/create_bids_and_tasks', methods=['POST'], endpoint='create_bids_and_
     create_post_route(
         db_adapter_server.create_bids_and_tasks,
         ['job_id', 'num_tasks', 'price', 'params'],
-        require_auth=True
+        auth_method=AuthMethod.JWT
     )
 )
 
@@ -250,7 +251,7 @@ app.route('/create_order', methods=['POST'], endpoint='create_order_endpoint')(
         db_adapter_server.create_order,
         ['task_id', 'subnet_id', 'order_type', 'price'],
         'order_id',
-        require_user_auth=True
+        auth_method=AuthMethod.JWT
     )
 )
 
@@ -259,7 +260,7 @@ app.route('/delete_order', methods=['POST'], endpoint='delete_order_endpoint')(
     create_post_route(
         db_adapter_server.delete_order,
         ['order_id'],
-        require_user_auth=True
+        auth_method=AuthMethod.JWT
     )
 )
 
@@ -268,7 +269,7 @@ app.route('/deposit_account', methods=['POST'], endpoint='deposit_account_endpoi
     create_post_route(
         db_adapter_server.deposit_account,
         ['amount'],
-        require_user_auth=True
+        auth_method=AuthMethod.JWT
     )
 )
 
@@ -277,7 +278,7 @@ app.route('/withdraw_account', methods=['POST'], endpoint='withdraw_account_endp
     create_post_route(
         db_adapter_server.withdraw_account,
         ['amount'],
-        require_user_auth=True
+        auth_method=AuthMethod.JWT
     )
 )
 

@@ -6,8 +6,10 @@ run ./build_image.sh in spl/ to build the docker image used for isolating the pl
 
 needs env variables:
 - `CLOUD_KEY` (if using cloud deployment)
-- `SUPERTOKENS_CONNECTION_URI`
-- `SUPERTOKENS_API_KEY`
+- `PANTHALIA_AUTH0_DOMAIN`
+- `PANTHALIA_AUTH0_CLIENT_ID`
+- `PANTHALIA_AUTH0_AUDIENCE`
+
 
 https://arxiv.org/abs/2403.07816
 https://arxiv.org/abs/2312.07987

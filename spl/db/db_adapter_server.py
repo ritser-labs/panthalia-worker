@@ -804,6 +804,36 @@ class DBAdapterServer:
             plugins = result.scalars().all()
             logger.debug(f"Retrieved {len(plugins)} plugins.")
             return plugins
+    
+    async def get_or_create_account(self, user_id: str):
+        """
+        checks if an account exists for the given user_id. if not, creates one with default configuration.
+
+        :param user_id: the id of the user to check or create an account for.
+        :return: the account object (existing or newly created).
+        """
+        async with AsyncSessionLocal() as session:
+            # check if the account exists
+            stmt = select(Account).where(Account.user_id == user_id)
+            result = await session.execute(stmt)
+            account = result.scalar_one_or_none()
+
+            if account:
+                logger.debug(f"Account already exists for user_id {user_id}: {account}")
+                return account
+
+            # create a new account with default configuration if it doesn't exist
+            new_account = Account(
+                user_id=user_id,
+                amount=0.0,  # default amount
+                available=0.0,  # default available balance
+                deposited_at=datetime.utcnow()
+            )
+            session.add(new_account)
+            await session.commit()
+
+            logger.debug(f"Created new account for user_id {user_id} with default configuration.")
+            return new_account
 
 # Instantiate the server adapter
 db_adapter_server = DBAdapterServer()
