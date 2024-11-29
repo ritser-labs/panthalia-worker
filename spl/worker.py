@@ -75,7 +75,7 @@ subnet_in_db = None
 def parse_args():
     parser = argparse.ArgumentParser(description="Worker for processing tasks based on smart contract events")
     parser.add_argument('--subnet_id', type=int, required=True, help="Subnet ID")
-    parser.add_argument('--private_keys', type=str, required=True, help="Private keys of the worker's Ethereum accounts")
+    parser.add_argument('--private_key', type=str, required=True, help="Private key of the worker")
     parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logging for loss task")
     parser.add_argument('--max_stakes', type=int, default=2, help="Maximum number of stakes to maintain")
@@ -87,14 +87,11 @@ def parse_args():
 
 args = parse_args()
 
-db_adapter = DBAdapterClient(args.db_url)
+db_adapter = DBAdapterClient(args.db_url, args.private_key)
 
 subnet = asyncio.run(db_adapter.get_subnet(args.subnet_id))
 
 args.subnet_addresses = [subnet.address]
-
-private_keys = args.private_keys.split('+')
-args.private_keys = private_keys
 
 model_initialized = False
 embedding_initialized = False

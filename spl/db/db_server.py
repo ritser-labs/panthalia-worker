@@ -51,22 +51,21 @@ def requires_auth(f):
     )(f)
 
 def requires_user_auth_with_adapter(f):
-    """
-    Wraps the `requires_user_auth` decorator to include the database adapter automatically.
-    """
-    return requires_user_auth(lambda: db_adapter_server)(f)
+    return requires_user_auth(get_db_adapter)(f)
 
 
-# Helper decorators to reduce repetitive code
 def handle_errors(f):
     @wraps(f)
     async def wrapper(*args, **kwargs):
         try:
             return await f(*args, **kwargs)
         except Exception as e:
+            #import traceback
             logger.error(f"Error: {e}")
+            #logger.error("".join(traceback.format_exception(type(e), e, e.__traceback__)))
             return jsonify({'error': str(e)}), 500
     return wrapper
+
 
 def require_params(*required_params):
     def decorator(f):
@@ -149,7 +148,7 @@ def create_get_route(entity_name, method, params, auth_method=AuthMethod.NONE):
             return jsonify({'error': f'{entity_name} not found'}), 404
     
     if auth_method == AuthMethod.USER:
-        handler = requires_user_auth(handler)
+        handler = requires_user_auth_with_adapter(handler)  # Correct usage
 
     return require_params(*params)(handle_errors(handler))
 
@@ -172,6 +171,7 @@ app.route('/get_all_instances', methods=['GET'], endpoint='get_all_instances_end
 app.route('/get_jobs_without_instances', methods=['GET'], endpoint='get_jobs_without_instances_endpoint')(create_get_route('Job', db_adapter_server.get_jobs_without_instances, []))
 app.route('/get_plugins', methods=['GET'], endpoint='get_plugins_endpoint')(create_get_route('Plugin', db_adapter_server.get_plugins, []))
 app.route('/get_account_key', methods=['GET'], endpoint='get_account_key_endpoint')(create_get_route('AccountKey', db_adapter_server.get_account_key, ['account_key_id'], auth_method=AuthMethod.USER))
+app.route('/get_account_keys', methods=['GET'], endpoint='get_account_keys_endpoint')(create_get_route('AccountKey', db_adapter_server.get_account_keys, [], auth_method=AuthMethod.USER))
 
 @app.route('/get_task_count_for_job', methods=['GET'], endpoint='get_task_count_for_job_endpoint')
 @require_params('job_id')

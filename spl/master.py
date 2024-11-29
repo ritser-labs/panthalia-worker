@@ -470,6 +470,7 @@ async def launch_worker(
     worker_private_key: str,
     db_url: str,
     sot_url: str,
+    worker_key: str
 ):
     global worker_counter
     worker_idx = worker_counter
@@ -484,6 +485,7 @@ async def launch_worker(
             '--private_keys', private_keys,
             '--sot_url', sot_url,
             '--db_url', db_url,
+            '--private_key', worker_key,
         ]
         if args.torch_compile:
             command.append('--torch_compile')
@@ -540,6 +542,7 @@ async def launch_workers(
     subnet,
     db_url: str,
     sot_url: str,
+    worker_key: str
 ):
     web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(subnet.rpc_url))
     worker_wallets = generate_wallets(args.num_workers)
@@ -556,7 +559,7 @@ async def launch_workers(
         task = asyncio.create_task(launch_worker(
             db_adapter, job, deploy_type, subnet,
             worker_wallet['private_key'], db_url,
-            sot_url
+            sot_url, worker_key
         ))
         worker_tasks.append(task)
     await asyncio.gather(*worker_tasks)
@@ -581,6 +584,7 @@ async def check_for_new_jobs(
     num_workers: int,
     deploy_type: str,
     num_master_wallets: int,
+    worker_key: str
 ):
     jobs_processing = {}
     db_adapter = DBAdapterClient(db_url, private_key)
@@ -605,7 +609,7 @@ async def check_for_new_jobs(
             logging.info(f"Starting worker processes")
             await launch_workers(
                 db_adapter, job, deploy_type, subnet,
-                db_url, sot_url
+                db_url, sot_url, worker_key
             )
 
             # Master
@@ -681,6 +685,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable torch.compile and model warmup",
     )
+    parser.add_argument(
+        '--worker_key',
+        type=str,
+        required=True,
+        help='Private key for the worker'
+    )
 
     args = parser.parse_args()
 
@@ -693,4 +703,5 @@ if __name__ == "__main__":
         args.num_workers,
         args.deploy_type,
         args.num_master_wallets,
+        args.worker_key
     ))

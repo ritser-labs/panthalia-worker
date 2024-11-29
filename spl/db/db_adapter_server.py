@@ -103,7 +103,7 @@ class DBAdapterServer:
     # Modify the create_order method
     async def create_order(self, task_id: int, subnet_id: int, order_type: OrderType, price: float):
         async with AsyncSessionLocal() as session:
-            user_id = await get_user_id()
+            user_id = get_user_id()
             account_stmt = select(Account).where(Account.user_id == user_id)
             account_result = await session.execute(account_stmt)
             account = account_result.scalar_one_or_none()
@@ -151,7 +151,7 @@ class DBAdapterServer:
     
     async def get_num_orders(self, subnet_id: int, order_type: OrderType):
         async with AsyncSessionLocal() as session:
-            user_id = await get_user_id()
+            user_id = get_user_id()
             stmt = select(Order).filter_by(subnet_id=subnet_id, user_id=user_id, order_type=order_type)
             result = await session.execute(stmt)
             orders = result.scalars().all()
@@ -257,7 +257,7 @@ class DBAdapterServer:
     
     async def create_account_key(self, public_key: str):
         async with AsyncSessionLocal() as session:
-            user_id = await get_user_id()
+            user_id = get_user_id()
             new_account_key = AccountKey(
                 user_id=user_id,
                 public_key=public_key
@@ -276,7 +276,18 @@ class DBAdapterServer:
                 logger.debug(f"Retrieved Account Key: {account_key}")
             else:
                 logger.error(f"Account Key with ID {account_key_id} not found.")
+            if account_key.user_id != get_user_id():
+                raise PermissionError("You do not have access to this account key")
             return account_key
+    
+    async def get_account_keys(self):
+        async with AsyncSessionLocal() as session:
+            user_id = get_user_id()
+            stmt = select(AccountKey).filter_by(user_id=user_id)
+            result = await session.execute(stmt)
+            account_keys = result.scalars().all()
+            logger.debug(f"Retrieved {len(account_keys)} Account Keys for User {user_id}.")
+            return account_keys
     
     async def delete_account_key(self, account_key_id: int):
         async with AsyncSessionLocal() as session:
@@ -339,7 +350,7 @@ class DBAdapterServer:
 
     async def deposit_account(self, amount: float):
         async with AsyncSessionLocal() as session:
-            user_id = await get_user_id()
+            user_id = get_user_id()
             stmt = select(Account).where(Account.user_id == user_id)
             result = await session.execute(stmt)
             account = result.scalar_one_or_none()
@@ -353,7 +364,7 @@ class DBAdapterServer:
 
     async def withdraw_account(self, amount: float):
         async with AsyncSessionLocal() as session:
-            user_id = await get_user_id()
+            user_id = get_user_id()
             stmt = select(Account).where(Account.user_id == user_id)
             result = await session.execute(stmt)
             account = result.scalar_one_or_none()
@@ -505,7 +516,7 @@ class DBAdapterServer:
                 raise ValueError(f"Task with ID {task_id} not found.")
 
             # ensure the user has permission to submit the result
-            if task.ask.user_id != await get_user_id():
+            if task.ask.user_id != get_user_id():
                 raise PermissionError("You do not have access to submit a result for this task.")
 
             # ensure the task is in the correct status
@@ -581,7 +592,7 @@ class DBAdapterServer:
     
     async def get_assigned_tasks(self):
         async with AsyncSessionLocal() as session:
-            user_id = await get_user_id()
+            user_id = get_user_id()
             
             # Query tasks where the ask order's user_id matches the current user_id
             # and the task status is TaskStatus.SolverSelected

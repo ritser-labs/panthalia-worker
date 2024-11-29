@@ -75,6 +75,7 @@ def parse_args():
     parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
     parser.add_argument('--worker_count', type=int, default=1, help="Number of workers to start")
     parser.add_argument('--torch_compile', action='store_true', help="Enable torch.compile and model warmup")
+    parser.add_argument('--worker_key', type=str, required=True, help="Private key of the worker")
     return parser.parse_args()
 
 sync_status = {}
@@ -398,6 +399,7 @@ async def main():
                 '--db_url', db_url,
                 '--num_workers', str(args.worker_count),
                 '--deploy_type', 'local',
+                '--worker_key', args.worker_key,
             ]
             if args.detailed_logs:
                 master_command.append('--detailed_logs')

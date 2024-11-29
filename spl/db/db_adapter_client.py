@@ -11,7 +11,6 @@ from typing import Optional, List, Type, TypeVar, Dict, Any
 from ..models import (
     Job, Plugin, Subnet, Task, TaskStatus, Perm, Sot, Instance, ServiceType, Base, PermType
 )
-from ..auth.client_auth import get_auth_header
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -237,6 +236,10 @@ class DBAdapterClient:
             'account_key_id': account_key_id
         }
         response = await self._authenticated_request('GET', '/get_account_key', params=params)
+        return response
+
+    async def get_account_keys(self) -> Optional[List[Dict[str, Any]]]:
+        response = await self._authenticated_request('GET', '/get_account_keys')
         return response
 
     async def delete_account_key(self, account_key_id: int) -> bool:
