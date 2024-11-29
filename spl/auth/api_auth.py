@@ -7,7 +7,7 @@ import logging
 from quart import request, jsonify
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from .db.db_adapter_client import DBAdapterClient
+from ..db.db_adapter_client import DBAdapterClient
 import aiofiles
 
 EXPIRY_TIME = 10

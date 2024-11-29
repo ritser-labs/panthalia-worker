@@ -4,14 +4,13 @@ import asyncio
 from quart import Quart, request, jsonify
 import logging
 from .db_adapter_server import db_adapter_server
-from ..api_auth import requires_authentication
+from ..auth.api_auth import requires_authentication
 from ..models import PermType, TaskStatus, ServiceType
 from ..auth.server_auth import requires_user_auth
 from quart_cors import cors
 import os
 from functools import wraps
-from quart import g
-from .db_adapter_client import AuthMethod
+from enum import Enum
 
 
 logging.basicConfig(
@@ -33,6 +32,12 @@ state_dir = os.path.join(data_dir, 'state')
 db_adapter = None
 os.makedirs(state_dir, exist_ok=True)
 
+class AuthMethod(Enum):
+    NONE = 0
+    USER = 1
+    KEY = 2
+
+
 def get_perm_modify_db():
     return perm_modify_db
 
@@ -44,6 +49,13 @@ def requires_auth(f):
         get_db_adapter,
         get_perm_modify_db
     )(f)
+
+def requires_user_auth_with_adapter(f):
+    """
+    Wraps the `requires_user_auth` decorator to include the database adapter automatically.
+    """
+    return requires_user_auth(lambda: db_adapter_server)(f)
+
 
 # Helper decorators to reduce repetitive code
 def handle_errors(f):
@@ -85,7 +97,7 @@ def create_post_route_return_id(method, required_keys, id_key, auth_method=AuthM
         if auth_method == AuthMethod.KEY:
             handler_func = requires_auth(handler_func)
         elif auth_method == AuthMethod.USER:
-            handler_func = requires_user_auth(handler_func)
+            handler_func = requires_user_auth_with_adapter(handler_func)
         handler_func = require_json_keys(*required_keys)(handler_func)
         handler_func = handle_errors(handler_func)
         return handler_func
@@ -103,7 +115,7 @@ def create_post_route(method, required_keys, auth_method=AuthMethod.KEY):
         if auth_method == AuthMethod.KEY:
             handler_func = requires_auth(handler_func)
         elif auth_method == AuthMethod.USER:
-            handler_func = requires_user_auth(handler_func)
+            handler_func = requires_user_auth_with_adapter(handler_func)
         handler_func = require_json_keys(*required_keys)(handler_func)
         handler_func = handle_errors(handler_func)
         return handler_func
@@ -159,6 +171,7 @@ app.route('/get_tasks_for_job', methods=['GET'], endpoint='get_tasks_for_job_end
 app.route('/get_all_instances', methods=['GET'], endpoint='get_all_instances_endpoint')(create_get_route('Instance', db_adapter_server.get_all_instances, []))
 app.route('/get_jobs_without_instances', methods=['GET'], endpoint='get_jobs_without_instances_endpoint')(create_get_route('Job', db_adapter_server.get_jobs_without_instances, []))
 app.route('/get_plugins', methods=['GET'], endpoint='get_plugins_endpoint')(create_get_route('Plugin', db_adapter_server.get_plugins, []))
+app.route('/get_account_key', methods=['GET'], endpoint='get_account_key_endpoint')(create_get_route('AccountKey', db_adapter_server.get_account_key, ['account_key_id'], auth_method=AuthMethod.USER))
 
 @app.route('/get_task_count_for_job', methods=['GET'], endpoint='get_task_count_for_job_endpoint')
 @require_params('job_id')
@@ -281,7 +294,12 @@ app.route('/withdraw_account', methods=['POST'], endpoint='withdraw_account_endp
         auth_method=AuthMethod.USER
     )
 )
-
+app.route('/create_account_key', methods=['POST'], endpoint='create_account_key_endpoint')(
+    create_post_route_return_id(db_adapter_server.create_account_key, ['public_key'], 'account_key_id', auth_method=AuthMethod.USER)
+)
+app.route('/delete_account_key', methods=['POST'], endpoint='delete_account_key_endpoint')(
+    create_post_route(db_adapter_server.delete_account_key, ['account_key_id'], auth_method=AuthMethod.USER)
+)
 app.route('/create_subnet', methods=['POST'], endpoint='create_subnet_endpoint')(
     create_post_route_return_id(db_adapter_server.create_subnet, ['dispute_period', 'solve_period', 'stake_multiplier'], 'subnet_id')
 )

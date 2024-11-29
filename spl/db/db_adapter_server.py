@@ -3,7 +3,8 @@
 from ..models import (
     AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet,
     Perm, Sot, PermDescription, PermType, Base, init_db, ServiceType,
-    Instance, Order, Account, OrderType, AccountTransaction, AccountTxnType
+    Instance, Order, Account, OrderType, AccountTransaction, AccountTxnType,
+    AccountKey
 )
 from ..auth.view import get_user_id
 from sqlalchemy import select, update, desc, func
@@ -253,6 +254,40 @@ class DBAdapterServer:
             await session.delete(order)
             await session.commit()
             logger.debug(f"Deleted Order with ID {order_id} and reversed the account transaction.")
+    
+    async def create_account_key(self, public_key: str):
+        async with AsyncSessionLocal() as session:
+            user_id = await get_user_id()
+            new_account_key = AccountKey(
+                user_id=user_id,
+                public_key=public_key
+            )
+            session.add(new_account_key)
+            await session.commit()
+            logger.debug(f"Created Account Key {public_key} for User {user_id}.")
+            return new_account_key.id
+    
+    async def get_account_key(self, account_key_id: int):
+        async with AsyncSessionLocal() as session:
+            stmt = select(AccountKey).filter_by(id=account_key_id)
+            result = await session.execute(stmt)
+            account_key = result.scalar_one_or_none()
+            if account_key:
+                logger.debug(f"Retrieved Account Key: {account_key}")
+            else:
+                logger.error(f"Account Key with ID {account_key_id} not found.")
+            return account_key
+    
+    async def delete_account_key(self, account_key_id: int):
+        async with AsyncSessionLocal() as session:
+            stmt = select(AccountKey).filter_by(id=account_key_id)
+            result = await session.execute(stmt)
+            account_key = result.scalar_one_or_none()
+            if not account_key or account_key.user_id != get_user_id():
+                raise PermissionError("You do not have access to delete this account key.")
+            await session.delete(account_key)
+            await session.commit()
+            logger.debug(f"Deleted Account Key with ID {account_key_id}.")
 
     async def match_bid_ask_orders(self, subnet_id: int):
         """

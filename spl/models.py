@@ -193,6 +193,12 @@ class AccountTransaction(Serializable):
     
     account = relationship("Account", back_populates="transactions")
 
+class AccountKey(Serializable):
+    __tablename__ = 'account_keys'
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    public_key = Column(String, nullable=False)
+
 # Database initialization
 async def init_db():
     async with engine.begin() as conn:

@@ -13,18 +13,12 @@ from ..models import (
 )
 from ..auth.client_auth import get_auth_header
 from datetime import datetime
-from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 # Generic Type for SQLAlchemy models
 T = TypeVar('T', bound=Base)
 
-class AuthMethod(Enum):
-    NONE = 0
-    USER = 1
-    KEY = 2
-    
 
 class DBAdapterClient:
     def __init__(self, base_url, private_key=None):
@@ -48,18 +42,14 @@ class DBAdapterClient:
         signed_message = account.sign_message(message_defunct)
         return signed_message.signature.hex()
 
-    async def _authenticated_request(self, method: str, endpoint: str, data=None, params=None, auth_method=AuthMethod.KEY):
+    async def _authenticated_request(self, method: str, endpoint: str, data=None, params=None):
         url = f"{self.base_url}{endpoint}"
         headers = {}
 
-        if auth_method == AuthMethod.KEY:
-            if self.private_key:
-                message = self._generate_message(endpoint, data)
-                signature = self._sign_message(message)
-                headers = {"Authorization": f"{message}:{signature}"}
-        elif auth_method == AuthMethod.USER:
-            headers = await get_auth_header()
-            
+        if self.private_key:
+            message = self._generate_message(endpoint, data)
+            signature = self._sign_message(message)
+            headers = {"Authorization": f"{message}:{signature}"}
 
         async with aiohttp.ClientSession() as session:
             try:
@@ -151,13 +141,13 @@ class DBAdapterClient:
     async def get_assigned_tasks(self) -> Optional[int]:
         response = await self._authenticated_request(
             'GET', '/get_assigned_tasks', params={},
-            auth_method=AuthMethod.USER)
+            )
         return response.get('assigned_tasks')
     
     async def get_num_orders(self, subnet_id: int, order_type: str) -> Optional[int]:
         response = await self._authenticated_request(
             'GET', '/get_num_orders', params={'subnet_id': subnet_id, 'order_type': order_type},
-            auth_method=AuthMethod.USER)
+            )
         return response.get('num_orders')
 
     async def get_tasks_for_job(self, job_id: int, offset: int = 0, limit: int = 20) -> Optional[List[Task]]:
@@ -210,7 +200,7 @@ class DBAdapterClient:
             'order_type': order_type,
             'price': price
         }
-        response = await self._authenticated_request('POST', '/create_order', data=data, auth_method=AuthMethod.USER)
+        response = await self._authenticated_request('POST', '/create_order', data=data, )
         return self._extract_id(response, 'order_id')
     
     async def create_bids_and_tasks(self, job_id: int, num_tasks: int, price: float, params: str) -> Optional[List[Dict[str, int]]]:
@@ -234,19 +224,41 @@ class DBAdapterClient:
         response = await self._authenticated_request('POST', '/delete_order', data=data)
         return 'success' in response
 
+    # --- ACCOUNTS ---
+    async def create_account_key(self, public_key: str) -> Optional[int]:
+        data = {
+            'public_key': public_key
+        }
+        response = await self._authenticated_request('POST', '/create_account_key', data=data)
+        return self._extract_id(response, 'account_key_id')
+    
+    async def get_account_key(self, account_key_id: str) -> Optional[Dict[str, Any]]:
+        params = {
+            'account_key_id': account_key_id
+        }
+        response = await self._authenticated_request('GET', '/get_account_key', params=params)
+        return response
+
+    async def delete_account_key(self, account_key_id: int) -> bool:
+        data = {
+            'account_key_id': account_key_id
+        }
+        response = await self._authenticated_request('POST', '/delete_account_key', data=data)
+        return 'success' in response
+
     # --- STAKES ---
     async def deposit_account(self,  amount: float) -> bool:
         data = {
             'amount': amount
         }
-        response = await self._authenticated_request('POST', '/deposit_account', data=data, auth_method=AuthMethod.USER)
+        response = await self._authenticated_request('POST', '/deposit_account', data=data, )
         return 'success' in response
 
     async def withdraw_account(self, amount: float) -> bool:
         data = {
             'amount': amount
         }
-        response = await self._authenticated_request('POST', '/withdraw_account', data=data, auth_method=AuthMethod.USER)
+        response = await self._authenticated_request('POST', '/withdraw_account', data=data, )
         return 'success' in response
 
 
