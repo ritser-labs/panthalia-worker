@@ -15,6 +15,7 @@ from typing import Dict, Optional
 import logging
 import json
 import asyncio
+from eth_account import Account as EthAccount
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +256,15 @@ class DBAdapterServer:
             await session.commit()
             logger.debug(f"Deleted Order with ID {order_id} and reversed the account transaction.")
     
-    async def create_account_key(self, public_key: str):
+    # updated create_account_key method
+    async def create_account_key(self):
+        # generate an ethereum account keypair
+        account = EthAccount.create()
+
+        private_key = account.key.hex()  # private key as a hex string
+        public_key = account.address  # public key as the ethereum address
+
+        # store the public key in the database
         async with AsyncSessionLocal() as session:
             user_id = get_user_id()
             new_account_key = AccountKey(
@@ -264,8 +273,14 @@ class DBAdapterServer:
             )
             session.add(new_account_key)
             await session.commit()
-            logger.debug(f"Created Account Key {public_key} for User {user_id}.")
-            return new_account_key.id
+            logger.debug(f"created account key for user {user_id}.")
+
+        # return both private and public keys
+        return {
+            "private_key": private_key,
+            "public_key": public_key,
+            "account_key_id": new_account_key.id
+        }
     
     async def get_account_key(self, account_key_id: int):
         async with AsyncSessionLocal() as session:

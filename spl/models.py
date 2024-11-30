@@ -197,7 +197,7 @@ class AccountKey(Serializable):
     __tablename__ = 'account_keys'
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, nullable=False, index=True)
-    public_key = Column(String, nullable=False)
+    public_key = Column(String, nullable=False, index=True, unique=True)
 
 # Database initialization
 async def init_db():

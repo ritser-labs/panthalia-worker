@@ -295,7 +295,7 @@ app.route('/withdraw_account', methods=['POST'], endpoint='withdraw_account_endp
     )
 )
 app.route('/create_account_key', methods=['POST'], endpoint='create_account_key_endpoint')(
-    create_post_route_return_id(db_adapter_server.create_account_key, ['public_key'], 'account_key_id', auth_method=AuthMethod.USER)
+    create_post_route(db_adapter_server.create_account_key, [], auth_method=AuthMethod.USER)
 )
 app.route('/delete_account_key', methods=['POST'], endpoint='delete_account_key_endpoint')(
     create_post_route(db_adapter_server.delete_account_key, ['account_key_id'], auth_method=AuthMethod.USER)

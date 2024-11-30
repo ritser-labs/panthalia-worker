@@ -224,12 +224,9 @@ class DBAdapterClient:
         return 'success' in response
 
     # --- ACCOUNTS ---
-    async def create_account_key(self, public_key: str) -> Optional[int]:
-        data = {
-            'public_key': public_key
-        }
-        response = await self._authenticated_request('POST', '/create_account_key', data=data)
-        return self._extract_id(response, 'account_key_id')
+    async def create_account_key(self) -> Optional[int]:
+        response = await self._authenticated_request('POST', '/create_account_key')
+        return response
     
     async def get_account_key(self, account_key_id: str) -> Optional[Dict[str, Any]]:
         params = {
