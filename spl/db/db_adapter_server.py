@@ -157,7 +157,7 @@ class DBAdapterServer:
             result = await session.execute(stmt)
             orders = result.scalars().all()
             logger.debug(f"Retrieved {len(orders)} orders for Subnet {subnet_id}.")
-            return len(orders)
+            return {'num_orders': len(orders)}
     
     
     async def create_bids_and_tasks(
@@ -256,8 +256,7 @@ class DBAdapterServer:
             await session.commit()
             logger.debug(f"Deleted Order with ID {order_id} and reversed the account transaction.")
     
-    # updated create_account_key method
-    async def create_account_key(self):
+    async def _create_account_key(self, user_id: str):
         # generate an ethereum account keypair
         account = EthAccount.create()
 
@@ -266,10 +265,10 @@ class DBAdapterServer:
 
         # store the public key in the database
         async with AsyncSessionLocal() as session:
-            user_id = get_user_id()
+            user_id = user_id
             new_account_key = AccountKey(
                 user_id=user_id,
-                public_key=public_key
+                public_key=public_key.lower()
             )
             session.add(new_account_key)
             await session.commit()
@@ -282,17 +281,22 @@ class DBAdapterServer:
             "account_key_id": new_account_key.id
         }
     
-    async def get_account_key(self, account_key_id: int):
+    # updated create_account_key method
+    async def create_account_key(self):
+        return await self._create_account_key(get_user_id())
+    
+    async def admin_create_account_key(self, user_id: str):
+        return await self._create_account_key(user_id)
+    
+    async def account_key_from_public_key(self, public_key: str):
         async with AsyncSessionLocal() as session:
-            stmt = select(AccountKey).filter_by(id=account_key_id)
+            stmt = select(AccountKey).filter_by(public_key=public_key.lower())
             result = await session.execute(stmt)
             account_key = result.scalar_one_or_none()
             if account_key:
                 logger.debug(f"Retrieved Account Key: {account_key}")
             else:
-                logger.error(f"Account Key with ID {account_key_id} not found.")
-            if account_key.user_id != get_user_id():
-                raise PermissionError("You do not have access to this account key")
+                logger.error(f"Account Key with key {public_key} not found.")
             return account_key
     
     async def get_account_keys(self):
@@ -605,26 +609,27 @@ class DBAdapterServer:
                 logger.error(f"Task with ID {task_id} not found or does not match Subnet ID {subnet_id}.")
             return task
     
-    async def get_assigned_tasks(self):
+    async def get_assigned_tasks(self, subnet_id: int):
         async with AsyncSessionLocal() as session:
             user_id = get_user_id()
             
-            # Query tasks where the ask order's user_id matches the current user_id
-            # and the task status is TaskStatus.SolverSelected
+            # query tasks where the ask order's user_id matches the current user_id
+            # and the task status is TaskStatus.SolverSelected, also filter by subnet_id
             stmt = (
                 select(Task)
                 .join(Order, Task.id == Order.task_id)
                 .filter(
                     Order.order_type == OrderType.Ask,
                     Order.user_id == user_id,
-                    Task.status == TaskStatus.SolverSelected
+                    Task.status == TaskStatus.SolverSelected,
+                    Task.job.has(Job.subnet_id == subnet_id)  # filter by subnet_id
                 )
             )
 
             result = await session.execute(stmt)
             tasks = result.scalars().all()
 
-            logger.debug(f"Retrieved {len(tasks)} tasks assigned to user {user_id}.")
+            logger.debug(f"retrieved {len(tasks)} tasks assigned to user {user_id} in subnet {subnet_id}.")
             return {'assigned_tasks': tasks}
 
     async def get_tasks_with_pagination_for_job(self, job_id: int, offset: int = 0, limit: int = 20):

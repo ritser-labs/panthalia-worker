@@ -137,9 +137,12 @@ class DBAdapterClient:
     async def get_task(self, task_id: int, subnet_id: int) -> Optional[Task]:
         return await self._fetch_entity('/get_task', Task, params={'task_id': task_id, 'subnet_id': subnet_id})
     
-    async def get_assigned_tasks(self) -> Optional[int]:
+    async def get_assigned_tasks(self, subnet_id: int) -> Optional[int]:
+        data = {
+            'subnet_id': subnet_id
+        }
         response = await self._authenticated_request(
-            'GET', '/get_assigned_tasks', params={},
+            'GET', '/get_assigned_tasks', params=data,
             )
         return response.get('assigned_tasks')
     
@@ -227,12 +230,19 @@ class DBAdapterClient:
     async def create_account_key(self) -> Optional[int]:
         response = await self._authenticated_request('POST', '/create_account_key')
         return response
-    
-    async def get_account_key(self, account_key_id: str) -> Optional[Dict[str, Any]]:
-        params = {
-            'account_key_id': account_key_id
+
+    async def admin_create_account_key(self, user_id: str) -> Optional[int]:
+        data = {
+            'user_id': user_id
         }
-        response = await self._authenticated_request('GET', '/get_account_key', params=params)
+        return await self._authenticated_request('POST', '/admin_create_account_key', data=data)
+
+    
+    async def account_key_from_public_key(self, public_key: str) -> Optional[Dict[str, Any]]:
+        params = {
+            'public_key': public_key
+        }
+        response = await self._authenticated_request('GET', '/account_key_from_public_key', params=params)
         return response
 
     async def get_account_keys(self) -> Optional[List[Dict[str, Any]]]:

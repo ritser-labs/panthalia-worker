@@ -52,16 +52,14 @@ from .deploy.cloud_adapters.runpod import (
     launch_instance_and_record_logs,
     get_public_ip_and_port
 )
+from eth_account import Account as EthAccount
 import traceback
 worker_counter = 0
 
 class Master:
     def __init__(
         self,
-        rpc_url,
-        wallets,
         sot_url,
-        subnet_addresses,
         job_id,  # Add job_id to interact with the database
         subnet_id,
         db_adapter,
@@ -69,14 +67,11 @@ class Master:
         detailed_logs,
     ):
         logger.info("Initializing Master")
-        self.web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
-        self.web3.middleware_onion.inject(async_geth_poa_middleware, layer=0)
+        
         self.sot_url = sot_url
-        self.subnet_addresses = subnet_addresses
         self.iteration = 0  # Track the number of iterations
         self.losses = []  # Initialize loss list
         self.loss_queue = queue.Queue()
-        self.wallets = wallets
         self.current_wallet_index = 0
         self.done = False
         self.max_iterations = max_iterations
@@ -122,13 +117,6 @@ class Master:
 
         # Run the main process
         self.tasks = []  # Track running tasks
-
-    def get_next_wallet(self):
-        wallet = self.wallets[self.current_wallet_index]
-        self.current_wallet_index = (
-            self.current_wallet_index + 1
-        ) % len(self.wallets)
-        return wallet
 
     async def initialize(self):
 
@@ -278,7 +266,7 @@ class Master:
 
     def sign_message(self, message):
         message = encode_defunct(text=message)
-        account = self.web3.eth.account.from_key(args.private_key)
+        account = EthAccount.from_key(args.private_key)
         logger.info(f"signing with address {account.address}")
         signed_message = account.sign_message(message)
         return signed_message.signature.hex()
@@ -467,7 +455,6 @@ async def launch_sot(db_adapter, job, deploy_type, db_url):
 async def launch_worker(
     db_adapter, job, deploy_type,
     subnet,
-    worker_private_key: str,
     db_url: str,
     sot_url: str,
     worker_key: str
@@ -475,14 +462,11 @@ async def launch_worker(
     global worker_counter
     worker_idx = worker_counter
     worker_counter += 1
-    this_worker_wallets = [worker_private_key]
     worker_name = f'worker_{worker_idx}'
-    private_keys = '+'.join(this_worker_wallets)
     if deploy_type == 'local':
         command = [
             'python', '-m', 'spl.worker',
             '--subnet_id', str(subnet.id),
-            '--private_keys', private_keys,
             '--sot_url', sot_url,
             '--db_url', db_url,
             '--private_key', worker_key,
@@ -541,25 +525,16 @@ async def launch_workers(
     db_adapter, job, deploy_type,
     subnet,
     db_url: str,
-    sot_url: str,
-    worker_key: str
+    sot_url: str
 ):
-    web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(subnet.rpc_url))
-    worker_wallets = generate_wallets(args.num_workers)
-    token_contract = web3.eth.contract(
-        address=subnet.token_address, abi=load_abi('ERC20')
-    )
-    await fund_wallets(
-        web3, args.private_key, worker_wallets,
-        token_contract, 1, 10000 * 10**18, subnet.distributor_address
-    )
     worker_tasks = []
     for i in range(args.num_workers):
-        worker_wallet = worker_wallets[i]
+        key_result = await db_adapter.admin_create_account_key(job.user_id)
+        #logging.info(f'key_result: {key_result}')
+        worker_key = key_result['private_key']
         task = asyncio.create_task(launch_worker(
             db_adapter, job, deploy_type, subnet,
-            worker_wallet['private_key'], db_url,
-            sot_url, worker_key
+            db_url, sot_url, worker_key
         ))
         worker_tasks.append(task)
     await asyncio.gather(*worker_tasks)
@@ -583,8 +558,7 @@ async def check_for_new_jobs(
     detailed_logs: bool,
     num_workers: int,
     deploy_type: str,
-    num_master_wallets: int,
-    worker_key: str
+    num_master_wallets: int
 ):
     jobs_processing = {}
     db_adapter = DBAdapterClient(db_url, private_key)
@@ -598,8 +572,6 @@ async def check_for_new_jobs(
 
             logger.info(f"Starting new job: {job.id}")
             subnet = await db_adapter.get_subnet(job.subnet_id)
-            subnet_addresses = {}
-            subnet_addresses[TENSOR_NAME] = subnet.address
             # SOT
             logging.info(f"Starting SOT service")
             sot_db, sot_url = await launch_sot(
@@ -609,18 +581,14 @@ async def check_for_new_jobs(
             logging.info(f"Starting worker processes")
             await launch_workers(
                 db_adapter, job, deploy_type, subnet,
-                db_url, sot_url, worker_key
+                db_url, sot_url
             )
 
             # Master
             logging.info(f"Starting master process")
-            master_wallets = generate_wallets(num_master_wallets)
             
             master_args = [
-                subnet.rpc_url,
-                master_wallets,
                 sot_url,
-                subnet_addresses,
                 job.id,
                 job.subnet_id,
                 db_adapter,
@@ -685,12 +653,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable torch.compile and model warmup",
     )
-    parser.add_argument(
-        '--worker_key',
-        type=str,
-        required=True,
-        help='Private key for the worker'
-    )
 
     args = parser.parse_args()
 
@@ -702,6 +664,5 @@ if __name__ == "__main__":
         args.detailed_logs,
         args.num_workers,
         args.deploy_type,
-        args.num_master_wallets,
-        args.worker_key
+        args.num_master_wallets
     ))

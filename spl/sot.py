@@ -18,7 +18,7 @@ import psutil
 import tracemalloc
 import aiofiles
 import shutil
-from .api_auth import requires_authentication
+from .auth.api_auth import requires_authentication
 from .util.json import load_json, save_json
 from .db.db_adapter_client import DBAdapterClient
 

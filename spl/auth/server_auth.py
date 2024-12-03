@@ -37,7 +37,7 @@ async def verify_signature(db_adapter, message, signature):
         logger.debug(f"Recovered address from signature: {recovered_address}")
 
         # Retrieve the AccountKey using the recovered address
-        account_key = await db_adapter.get_account_key(recovered_address)
+        account_key = await db_adapter.account_key_from_public_key(recovered_address)
         if not account_key:
             logger.error(f"No AccountKey found for address: {recovered_address}")
             return None

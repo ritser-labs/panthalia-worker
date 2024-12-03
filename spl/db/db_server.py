@@ -136,19 +136,23 @@ def create_get_route(entity_name, method, params, auth_method=AuthMethod.NONE):
         query_params = {p: request.args.get(p) for p in params}
         entity = await method(**query_params)
         
-        # Check if the returned entity is a list or a single entity
+        # handle different return types
         if isinstance(entity, list):
             if entity:
                 return jsonify([item.as_dict() for item in entity]), 200
             else:
                 return jsonify([]), 200
+        elif isinstance(entity, dict):
+            return jsonify(entity), 200  # return dict as JSON
         elif entity:
             return jsonify(entity.as_dict()), 200
         else:
             return jsonify({'error': f'{entity_name} not found'}), 404
     
     if auth_method == AuthMethod.USER:
-        handler = requires_user_auth_with_adapter(handler)  # Correct usage
+        handler = requires_user_auth_with_adapter(handler)
+    elif auth_method == AuthMethod.KEY:
+        handler = requires_auth(handler)
 
     return require_params(*params)(handle_errors(handler))
 
@@ -159,7 +163,7 @@ app.route('/get_plugin', methods=['GET'], endpoint='get_plugin_endpoint')(create
 app.route('/get_subnet_using_address', methods=['GET'], endpoint='get_subnet_using_address_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet_using_address, ['address']))
 app.route('/get_subnet', methods=['GET'], endpoint='get_subnet_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet, ['subnet_id']))
 app.route('/get_task', methods=['GET'], endpoint='get_task_endpoint')(create_get_route('Task', db_adapter_server.get_task, ['task_id', 'subnet_id']))
-app.route('/get_assigned_tasks', methods=['GET'], endpoint='get_assigned_tasks_endpoint')(create_get_route('Task', db_adapter_server.get_assigned_tasks, [], auth_method=AuthMethod.USER))
+app.route('/get_assigned_tasks', methods=['GET'], endpoint='get_assigned_tasks_endpoint')(create_get_route('Task', db_adapter_server.get_assigned_tasks, ['subnet_id'], auth_method=AuthMethod.USER))
 app.route('/get_num_orders', methods=['GET'], endpoint='get_num_orders_endpoint')(create_get_route('int', db_adapter_server.get_num_orders, ['subnet_id', 'order_type'], auth_method=AuthMethod.USER))
 app.route('/get_perm', methods=['GET'], endpoint='get_perm_endpoint')(create_get_route('Permission', db_adapter_server.get_perm, ['address', 'perm']))
 app.route('/get_sot', methods=['GET'], endpoint='get_sot_endpoint')(create_get_route('SOT', db_adapter_server.get_sot, ['id']))
@@ -170,7 +174,7 @@ app.route('/get_tasks_for_job', methods=['GET'], endpoint='get_tasks_for_job_end
 app.route('/get_all_instances', methods=['GET'], endpoint='get_all_instances_endpoint')(create_get_route('Instance', db_adapter_server.get_all_instances, []))
 app.route('/get_jobs_without_instances', methods=['GET'], endpoint='get_jobs_without_instances_endpoint')(create_get_route('Job', db_adapter_server.get_jobs_without_instances, []))
 app.route('/get_plugins', methods=['GET'], endpoint='get_plugins_endpoint')(create_get_route('Plugin', db_adapter_server.get_plugins, []))
-app.route('/get_account_key', methods=['GET'], endpoint='get_account_key_endpoint')(create_get_route('AccountKey', db_adapter_server.get_account_key, ['account_key_id'], auth_method=AuthMethod.USER))
+app.route('/account_key_from_public_key', methods=['GET'], endpoint='account_key_from_public_key_endpoint')(create_get_route('AccountKey', db_adapter_server.account_key_from_public_key, ['public_key'], auth_method=AuthMethod.KEY))
 app.route('/get_account_keys', methods=['GET'], endpoint='get_account_keys_endpoint')(create_get_route('AccountKey', db_adapter_server.get_account_keys, [], auth_method=AuthMethod.USER))
 
 @app.route('/get_task_count_for_job', methods=['GET'], endpoint='get_task_count_for_job_endpoint')
@@ -296,6 +300,9 @@ app.route('/withdraw_account', methods=['POST'], endpoint='withdraw_account_endp
 )
 app.route('/create_account_key', methods=['POST'], endpoint='create_account_key_endpoint')(
     create_post_route(db_adapter_server.create_account_key, [], auth_method=AuthMethod.USER)
+)
+app.route('/admin_create_account_key', methods=['POST'], endpoint='admin_create_account_key_endpoint')(
+    create_post_route(db_adapter_server.admin_create_account_key, ['user_id'], auth_method=AuthMethod.KEY)
 )
 app.route('/delete_account_key', methods=['POST'], endpoint='delete_account_key_endpoint')(
     create_post_route(db_adapter_server.delete_account_key, ['account_key_id'], auth_method=AuthMethod.USER)

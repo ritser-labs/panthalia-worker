@@ -91,8 +91,6 @@ db_adapter = DBAdapterClient(args.db_url, args.private_key)
 
 subnet = asyncio.run(db_adapter.get_subnet(args.subnet_id))
 
-args.subnet_addresses = [subnet.address]
-
 model_initialized = False
 embedding_initialized = False
 latest_block_timestamps = defaultdict(lambda: 0)  # To store the latest block timestamp processed for each tensor
@@ -188,10 +186,12 @@ async def deposit_stake():
         logging.debug("Too many tasks being processed. Not depositing any more stakes.")
         return
     
-    num_orders = await db_adapter.get_num_orders(args.subnet_id, OrderType.Ask)
+    num_orders = await db_adapter.get_num_orders(args.subnet_id, OrderType.Ask.name)
+    
+    logging.info(f"Current number of stakes: {num_orders}")
     
     for _ in range(args.max_stakes - num_orders):
-        await db_adapter.create_order(None, args.subnet_id, OrderType.Ask, await get_ask_price())
+        await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, await get_ask_price())
 
 async def handle_task(task, time_invoked):
     global last_handle_event_timestamp
