@@ -17,20 +17,17 @@ from .common import (
     CHUNK_SIZE
 )
 from .models import OrderType
-from fairscale.nn.model_parallel.initialize import initialize_model_parallel
-from typing import Optional, Tuple
 from io import BytesIO
 import time
-import os
 from tqdm import tqdm
 import asyncio
 import torch._dynamo
 import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
-import heapq
-import itertools
+import datetime
 from .db.db_adapter_client import DBAdapterClient
 from .plugin_manager import get_plugin
+from datetime import timezone
 
 # Removed threading imports
 # from concurrent.futures import ThreadPoolExecutor
@@ -208,7 +205,7 @@ async def handle_task(task, time_invoked):
         last_handle_event_timestamp = current_time
 
     logging.info(f"Received event for task id {task.id}")
-
+    logging.debug(f"Task params: {task.params}")
     task_params = json.loads(task.params)
 
     logging.debug(f"Adding task to queue with ID: {task.id} and params: {task_params}")
@@ -220,7 +217,7 @@ async def handle_task(task, time_invoked):
         'plugin_id': job_db.plugin_id,
         'sot_url': job_db.sot_url,
         'task_params': task_params,
-        'time_solver_selected': task.time_solver_selected
+        'time_solver_selected': task.time_solver_selected.timestamp()
     }
 
     await task_queue.add_task(task_queue_obj)

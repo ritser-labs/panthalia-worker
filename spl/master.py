@@ -208,11 +208,11 @@ class Master:
         batch_url, targets_url = await self.get_batch_and_targets_url()
 
         logger.info(f"Iteration {iteration_number}: Starting training task")
-        task_params = {
+        task_params = json.dumps({
             "batch_url": batch_url,
             "targets_url": targets_url,
             **learning_params,
-        }
+        })
         task_id = (await self.submit_task(
             task_params, iteration_number
         ))[0]['task_id']

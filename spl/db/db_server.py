@@ -156,6 +156,16 @@ def create_route(handler_func, method, params=None, required_keys=None, id_key=N
     Generalized route creation for GET and POST routes.
     """
 
+    def recursive_as_dict(obj):
+        if isinstance(obj, dict):
+            return {k: recursive_as_dict(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [recursive_as_dict(item) for item in obj]
+        elif hasattr(obj, 'as_dict') and callable(obj.as_dict):
+            return obj.as_dict()
+        else:
+            return obj
+
     async def handler(*args, **kwargs):
         try:
             if is_post:
@@ -174,11 +184,11 @@ def create_route(handler_func, method, params=None, required_keys=None, id_key=N
                 parsed_params = parse_args_with_types(method, query_params)
                 result = await method(**parsed_params)
                 if isinstance(result, list):
-                    return jsonify([item.as_dict() for item in result]), 200 #if result else 404
+                    return jsonify([recursive_as_dict(item) for item in result]), 200
                 if isinstance(result, dict):
-                    return jsonify(result), 200
+                    return jsonify(recursive_as_dict(result)), 200
                 if result:
-                    return jsonify(result.as_dict()), 200
+                    return jsonify(recursive_as_dict(result)), 200
                 return jsonify({'error': f'{method.__name__} not found'}), 404
         except ValueError as ve:
             logging.error(f"Validation error in {method.__name__}: {ve}")
@@ -201,6 +211,7 @@ def create_route(handler_func, method, params=None, required_keys=None, id_key=N
             handler = require_params(*params)(handler)
 
     return handle_errors(handler)
+
 
 def create_get_route(entity_name, method, params, auth_method=AuthMethod.NONE):
     return create_route(None, method, params=params, auth_method=auth_method)

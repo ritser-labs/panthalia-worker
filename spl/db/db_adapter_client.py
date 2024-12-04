@@ -11,7 +11,7 @@ from typing import Optional, List, Type, TypeVar, Dict, Any
 from ..models import (
     Job, Plugin, Subnet, Task, TaskStatus, Perm, Sot, Instance, ServiceType, Base, PermType
 )
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ class DBAdapterClient:
         response = await self._authenticated_request(
             'GET', '/get_assigned_tasks', params=data,
             )
-        return response.get('assigned_tasks')
+        return [self._deserialize(Task, task) for task in response.get('assigned_tasks')]
     
     async def get_num_orders(self, subnet_id: int, order_type: str) -> Optional[int]:
         response = await self._authenticated_request(
@@ -400,10 +400,9 @@ class DBAdapterClient:
         if not date_str:
             return None
         try:
-            return datetime.fromisoformat(date_str)
+            # parse the exact string format with timezone
+            dt = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
+            return dt.replace(tzinfo=timezone.utc)  # ensure it's utc
         except ValueError:
-            try:
-                return datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
-            except ValueError:
-                logger.error(f"Failed to parse datetime string: {date_str}")
-                return None
+            logger.error(f"failed to parse datetime string: {date_str}")
+            return None

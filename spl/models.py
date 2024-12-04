@@ -8,6 +8,7 @@ from .common import TaskStatus
 import os
 import asyncio
 import enum
+from pytz import UTC
 
 # Database setup
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -50,8 +51,8 @@ class Serializable(Base):
         return result
 
 class TimestampMixin:
-    last_updated = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
-    submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_updated = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    submitted_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
 
 # Models
 class Plugin(TimestampMixin, Serializable):
@@ -120,7 +121,7 @@ class StateUpdate(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
     data = Column(JSON, nullable=False)
-    submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    submitted_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     job = relationship("Job", back_populates="state_updates")
 
 class Perm(Serializable):
@@ -163,8 +164,8 @@ class Order(Serializable):
     subnet_id = Column(Integer, ForeignKey('subnets.id'), nullable=False)
     bid_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
     ask_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
-    submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
+    submitted_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
 
     subnet = relationship("Subnet", back_populates="orders")
@@ -181,7 +182,7 @@ class Account(Serializable):
     amount = Column(Float, nullable=False)
     available = Column(Float, nullable=False)
     current_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
-    deposited_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    deposited_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
 
     task = relationship("Task", back_populates="account")
     orders = relationship("Order", back_populates="account", uselist=True)
@@ -194,7 +195,7 @@ class AccountTransaction(Serializable):
     user_id = Column(String, nullable=False, index=True)
     amount = Column(Float, nullable=False)
     transaction_type = Column(Enum(AccountTxnType), nullable=False)  # "deposit" or "withdrawal"
-    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+    timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     
     account = relationship("Account", back_populates="transactions")
 
