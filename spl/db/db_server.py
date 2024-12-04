@@ -11,7 +11,11 @@ from quart_cors import cors
 import os
 from functools import wraps
 from enum import Enum
-
+from inspect import signature
+from typing import get_type_hints, Dict, Any, Union, get_origin, get_args
+from ..util.enums import str_to_enum
+import types
+import traceback
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -90,71 +94,122 @@ def require_json_keys(*required_keys):
         return wrapper
     return decorator
 
-# helper for POST routes that return IDs
-def create_post_route_return_id(method, required_keys, id_key, auth_method=AuthMethod.KEY):
-    def decorator(handler_func):
-        if auth_method == AuthMethod.KEY:
-            handler_func = requires_auth(handler_func)
-        elif auth_method == AuthMethod.USER:
-            handler_func = requires_user_auth_with_adapter(handler_func)
-        handler_func = require_json_keys(*required_keys)(handler_func)
-        handler_func = handle_errors(handler_func)
-        return handler_func
+def convert_to_type(value, expected_type):
+    if value is None:
+        # if the value is None and the type is Optional, allow it
+        if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
+            if type(None) in get_args(expected_type):
+                return None
+        raise ValueError(f"Cannot convert None to {expected_type}")
 
-    async def handler(data):
-        entity_id = await method(**data)
-        return jsonify({id_key: entity_id}), 200
+    # handle Enums
+    if isinstance(expected_type, type) and issubclass(expected_type, Enum):
+        return str_to_enum(expected_type, value)
 
-    return decorator(handler)
+    # handle Lists of Enums or other types
+    if get_origin(expected_type) is list:
+        inner_type = expected_type.__args__[0]
+        return [convert_to_type(v, inner_type) for v in value]
 
+    # handle Optional, Union, or UnionType
+    if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
+        for sub_type in get_args(expected_type):
+            try:
+                return convert_to_type(value, sub_type)
+            except ValueError:
+                continue
+        raise ValueError(f"Cannot convert {value} to any of {get_args(expected_type)}")
 
-# helper for POST routes that don't return IDs
-def create_post_route(method, required_keys, auth_method=AuthMethod.KEY):
-    def decorator(handler_func):
-        if auth_method == AuthMethod.KEY:
-            handler_func = requires_auth(handler_func)
-        elif auth_method == AuthMethod.USER:
-            handler_func = requires_user_auth_with_adapter(handler_func)
-        handler_func = require_json_keys(*required_keys)(handler_func)
-        handler_func = handle_errors(handler_func)
-        return handler_func
-
-    async def handler(data):
-        result = await method(**data)
-        if result is None:
-            return jsonify({'success': True}), 200
-        else:
-            return jsonify(result), 200
-
-    return decorator(handler)
+    # default case: attempt direct conversion
+    try:
+        return expected_type(value)
+    except Exception as e:
+        raise ValueError(f"Error converting {value} to {expected_type}: {e}")
 
 
-
-# Helper for creating GET routes
-def create_get_route(entity_name, method, params, auth_method=AuthMethod.NONE):
-    async def handler(*args, **kwargs):
-        query_params = {p: request.args.get(p) for p in params}
-        entity = await method(**query_params)
-        
-        # handle different return types
-        if isinstance(entity, list):
-            if entity:
-                return jsonify([item.as_dict() for item in entity]), 200
+def parse_args_with_types(func, args: Dict[str, Any]):
+    sig = signature(func)
+    hints = get_type_hints(func)
+    parsed_args = {}
+    for param_name, param in sig.parameters.items():
+        if param_name == 'self':
+            continue  # Skip 'self' for class methods
+        if param_name in args:
+            if param_name in hints:
+                expected_type = hints[param_name]
+                value = args[param_name]
+                try:
+                    parsed_args[param_name] = convert_to_type(value, expected_type)
+                except ValueError as ve:
+                    raise ValueError(f"Parameter '{param_name}': {ve}")
             else:
-                return jsonify([]), 200
-        elif isinstance(entity, dict):
-            return jsonify(entity), 200  # return dict as JSON
-        elif entity:
-            return jsonify(entity.as_dict()), 200
+                parsed_args[param_name] = args[param_name]
         else:
-            return jsonify({'error': f'{entity_name} not found'}), 404
-    
+            if param.default is not param.empty:
+                parsed_args[param_name] = param.default
+            else:
+                raise ValueError(f"Missing required parameter: '{param_name}'")
+    return parsed_args
+
+def create_route(handler_func, method, params=None, required_keys=None, id_key=None, auth_method=AuthMethod.NONE, is_post=False):
+    """
+    Generalized route creation for GET and POST routes.
+    """
+
+    async def handler(*args, **kwargs):
+        try:
+            if is_post:
+                data = await request.get_json()
+                if required_keys:
+                    missing = [key for key in required_keys if key not in data]
+                    if missing:
+                        return jsonify({'error': f'Missing parameters: {", ".join(missing)}'}), 400
+                parsed_data = parse_args_with_types(method, data)
+                result = await method(**parsed_data)
+                if id_key:
+                    return jsonify({id_key: result}), 200
+                return jsonify(result or {'success': True}), 200
+            else:
+                query_params = {p: request.args.get(p) for p in (params or [])}
+                parsed_params = parse_args_with_types(method, query_params)
+                result = await method(**parsed_params)
+                if isinstance(result, list):
+                    return jsonify([item.as_dict() for item in result]), 200 #if result else 404
+                if isinstance(result, dict):
+                    return jsonify(result), 200
+                if result:
+                    return jsonify(result.as_dict()), 200
+                return jsonify({'error': f'{method.__name__} not found'}), 404
+        except ValueError as ve:
+            logging.error(f"Validation error in {method.__name__}: {ve}")
+            return jsonify({'error': str(ve)}), 400
+        except Exception as e:
+            tb = traceback.format_exc()
+            logging.error(f"Error in {method.__name__}: {e}\n{tb}")
+            return jsonify({'error': str(e)}), 500
+
     if auth_method == AuthMethod.USER:
         handler = requires_user_auth_with_adapter(handler)
     elif auth_method == AuthMethod.KEY:
         handler = requires_auth(handler)
 
-    return require_params(*params)(handle_errors(handler))
+    if is_post:
+        if required_keys:
+            handler = require_json_keys(*required_keys)(handler)
+    else:
+        if params:
+            handler = require_params(*params)(handler)
+
+    return handle_errors(handler)
+
+def create_get_route(entity_name, method, params, auth_method=AuthMethod.NONE):
+    return create_route(None, method, params=params, auth_method=auth_method)
+
+def create_post_route(method, required_keys, auth_method=AuthMethod.KEY):
+    return create_route(None, method, required_keys=required_keys, auth_method=auth_method, is_post=True)
+
+def create_post_route_return_id(method, required_keys, id_key, auth_method=AuthMethod.KEY):
+    return create_route(None, method, required_keys=required_keys, id_key=id_key, auth_method=auth_method, is_post=True)
 
 
 # Define GET routes
@@ -162,7 +217,7 @@ app.route('/get_job', methods=['GET'], endpoint='get_job_endpoint')(create_get_r
 app.route('/get_plugin', methods=['GET'], endpoint='get_plugin_endpoint')(create_get_route('Plugin', db_adapter_server.get_plugin, ['plugin_id']))
 app.route('/get_subnet_using_address', methods=['GET'], endpoint='get_subnet_using_address_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet_using_address, ['address']))
 app.route('/get_subnet', methods=['GET'], endpoint='get_subnet_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet, ['subnet_id']))
-app.route('/get_task', methods=['GET'], endpoint='get_task_endpoint')(create_get_route('Task', db_adapter_server.get_task, ['task_id', 'subnet_id']))
+app.route('/get_task', methods=['GET'], endpoint='get_task_endpoint')(create_get_route('Task', db_adapter_server.get_task, ['task_id']))
 app.route('/get_assigned_tasks', methods=['GET'], endpoint='get_assigned_tasks_endpoint')(create_get_route('Task', db_adapter_server.get_assigned_tasks, ['subnet_id'], auth_method=AuthMethod.USER))
 app.route('/get_num_orders', methods=['GET'], endpoint='get_num_orders_endpoint')(create_get_route('int', db_adapter_server.get_num_orders, ['subnet_id', 'order_type'], auth_method=AuthMethod.USER))
 app.route('/get_perm', methods=['GET'], endpoint='get_perm_endpoint')(create_get_route('Permission', db_adapter_server.get_perm, ['address', 'perm']))
@@ -258,7 +313,7 @@ app.route('/create_bids_and_tasks', methods=['POST'], endpoint='create_bids_and_
     create_post_route(
         db_adapter_server.create_bids_and_tasks,
         ['job_id', 'num_tasks', 'price', 'params'],
-        auth_method=AuthMethod.USER
+        auth_method=AuthMethod.KEY
     )
 )
 

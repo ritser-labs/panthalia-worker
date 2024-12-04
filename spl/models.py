@@ -1,3 +1,5 @@
+# models.py
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from sqlalchemy import Column, Integer, String, ForeignKey, Text, UniqueConstraint, DateTime, Enum, Float, Boolean, JSON
@@ -100,19 +102,18 @@ class Task(TimestampMixin, Serializable):
     job = relationship("Job", back_populates="tasks")
     bid = relationship(
         "Order",
-        primaryjoin="and_(Task.id == Order.task_id, Order.order_type == 'bid')",
+        primaryjoin="and_(Task.id == Order.bid_task_id, Order.order_type == 'Bid')",
         uselist=False,
-        back_populates="task",
-        overlaps="ask",
+        back_populates="bid_task"
     )
     ask = relationship(
         "Order",
-        primaryjoin="and_(Task.id == Order.task_id, Order.order_type == 'ask')",
+        primaryjoin="and_(Task.id == Order.ask_task_id, Order.order_type == 'Ask')",
         uselist=False,
-        back_populates="task",
-        overlaps="bid",
+        back_populates="ask_task"
     )
     account = relationship("Account", back_populates="task")
+
 
 class StateUpdate(Serializable):
     __tablename__ = 'state_updates'
@@ -160,14 +161,18 @@ class Order(Serializable):
     order_type = Column(Enum(OrderType), nullable=False)  # Distinguishes between Bid and Ask
     price = Column(Float, nullable=False, index=True)
     subnet_id = Column(Integer, ForeignKey('subnets.id'), nullable=False)
-    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
+    bid_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
+    ask_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
     submitted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
 
     subnet = relationship("Subnet", back_populates="orders")
-    task = relationship("Task", back_populates="bid", overlaps="ask")  # Adjusts bid/ask back_populates
-    account = relationship("Account", back_populates="orders", uselist=False)  # Updated line
+    bid_task = relationship("Task", back_populates="bid", foreign_keys=[bid_task_id])
+    ask_task = relationship("Task", back_populates="ask", foreign_keys=[ask_task_id])
+    account = relationship("Account", back_populates="orders", uselist=False)
+
+
 
 class Account(Serializable):
     __tablename__ = 'accounts'
@@ -186,7 +191,7 @@ class AccountTransaction(Serializable):
     __tablename__ = 'account_transactions'
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
-    user_id = Column(String, nullable=False, index=True, unique=True)
+    user_id = Column(String, nullable=False, index=True)
     amount = Column(Float, nullable=False)
     transaction_type = Column(Enum(AccountTxnType), nullable=False)  # "deposit" or "withdrawal"
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)

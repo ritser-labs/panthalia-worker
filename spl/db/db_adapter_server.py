@@ -16,6 +16,8 @@ import logging
 import json
 import asyncio
 from eth_account import Account as EthAccount
+from sqlalchemy.orm import selectinload
+
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +104,7 @@ class DBAdapterServer:
         return new_transaction.id
 
     # Modify the create_order method
-    async def create_order(self, task_id: int, subnet_id: int, order_type: OrderType, price: float):
+    async def create_order(self, task_id: int | None, subnet_id: int, order_type: OrderType, price: float):
         async with AsyncSessionLocal() as session:
             user_id = get_user_id()
             account_stmt = select(Account).where(Account.user_id == user_id)
@@ -110,6 +112,8 @@ class DBAdapterServer:
             account = account_result.scalar_one_or_none()
             if not account or account.user_id != get_user_id():
                 raise PermissionError("You do not have access to create an order with this account.")
+            logging.info(f'order_type: {order_type}')
+            logging.info(f'type of order_type: {type(order_type)}')
 
             if order_type == OrderType.Bid:
                 if task_id is None:
@@ -121,33 +125,35 @@ class DBAdapterServer:
                     raise PermissionError("You do not have access to create an order for this task.")
                 
                 amount_to_deduct = price
-                if task.job.subnet_id != subnet_id:
+                if subnet_id != subnet_id:
                     raise ValueError(f"Task {task_id} does not belong to Subnet {subnet_id}.")
             elif order_type == OrderType.Ask:
                 if task_id is not None:
                     raise ValueError(f"Task ID must be None for Ask orders.")
-                subnet_stmt = select(Subnet).where(Subnet.id == task.job.subnet_id)
+                subnet_stmt = select(Subnet).where(Subnet.id == subnet_id)
                 subnet_result = await session.execute(subnet_stmt)
                 subnet = subnet_result.scalar_one_or_none()
                 if not subnet:
-                    raise ValueError(f"Subnet with ID {task.job.subnet_id} not found.")
-                amount_to_deduct = subnet.account_multiplier * price
+                    raise ValueError(f"Subnet with ID {subnet_id} not found.")
+                amount_to_deduct = subnet.stake_multiplier * price
 
             await self.handle_account_transaction(session, account.id, amount_to_deduct, AccountTxnType.Withdrawal)
 
             new_order = Order(
                 subnet_id=subnet_id,
-                task_id=task_id,
                 order_type=order_type,
                 account_id=account.id,
                 price=price,
                 user_id=user_id
             )
+            if order_type == OrderType.Bid:
+                new_order.bid_task = task_id
+            elif order_type == OrderType.Ask:
+                new_order.ask_task = task_id
             session.add(new_order)
+            await self.match_bid_ask_orders(session, subnet_id)
             await session.commit()
             logger.debug(f"Created Order for Task {task_id} with type {order_type} and price {price}.")
-            subnet_id = task.job.subnet_id
-            await self.match_bid_ask_orders(subnet_id)
             return new_order.id
     
     async def get_num_orders(self, subnet_id: int, order_type: OrderType):
@@ -168,16 +174,11 @@ class DBAdapterServer:
         params: str
     ):
         """
-        creates a specified number of tasks and corresponding bid orders for a job.
-        increments the job iteration with each task creation.
-        
-        :param job_id: the id of the job to associate with the tasks.
-        :param num_tasks: the number of tasks and bids to create.
-        :param price: the price for the bid orders.
-        :return: a list of dictionaries containing task ids and corresponding bid ids.
+        Creates a specified number of tasks and corresponding bid orders for a job.
+        Increments the job iteration with each task creation.
         """
         async with AsyncSessionLocal() as session:
-            # retrieve the job
+            # Retrieve the job
             stmt = select(Job).filter_by(id=job_id)
             result = await session.execute(stmt)
             job = result.scalar_one_or_none()
@@ -186,46 +187,43 @@ class DBAdapterServer:
             account = account_result.scalar_one_or_none()
             
             if not job:
-                raise ValueError(f"job with id {job_id} not found.")
-            
-            if job.user_id != get_user_id():
-                raise PermissionError("you do not have access to modify this job.")
+                raise ValueError(f"Job with id {job_id} not found.")
             
             created_items = []
             for i in range(num_tasks):
-                # increment job iteration
+                # Increment job iteration
                 job.iteration += 1
                 
-                # create a new task
+                # Create a new task
                 new_task = Task(
                     job_id=job_id,
                     job_iteration=job.iteration,
-                    status=TaskStatus.Pending,  # defaulting status to Pending
+                    status=TaskStatus.SelectingSolver,
                     params=params
                 )
                 session.add(new_task)
-                await session.flush()  # flush to get task id
+                await session.flush()  # Flush to get task id
                 
-                # create a corresponding bid order
+                # Create a corresponding bid order
                 new_bid = Order(
-                    task_id=new_task.id,
+                    bid_task=new_task,  # Link via bid_task relationship
                     order_type=OrderType.Bid,
                     account_id=account.id,
                     price=price,
                     subnet_id=job.subnet_id,
-                    user_id=get_user_id(),
+                    user_id=job.user_id,
                 )
                 session.add(new_bid)
-                await session.flush()  # flush to get order id
+                await session.flush()  # Flush to get order id
                 
                 created_items.append({
                     "task_id": new_task.id,
                     "bid_id": new_bid.id
                 })
-            
+            await self.match_bid_ask_orders(session, job.subnet_id)
             await session.commit()
-            logger.debug(f"created {num_tasks} tasks and corresponding bids for job {job_id}.")
-            return created_items
+            logger.debug(f"Created {num_tasks} tasks and corresponding bids for job {job_id}.")
+            return {'created_items': created_items}
 
 
     async def delete_order(self, order_id: int):
@@ -236,7 +234,10 @@ class DBAdapterServer:
             if not order or order.user_id != get_user_id():
                 raise PermissionError("You do not have access to delete this order.")
 
-            if order.task and order.task.ask is not None:
+            # determine associated task based on order_type
+            associated_task = order.bid_task if order.order_type == OrderType.Bid else order.ask_task
+
+            if associated_task and associated_task.ask_orders is not None:
                 raise ValueError(f"Cannot delete order {order_id} because the associated task has an ask.")
 
             if order.order_type == OrderType.Bid:
@@ -247,7 +248,7 @@ class DBAdapterServer:
                 subnet = subnet_result.scalar_one_or_none()
                 if not subnet:
                     raise ValueError(f"Subnet with ID {order.subnet_id} not found.")
-                amount_to_reverse = subnet.account_multiplier * order.price
+                amount_to_reverse = subnet.stake_multiplier * order.price
             else:
                 raise ValueError(f"Invalid order type for order {order_id}.")
 
@@ -319,53 +320,53 @@ class DBAdapterServer:
             await session.commit()
             logger.debug(f"Deleted Account Key with ID {account_key_id}.")
 
-    async def match_bid_ask_orders(self, subnet_id: int):
+    async def match_bid_ask_orders(self, session: AsyncSession, subnet_id: int):
         """
-        finds matching bid and ask orders in the specified subnet and assigns the ask order to the bid's task.
-        :param subnet_id: the id of the subnet to search for matching orders.
-        :return: list of matched orders or none if no match is found.
+        Finds matching bid and ask orders in the specified subnet and assigns the ask order to the bid's task.
         """
-        async with AsyncSessionLocal() as session:
-            # select bid orders within the given subnet that don't have a corresponding ask
-            bid_orders_stmt = (
-                select(Order)
-                .filter_by(subnet_id=subnet_id, order_type=OrderType.Bid)
-                .join(Task, Task.id == Order.task_id)
-                .filter(Task.ask == None)  # exclude tasks with existing asks
+        bid_orders_stmt = (
+            select(Order)
+            .filter_by(subnet_id=subnet_id, order_type=OrderType.Bid)
+            .options(
+                selectinload(Order.bid_task).selectinload(Task.ask)  # Eagerly load bid_task and its ask
             )
-            ask_orders_stmt = select(Order).filter_by(subnet_id=subnet_id, order_type=OrderType.Ask)
+            .join(Task, Task.id == Order.bid_task_id)  # Join via bid_task_id
+            .filter(Task.ask == None)  # Ensure no ask is linked yet
+        )
+        ask_orders_stmt = (
+            select(Order)
+            .filter_by(subnet_id=subnet_id, order_type=OrderType.Ask)
+            .options(selectinload(Order.ask_task))  # Eagerly load ask_task if needed
+        )
 
-            bid_orders_result = await session.execute(bid_orders_stmt)
-            ask_orders_result = await session.execute(ask_orders_stmt)
+        bid_orders_result = await session.execute(bid_orders_stmt)
+        ask_orders_result = await session.execute(ask_orders_stmt)
 
-            bid_orders = bid_orders_result.scalars().all()
-            ask_orders = ask_orders_result.scalars().all()
+        bid_orders = bid_orders_result.scalars().all()
+        ask_orders = ask_orders_result.scalars().all()
 
-            matches = []
+        matches = []
 
-            # attempt to match each bid with an ask
-            for bid in bid_orders:
-                for ask in ask_orders:
-                    if bid.price >= ask.price:  # matching condition: bid price must be at least as high as ask price
-                        # link the ask order to the bid's task
-                        bid.task.ask = ask
-                        bid.task.time_solver_selected = datetime.now(timezone.utc)
-                        session.add(bid.task)
-                        matches.append((bid, ask))
+        for bid in bid_orders:
+            for ask in ask_orders:
+                if bid.price >= ask.price:
+                    # Link the ask order to the task of the bid order
+                    bid.bid_task.ask = ask  # Assign the ask order to the bid's task
+                    bid.bid_task.status = TaskStatus.SolverSelected
+                    bid.bid_task.time_solver_selected = datetime.utcnow()
+                    session.add(bid.bid_task)
 
-                        # remove the matched ask order from the list to prevent reuse
-                        ask_orders.remove(ask)
-                        break
+                    # Prevent reuse of the ask order
+                    ask_orders.remove(ask)
+                    matches.append((bid, ask))
+                    break
 
-            await session.commit()
+        if matches:
+            logger.debug(f"matched {len(matches)} bid-ask pairs in subnet {subnet_id}.")
+        else:
+            logger.info(f"no matching bid-ask orders found in subnet {subnet_id}.")
 
-            if matches:
-                logger.debug(f"matched {len(matches)} bid-ask pairs in subnet {subnet_id}.")
-            else:
-                logger.info(f"no matching bid-ask orders found in subnet {subnet_id}.")
-
-            return matches
-
+        return matches
 
     async def deposit_account(self, amount: float):
         async with AsyncSessionLocal() as session:
@@ -595,29 +596,24 @@ class DBAdapterServer:
                 logger.error(f"Subnet with ID {subnet_id} not found.")
             return subnet
 
-    async def get_task(self, task_id: int, subnet_id: int):
+    async def get_task(self, task_id: int):
         async with AsyncSessionLocal() as session:
-            stmt = select(Task).options(joinedload(Task.job)).join(Task.job).join(Job.subnet).filter(
-                Task.id == task_id, 
-                Job.subnet_id == subnet_id
-            )
+            stmt = select(Task).options(joinedload(Task.job)).filter(Task.id == task_id)
             result = await session.execute(stmt)
             task = result.scalar_one_or_none()
             if task:
                 logger.debug(f"Retrieved Task: {task}")
             else:
-                logger.error(f"Task with ID {task_id} not found or does not match Subnet ID {subnet_id}.")
+                logger.error(f"Task with ID {task_id} not found.")
             return task
-    
+
     async def get_assigned_tasks(self, subnet_id: int):
         async with AsyncSessionLocal() as session:
             user_id = get_user_id()
             
-            # query tasks where the ask order's user_id matches the current user_id
-            # and the task status is TaskStatus.SolverSelected, also filter by subnet_id
             stmt = (
                 select(Task)
-                .join(Order, Task.id == Order.task_id)
+                .join(Order, Task.id == Order.ask_task_id)  # join via ask_task_id
                 .filter(
                     Order.order_type == OrderType.Ask,
                     Order.user_id == user_id,
@@ -728,7 +724,7 @@ class DBAdapterServer:
             logger.debug(f"Created Perm Description with type {perm_type} and id {perm_id}.")
             return perm_id
 
-    async def create_sot(self, job_id: int, url: str):
+    async def create_sot(self, job_id: int, url: str | None):
         async with AsyncSessionLocal() as session:
             perm = await self.create_perm_description(perm_type=PermType.ModifySot)
             new_sot = Sot(
@@ -741,7 +737,7 @@ class DBAdapterServer:
             logger.debug(f"Created SOT for Job {job_id} with perm {perm}.")
             return new_sot.id
     
-    async def update_sot(self, sot_id: int, url: str):
+    async def update_sot(self, sot_id: int, url: str | None):
         async with AsyncSessionLocal() as session:
             stmt = update(Sot).where(Sot.id == sot_id).values(url=url)
             await session.execute(stmt)
@@ -797,9 +793,9 @@ class DBAdapterServer:
         name: str,
         service_type: ServiceType,
         job_id: Optional[int],
-        private_key: str,
-        pod_id: str,
-        process_id: int
+        private_key: str | None,
+        pod_id: str | None,
+        process_id: int | None
     ):
         async with AsyncSessionLocal() as session:
             new_instance = Instance(

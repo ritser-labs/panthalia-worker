@@ -213,9 +213,9 @@ class Master:
             "targets_url": targets_url,
             **learning_params,
         }
-        task_id = await self.submit_task(
+        task_id = (await self.submit_task(
             task_params, iteration_number
-        )
+        ))[0]['task_id']
 
 
         result = await self.wait_for_result(

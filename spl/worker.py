@@ -191,7 +191,10 @@ async def deposit_stake():
     logging.info(f"Current number of stakes: {num_orders}")
     
     for _ in range(args.max_stakes - num_orders):
-        await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, await get_ask_price())
+        stake_multiplier = (await db_adapter.get_subnet(args.subnet_id)).stake_multiplier
+        price = await get_ask_price()
+        await db_adapter.deposit_account(price * stake_multiplier)
+        await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, price)
 
 async def handle_task(task, time_invoked):
     global last_handle_event_timestamp

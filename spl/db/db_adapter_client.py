@@ -134,8 +134,8 @@ class DBAdapterClient:
         return self._extract_id(response, 'subnet_id')
 
     # --- TASKS ---
-    async def get_task(self, task_id: int, subnet_id: int) -> Optional[Task]:
-        return await self._fetch_entity('/get_task', Task, params={'task_id': task_id, 'subnet_id': subnet_id})
+    async def get_task(self, task_id: int) -> Optional[Task]:
+        return await self._fetch_entity('/get_task', Task, params={'task_id': task_id})
     
     async def get_assigned_tasks(self, subnet_id: int) -> Optional[int]:
         data = {
