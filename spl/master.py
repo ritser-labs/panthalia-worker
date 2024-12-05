@@ -445,6 +445,7 @@ async def launch_sot(db_adapter, job, deploy_type, db_url):
         sot_process.terminate()
         exit(1)
     await db_adapter.update_sot(sot_id, sot_url)
+    await db_adapter.update_job_sot_url(job.id, sot_url)
     sot_db = await db_adapter.get_sot(job.id)
     sot_perm_id = sot_db.perm
     private_key_address = Account.from_key(args.private_key).address

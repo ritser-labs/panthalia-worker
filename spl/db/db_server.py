@@ -392,6 +392,9 @@ app.route('/set_last_nonce', methods=['POST'], endpoint='set_last_nonce_endpoint
 app.route('/update_job_iteration', methods=['POST'], endpoint='update_job_iteration_endpoint')(
     create_post_route_return_id(db_adapter_server.update_job_iteration, ['job_id', 'new_iteration'], 'success')
 )
+app.route('/update_job_sot_url', methods=['POST'], endpoint='update_job_sot_url_endpoint')(
+    create_post_route_return_id(db_adapter_server.update_job_sot_url, ['job_id', 'new_sot_url'], 'success')
+)
 app.route('/mark_job_as_done', methods=['POST'], endpoint='mark_job_as_done_endpoint')(
     create_post_route_return_id(db_adapter_server.mark_job_as_done, ['job_id'], 'success')
 )

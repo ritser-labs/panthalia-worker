@@ -90,6 +90,14 @@ class DBAdapterClient:
         }
         response = await self._authenticated_request('POST', '/update_job_iteration', data=data)
         return 'success' in response
+    
+    async def update_job_sot_url(self, job_id: int, new_sot_url: str) -> bool:
+        data = {
+            'job_id': job_id,
+            'new_sot_url': new_sot_url
+        }
+        response = await self._authenticated_request('POST', '/update_job_sot_url', data=data)
+        return 'success' in response
 
     async def mark_job_as_done(self, job_id: int) -> bool:
         data = {

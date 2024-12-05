@@ -43,6 +43,13 @@ class DBAdapterServer:
             await session.commit()
             logger.debug(f"Updated Job {job_id} to iteration {new_iteration}")
 
+    async def update_job_sot_url(self, job_id: int, new_sot_url: str):
+        async with AsyncSessionLocal() as session:
+            stmt = update(Job).where(Job.id == job_id).values(sot_url=new_sot_url)
+            await session.execute(stmt)
+            await session.commit()
+            logger.debug(f"Updated Job {job_id} to SOT URL {new_sot_url}")
+
     async def mark_job_as_done(self, job_id: int):
         async with AsyncSessionLocal() as session:
             stmt = update(Job).where(Job.id == job_id).values(done=True)
