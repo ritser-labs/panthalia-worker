@@ -382,14 +382,12 @@ async def main():
     
     last_loop_time = time.time()
 
+    processed_tasks = set()
     while True:
         # Schedule processing tasks
-        asyncio.create_task(process_tasks())
         logging.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
         last_loop_time = time.time()
         await deposit_stake()
-        
-        processed_tasks = set()
         
         if not reported:
             await report_sync_status()
