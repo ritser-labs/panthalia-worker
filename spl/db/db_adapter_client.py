@@ -202,6 +202,14 @@ class DBAdapterClient:
         response = await self._authenticated_request('POST', '/update_task_status', data=data)
         return 'success' in response
 
+    async def submit_task_result(self, task_id: int, result: str) -> bool:
+        data = {
+            'task_id': task_id,
+            'result': result
+        }
+        response = await self._authenticated_request('POST', '/submit_task_result', data=data)
+        return 'success' in response
+
     # --- ORDERS ---
     async def create_order(self, task_id: int, subnet_id: int, order_type: str, price: float) -> Optional[int]:
         data = {
