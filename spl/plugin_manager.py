@@ -80,9 +80,14 @@ class PluginProxy:
                     raise Exception("No 'result' in response.")
 
                 result = deserialize_data(result_serialized)
+                
                 if isinstance(result, dict) and 'error' in result:
-                    logger.error(f"Error during function '{function}': {result['error']}")
-                    raise Exception(result['error'])
+                    error_msg = result['error']
+                    logger.error(f"Error during function '{function}': {error_msg}")
+                    if error_msg == 'StopAsyncIteration':
+                        raise StopAsyncIteration
+                    else:
+                        raise Exception(error_msg)
 
                 return result
         except aiohttp.ClientError as e:
