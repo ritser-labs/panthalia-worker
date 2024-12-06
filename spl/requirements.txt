@@ -18,6 +18,7 @@ aiohttp
 safetensors
 auth0-python
 python-jose
+typeguard
 
 aiosqlite
 sqlalchemy

@@ -7,7 +7,7 @@ import requests
 import threading
 import curses
 from flask import Flask, jsonify, send_from_directory
-from ..common import load_abi, wait_for_health, wait_for_rpc_available, fund_wallets, DB_PORT, generate_wallets
+from ..common import wait_for_health, DB_PORT
 from ..db.db_adapter_client import DBAdapterClient
 from ..models import init_db, db_path, PermType, ServiceType
 from ..plugin_manager import get_plugin, global_plugin_dir
@@ -360,7 +360,7 @@ async def main():
         stdout=db_log, stderr=db_log, cwd=package_root_dir
     )
     await wait_for_health(db_url)
-    await db_adapter.create_instance("db", ServiceType.Db.name, None, args.private_key, '', str(db_process.pid))
+    await db_adapter.create_instance("db", ServiceType.Db.name, None, args.private_key, '', db_process.pid)
     logging.info(f"DB instance started with PID {db_process.pid}")
 
     try:
@@ -404,7 +404,7 @@ async def main():
             if args.torch_compile:
                 master_command.append('--torch_compile')
             master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log, cwd=package_root_dir)
-            await db_adapter.create_instance("master", ServiceType.Master.name, None, args.private_key, '', str(master_process.pid))
+            await db_adapter.create_instance("master", ServiceType.Master.name, None, args.private_key, '', master_process.pid)
             logging.info(f"Started master process with command: {' '.join(master_command)}")
 
             logging.info("Master process started.")

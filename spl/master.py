@@ -25,7 +25,6 @@ from .common import (
     MAX_SUBMIT_TASK_RETRY_DURATION,
     TENSOR_NAME,
     generate_wallets,
-    fund_wallets,
     SOT_PRIVATE_PORT,
     wait_for_health,
     load_abi
@@ -182,7 +181,8 @@ class Master:
                     self.job_id,
                     1,
                     await self.get_bid_price(),
-                    params
+                    params,
+                    None
                 )
                 return task_id
             except Exception as e:
@@ -221,6 +221,7 @@ class Master:
         result = await self.wait_for_result(
             task_id
         )
+        logger.info(f"Iteration {iteration_number}: Received result: {result}")
         loss_value = result["loss"]
         self.loss_queue.put(loss_value)
         await self.update_latest_loss(loss_value, result["version_number"])
@@ -234,6 +235,8 @@ class Master:
 
         # Update the iteration count in the database
         await self.db_adapter.update_job_iteration(self.job_id, self.iteration)
+        
+        logger.info(f"Iteration {iteration_number}: Completed training task")
 
         # Schedule the next iteration
         task = asyncio.create_task(
@@ -286,8 +289,9 @@ class Master:
             task = await self.db_adapter.get_task(
                 task_id
             )
-            result = task.result
-            if result is not None:
+            #logger.info(f'Got task: {task.as_dict()}')
+            if task.status == TaskStatus.ResolvedCorrect.name:
+                result = json.loads(task.result)
                 return result
             await asyncio.sleep(0.5)
 
@@ -573,6 +577,8 @@ async def check_for_new_jobs(
 
             logger.info(f"Starting new job: {job.id}")
             subnet = await db_adapter.get_subnet(job.subnet_id)
+            
+            await db_adapter.admin_deposit_account(job.user_id, 999999999)
             # SOT
             logging.info(f"Starting SOT service")
             sot_db, sot_url = await launch_sot(

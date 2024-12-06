@@ -1,39 +1,271 @@
-# db_adapter_server.py
+import asyncio
+import logging
+import json
+import traceback
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Optional, List
+import types
+from eth_account import Account as EthAccount
+from sqlalchemy import select, update, desc, func
+from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
     AsyncSessionLocal, Job, Task, TaskStatus, Plugin, StateUpdate, Subnet,
     Perm, Sot, PermDescription, PermType, Base, init_db, ServiceType,
     Instance, Order, Account, OrderType, AccountTransaction, AccountTxnType,
-    AccountKey
+    AccountKey, Hold, HoldTransaction, HoldType, CreditTransaction, CreditTxnType,
+    EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType
 )
 from ..auth.view import get_user_id
-from sqlalchemy import select, update, desc, func
-from sqlalchemy.orm import joinedload
-from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime, timezone
-from typing import Dict, Optional
-import logging
-import json
-import asyncio
-from eth_account import Account as EthAccount
-from sqlalchemy.orm import selectinload
-
+from ..util.enums import str_to_enum
 
 logger = logging.getLogger(__name__)
+
+# CONFIG CONSTANTS
+PLATFORM_FEE_PERCENTAGE = 0.1  # 10% fee
+DISPUTE_PAYOUT_DELAY_DAYS = 1
+MINIMUM_PAYOUT_AMOUNT = 50.0
 
 class DBAdapterServer:
     def __init__(self):
         asyncio.run(init_db())
+
+    async def get_or_create_account(self, user_id: str, session: Optional[AsyncSession] = None):
+        own_session = False
+        if session is None:
+            session = AsyncSessionLocal()
+            own_session = True
+        try:
+            stmt = select(Account).where(Account.user_id == user_id)
+            result = await session.execute(stmt)
+            account = result.scalar_one_or_none()
+
+            if account:
+                return account
+
+            new_account = Account(
+                user_id=user_id,
+                credits_balance=0.0,
+                earnings_balance=0.0,
+                deposited_at=datetime.utcnow()
+            )
+            session.add(new_account)
+            await session.commit()
+            await session.refresh(new_account)
+            return new_account
+        finally:
+            if own_session:
+                await session.close()
+
+    async def add_credits_transaction(self, session: AsyncSession, account: Account, amount: float, txn_type: CreditTxnType):
+        # credits are always fully controlled by our system
+        if txn_type == CreditTxnType.Subtract:
+            if account.credits_balance < amount:
+                raise ValueError("insufficient credits to subtract")
+            account.credits_balance -= amount
+        elif txn_type == CreditTxnType.Add:
+            account.credits_balance += amount
+
+        new_credit_txn = CreditTransaction(
+            account_id=account.id,
+            user_id=account.user_id,
+            amount=amount,
+            txn_type=txn_type,
+        )
+        session.add(new_credit_txn)
+
+    async def add_earnings_transaction(self, session: AsyncSession, account: Account, amount: float, txn_type: EarningsTxnType):
+        # treat earnings similarly to credits but in separate balance
+        if txn_type == EarningsTxnType.Subtract:
+            if account.earnings_balance < amount:
+                raise ValueError("not enough earnings to subtract")
+            account.earnings_balance -= amount
+        else:
+            account.earnings_balance += amount
+
+        new_earnings_txn = EarningsTransaction(
+            account_id=account.id,
+            user_id=account.user_id,
+            amount=amount,
+            txn_type=txn_type,
+        )
+        session.add(new_earnings_txn)
+
+    async def add_platform_revenue(self, session: AsyncSession, amount: float, txn_type: PlatformRevenueTxnType):
+        new_rev = PlatformRevenue(
+            amount=amount,
+            txn_type=txn_type
+        )
+        session.add(new_rev)
+
+    async def select_hold_for_order(self, session: AsyncSession, account: Account, subnet: Subnet, order_type: OrderType, price: float, specified_hold_id: Optional[int] = None):
+        # We must ensure that the hold remains valid for the entire solve+dispute+grace period
+        required_expiry_buffer = timedelta(days=DISPUTE_PAYOUT_DELAY_DAYS)
+        min_expiry = datetime.utcnow() + timedelta(seconds=subnet.solve_period + subnet.dispute_period) + required_expiry_buffer
+
+        if order_type == OrderType.Bid:
+            required_amount = price
+        else:
+            required_amount = subnet.stake_multiplier * price
+
+        if specified_hold_id is not None:
+            # user specified a hold
+            stmt = select(Hold).where(Hold.id == specified_hold_id, Hold.account_id == account.id)
+            result = await session.execute(stmt)
+            hold = result.scalar_one_or_none()
+            if not hold:
+                raise ValueError("specified hold not found or not yours")
+            if hold.charged:
+                raise ValueError("this hold is already charged, cannot use")
+            if hold.expiry < min_expiry:
+                raise ValueError("hold expires too soon")
+            if (hold.total_amount - hold.used_amount) < required_amount:
+                raise ValueError("not enough hold amount")
+            return hold
+        else:
+            # try to find an existing suitable hold
+            stmt = select(Hold).where(
+                Hold.account_id == account.id,
+                Hold.charged == False,
+                Hold.expiry > min_expiry,
+                (Hold.total_amount - Hold.used_amount) >= required_amount
+            )
+            result = await session.execute(stmt)
+            hold = result.scalars().first()
+            if hold:
+                return hold
+
+            # No suitable hold found.
+            # If we have enough credits to create a new hold, do it now.
+            # We'll create a credit hold if we have enough credits.
+            if account.credits_balance >= required_amount:
+                # create a new hold from credits
+                new_hold = Hold(
+                    account_id=account.id,
+                    user_id=account.user_id,
+                    hold_type=HoldType.Credits,
+                    total_amount=required_amount,
+                    used_amount=0.0,
+                    expiry=min_expiry,
+                    charged=False,
+                    charged_amount=0.0
+                )
+                session.add(new_hold)
+                # reduce the account's credits by the total hold amount immediately
+                account.credits_balance -= required_amount
+                await session.flush()
+                return new_hold
+
+            raise ValueError("no suitable hold found, please specify a hold or create one")
+
+    async def reserve_funds_on_hold(self, session: AsyncSession, hold: Hold, amount: float, order: Order):
+        if hold.total_amount - hold.used_amount < amount:
+            raise ValueError("not enough hold funds")
+        hold.used_amount += amount
+        hold_txn = HoldTransaction(
+            hold_id=hold.id,
+            order_id=order.id,
+            amount=amount
+        )
+        session.add(hold_txn)
+
+    async def free_funds_from_hold(self, session: AsyncSession, hold: Hold, amount: float, order: Order):
+        if hold.used_amount < amount:
+            raise ValueError("not enough used amount in hold to free")
+        hold.used_amount -= amount
+        hold_txn = HoldTransaction(
+            hold_id=hold.id,
+            order_id=order.id,
+            amount=-amount
+        )
+        session.add(hold_txn)
+
+    async def charge_hold_fully(self, session: AsyncSession, hold: Hold):
+        # charge the hold if not charged
+        if hold.charged:
+            raise ValueError("hold already charged")
+        hold.charged = True
+        hold.charged_amount = hold.total_amount
+
+        leftover = hold.total_amount - hold.used_amount
+        if leftover > 0:
+            # leftover returns to credits in all scenarios.
+            stmt = select(Account).where(Account.id == hold.account_id)
+            result = await session.execute(stmt)
+            account = result.scalar_one_or_none()
+            if account:
+                await self.add_credits_transaction(session, account, leftover, CreditTxnType.Add)
+
+    async def maybe_payout_earnings(self, session: AsyncSession, account: Account):
+        # If earnings_balance > MINIMUM_PAYOUT_AMOUNT => auto payout.
+        if account.earnings_balance >= MINIMUM_PAYOUT_AMOUNT:
+            payout_amount = account.earnings_balance
+            # simulate payout
+            account.earnings_balance -= payout_amount
+            logger.debug(f"Payout {payout_amount} to {account.user_id}")
+
+    async def handle_dispute_scenario(self, session: AsyncSession, task: Task):
+        # in dispute: ask loses their stake. charge ask hold fully and platform keeps stake
+        ask_order = task.ask
+        if not ask_order or not ask_order.hold:
+            raise ValueError("No ask order or hold for dispute scenario")
+
+        hold = ask_order.hold
+        if not hold.charged:
+            await self.charge_hold_fully(session, hold)
+
+        stake_amount = task.job.subnet.stake_multiplier * ask_order.price
+        if stake_amount > hold.used_amount:
+            raise ValueError("data inconsistency in stake vs hold used")
+        # stake goes to platform revenue
+        await self.add_platform_revenue(session, stake_amount, PlatformRevenueTxnType.Add)
+
+        # no payment to solver. free bid hold (if any)
+        bid_order = task.bid
+        if bid_order and bid_order.hold:
+            await self.free_funds_from_hold(session, bid_order.hold, bid_order.price, bid_order)
+
+    async def handle_correct_resolution_scenario(self, session: AsyncSession, task: Task):
+        # correct solution:
+        bid_order = task.bid
+        ask_order = task.ask
+        if not bid_order or not bid_order.hold:
+            raise ValueError("missing bid order/hold")
+        if not ask_order or not ask_order.hold:
+            raise ValueError("missing ask order/hold")
+
+        # charge both holds if not charged
+        if not bid_order.hold.charged:
+            await self.charge_hold_fully(session, bid_order.hold)
+        if not ask_order.hold.charged:
+            await self.charge_hold_fully(session, ask_order.hold)
+
+        subnet = task.job.subnet
+        stake_amount = subnet.stake_multiplier * ask_order.price
+        # free stake back from ask hold (ask was correct, so no penalty)
+        await self.free_funds_from_hold(session, ask_order.hold, stake_amount, ask_order)
+
+        # pay solver from bid funds minus platform fee
+        solver_user_id = ask_order.user_id
+        stmt = select(Account).where(Account.user_id == solver_user_id)
+        solver_acc_result = await session.execute(stmt)
+        solver_account = solver_acc_result.scalar_one_or_none()
+        if not solver_account:
+            solver_account = await self.get_or_create_account(solver_user_id, session)
+
+        platform_fee = bid_order.price * PLATFORM_FEE_PERCENTAGE
+        solver_earnings = bid_order.price - platform_fee
+        await self.add_earnings_transaction(session, solver_account, solver_earnings, EarningsTxnType.Add)
+        await self.add_platform_revenue(session, platform_fee, PlatformRevenueTxnType.Add)
+
+        await self.maybe_payout_earnings(session, solver_account)
 
     async def get_job(self, job_id: int):
         async with AsyncSessionLocal() as session:
             stmt = select(Job).filter_by(id=job_id)
             result = await session.execute(stmt)
             job = result.scalar_one_or_none()
-            if job:
-                logger.debug(f"Retrieved Job: {job}")
-            else:
-                logger.error(f"Job with ID {job_id} not found.")
             return job
 
     async def update_job_iteration(self, job_id: int, new_iteration: int):
@@ -41,22 +273,18 @@ class DBAdapterServer:
             stmt = update(Job).where(Job.id == job_id).values(iteration=new_iteration)
             await session.execute(stmt)
             await session.commit()
-            logger.debug(f"Updated Job {job_id} to iteration {new_iteration}")
 
     async def update_job_sot_url(self, job_id: int, new_sot_url: str):
         async with AsyncSessionLocal() as session:
             stmt = update(Job).where(Job.id == job_id).values(sot_url=new_sot_url)
             await session.execute(stmt)
             await session.commit()
-            logger.debug(f"Updated Job {job_id} to SOT URL {new_sot_url}")
 
     async def mark_job_as_done(self, job_id: int):
         async with AsyncSessionLocal() as session:
             stmt = update(Job).where(Job.id == job_id).values(done=True)
             await session.execute(stmt)
             await session.commit()
-            logger.info(f"Marked Job {job_id} as done.")
-
 
     async def create_task(self, job_id: int, job_iteration: int, status: TaskStatus, params: str):
         async with AsyncSessionLocal() as session:
@@ -64,7 +292,7 @@ class DBAdapterServer:
             result = await session.execute(stmt)
             job = result.scalar_one_or_none()
             if not job or job.user_id != get_user_id():
-                raise PermissionError("You do not have access to create a task for this job.")
+                raise PermissionError("no access to create a task for this job.")
 
             new_task = Task(
                 job_id=job_id,
@@ -74,134 +302,94 @@ class DBAdapterServer:
             )
             session.add(new_task)
             await session.commit()
-            logger.debug(f"Created Task for Job {job_id}, Iteration {job_iteration} with status {status}.")
             return new_task.id
-    
-    # Add this helper function in DBAdapterServer
-    async def handle_account_transaction(self, session, account_id: int, amount: float, transaction_type: AccountTxnType):
-        # Retrieve the account object
-        stmt = select(Account).where(Account.id == account_id)
-        result = await session.execute(stmt)
-        account = result.scalar_one_or_none()
 
-        if not account:
-            raise ValueError(f"Account with ID {account_id} not found.")
+    async def admin_deposit_account(self, user_id: str, amount: float):
+        # Admin can add credits to user account
+        async with AsyncSessionLocal() as session:
+            account = await self.get_or_create_account(user_id, session)
+            await self.add_credits_transaction(session, account, amount, CreditTxnType.Add)
+            await session.commit()
 
-        # Check if there is enough available balance for deduction
-        if transaction_type == AccountTxnType.Withdrawal and account.available < amount:
-            raise ValueError(f"Insufficient balance in account {account_id}.")
-
-        # Deduct or add balance
-        if transaction_type == AccountTxnType.Withdrawal:
-            account.available -= amount
-        elif transaction_type == AccountTxnType.Deposit:
-            account.available += amount
-
-        # Create a AccountTransaction
-        new_transaction = AccountTransaction(
-            account_id=account_id,
-            user_id=account.user_id,
-            amount=amount,
-            transaction_type=transaction_type,
-            timestamp=datetime.utcnow()
-        )
-        session.add(new_transaction)
-        session.add(account)  # Update the account object
-
-        return new_transaction.id
-
-    # Modify the create_order method
-    async def create_order(self, task_id: int | None, subnet_id: int, order_type: OrderType, price: float):
+    async def create_order(self, task_id: int | None, subnet_id: int, order_type: OrderType, price: float, hold_id: Optional[int] = None):
         async with AsyncSessionLocal() as session:
             user_id = get_user_id()
-            account_stmt = select(Account).where(Account.user_id == user_id)
-            account_result = await session.execute(account_stmt)
-            account = account_result.scalar_one_or_none()
-            if not account or account.user_id != get_user_id():
-                raise PermissionError("You do not have access to create an order with this account.")
-            logging.info(f'order_type: {order_type}')
-            logging.info(f'type of order_type: {type(order_type)}')
+            account = await self.get_or_create_account(user_id, session)
+
+            stmt_subnet = select(Subnet).where(Subnet.id == subnet_id)
+            subnet_result = await session.execute(stmt_subnet)
+            subnet = subnet_result.scalar_one_or_none()
+            if not subnet:
+                raise ValueError("subnet not found")
 
             if order_type == OrderType.Bid:
                 if task_id is None:
-                    raise ValueError(f"Task ID must be provided for Bid orders.")
-                task_stmt = select(Task).where(Task.id == task_id)
+                    raise ValueError("task_id required for bid")
+                task_stmt = select(Task).where(Task.id == task_id).options(joinedload(Task.job))
                 task_result = await session.execute(task_stmt)
                 task = task_result.scalar_one_or_none()
                 if not task or task.job.user_id != user_id:
-                    raise PermissionError("You do not have access to create an order for this task.")
-                
-                amount_to_deduct = price
-                if subnet_id != subnet_id:
-                    raise ValueError(f"Task {task_id} does not belong to Subnet {subnet_id}.")
+                    raise PermissionError("only the job owner can submit bids")
+
+                hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
+                new_order = Order(
+                    order_type=order_type,
+                    price=price,
+                    subnet_id=subnet_id,
+                    user_id=user_id,
+                    account_id=account.id,
+                    bid_task_id=task_id
+                )
+                session.add(new_order)
+                await session.flush()
+                await self.reserve_funds_on_hold(session, hold, price, new_order)
+                new_order.hold_id = hold.id
+
             elif order_type == OrderType.Ask:
                 if task_id is not None:
-                    raise ValueError(f"Task ID must be None for Ask orders.")
-                subnet_stmt = select(Subnet).where(Subnet.id == subnet_id)
-                subnet_result = await session.execute(subnet_stmt)
-                subnet = subnet_result.scalar_one_or_none()
-                if not subnet:
-                    raise ValueError(f"Subnet with ID {subnet_id} not found.")
-                amount_to_deduct = subnet.stake_multiplier * price
+                    raise ValueError("task_id must be None for ask")
+                hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
+                new_order = Order(
+                    order_type=order_type,
+                    price=price,
+                    subnet_id=subnet_id,
+                    user_id=user_id,
+                    account_id=account.id
+                )
+                session.add(new_order)
+                await session.flush()
+                stake_amount = subnet.stake_multiplier * price
+                await self.reserve_funds_on_hold(session, hold, stake_amount, new_order)
+                new_order.hold_id = hold.id
+            else:
+                raise ValueError("invalid order type")
 
-            await self.handle_account_transaction(session, account.id, amount_to_deduct, AccountTxnType.Withdrawal)
-
-            new_order = Order(
-                subnet_id=subnet_id,
-                order_type=order_type,
-                account_id=account.id,
-                price=price,
-                user_id=user_id
-            )
-            if order_type == OrderType.Bid:
-                new_order.bid_task = task_id
-            elif order_type == OrderType.Ask:
-                new_order.ask_task = task_id
-            session.add(new_order)
             await self.match_bid_ask_orders(session, subnet_id)
             await session.commit()
-            logger.debug(f"Created Order for Task {task_id} with type {order_type} and price {price}.")
             return new_order.id
-    
+
     async def get_num_orders(self, subnet_id: int, order_type: OrderType):
         async with AsyncSessionLocal() as session:
             user_id = get_user_id()
             stmt = select(Order).filter_by(subnet_id=subnet_id, user_id=user_id, order_type=order_type)
             result = await session.execute(stmt)
             orders = result.scalars().all()
-            logger.debug(f"Retrieved {len(orders)} orders for Subnet {subnet_id}.")
             return {'num_orders': len(orders)}
-    
-    
-    async def create_bids_and_tasks(
-        self, 
-        job_id: int, 
-        num_tasks: int, 
-        price: float,
-        params: str
-    ):
-        """
-        Creates a specified number of tasks and corresponding bid orders for a job.
-        Increments the job iteration with each task creation.
-        """
+
+    async def create_bids_and_tasks(self, job_id: int, num_tasks: int, price: float, params: str, hold_id: Optional[int] = None):
         async with AsyncSessionLocal() as session:
-            # Retrieve the job
-            stmt = select(Job).filter_by(id=job_id)
+            stmt = select(Job).filter_by(id=job_id).options(joinedload(Job.subnet))
             result = await session.execute(stmt)
             job = result.scalar_one_or_none()
-            account_stmt = select(Account).filter_by(user_id=job.user_id)
-            account_result = await session.execute(account_stmt)
-            account = account_result.scalar_one_or_none()
-            
             if not job:
-                raise ValueError(f"Job with id {job_id} not found.")
-            
+                raise ValueError(f"Job {job_id} not found.")
+
+            user_id = job.user_id
+            account = await self.get_or_create_account(user_id, session)
+
             created_items = []
             for i in range(num_tasks):
-                # Increment job iteration
                 job.iteration += 1
-                
-                # Create a new task
                 new_task = Task(
                     job_id=job_id,
                     job_iteration=job.iteration,
@@ -209,29 +397,30 @@ class DBAdapterServer:
                     params=params
                 )
                 session.add(new_task)
-                await session.flush()  # Flush to get task id
-                
-                # Create a corresponding bid order
+                await session.flush()
+
+                hold = await self.select_hold_for_order(session, account, job.subnet, OrderType.Bid, price, hold_id)
                 new_bid = Order(
-                    bid_task=new_task,  # Link via bid_task relationship
+                    bid_task=new_task,
                     order_type=OrderType.Bid,
                     account_id=account.id,
                     price=price,
                     subnet_id=job.subnet_id,
-                    user_id=job.user_id,
+                    user_id=user_id,
                 )
                 session.add(new_bid)
-                await session.flush()  # Flush to get order id
-                
+                await session.flush()
+                await self.reserve_funds_on_hold(session, hold, price, new_bid)
+                new_bid.hold_id = hold.id
+
                 created_items.append({
                     "task_id": new_task.id,
                     "bid_id": new_bid.id
                 })
+
             await self.match_bid_ask_orders(session, job.subnet_id)
             await session.commit()
-            logger.debug(f"Created {num_tasks} tasks and corresponding bids for job {job_id}.")
             return {'created_items': created_items}
-
 
     async def delete_order(self, order_id: int):
         async with AsyncSessionLocal() as session:
@@ -239,113 +428,106 @@ class DBAdapterServer:
             result = await session.execute(stmt)
             order = result.scalar_one_or_none()
             if not order or order.user_id != get_user_id():
-                raise PermissionError("You do not have access to delete this order.")
+                raise PermissionError("no access to delete this order.")
 
-            # determine associated task based on order_type
-            associated_task = order.bid_task if order.order_type == OrderType.Bid else order.ask_task
+            if order.order_type == OrderType.Bid and order.bid_task and order.bid_task.ask is not None:
+                raise ValueError("Cannot delete bid order since it's matched.")
+            if order.order_type == OrderType.Ask and order.ask_task and order.ask_task.bid is not None:
+                raise ValueError("Cannot delete ask order since it's matched.")
 
-            if associated_task and associated_task.ask_orders is not None:
-                raise ValueError(f"Cannot delete order {order_id} because the associated task has an ask.")
+            subnet_stmt = select(Subnet).filter_by(id=order.subnet_id)
+            subnet_result = await session.execute(subnet_stmt)
+            subnet = subnet_result.scalar_one_or_none()
+            if not subnet:
+                raise ValueError("Subnet not found")
 
             if order.order_type == OrderType.Bid:
                 amount_to_reverse = order.price
-            elif order.order_type == OrderType.Ask:
-                subnet_stmt = select(Subnet).filter_by(id=order.subnet_id)
-                subnet_result = await session.execute(subnet_stmt)
-                subnet = subnet_result.scalar_one_or_none()
-                if not subnet:
-                    raise ValueError(f"Subnet with ID {order.subnet_id} not found.")
-                amount_to_reverse = subnet.stake_multiplier * order.price
             else:
-                raise ValueError(f"Invalid order type for order {order_id}.")
+                amount_to_reverse = subnet.stake_multiplier * order.price
 
-            await self.handle_account_transaction(session, order.account_id, amount_to_reverse, AccountTxnType.Deposit)
+            if order.hold:
+                await self.free_funds_from_hold(session, order.hold, amount_to_reverse, order)
+            else:
+                raise ValueError("no hold found for this order")
+
             await session.delete(order)
             await session.commit()
-            logger.debug(f"Deleted Order with ID {order_id} and reversed the account transaction.")
-    
+
+    async def admin_create_account_key(self, user_id: str):
+        return await self._create_account_key(user_id)
+
+    async def create_account_key(self):
+        return await self._create_account_key(get_user_id())
+
     async def _create_account_key(self, user_id: str):
-        # generate an ethereum account keypair
         account = EthAccount.create()
+        private_key = account.key.hex()
+        public_key = account.address.lower()
 
-        private_key = account.key.hex()  # private key as a hex string
-        public_key = account.address  # public key as the ethereum address
-
-        # store the public key in the database
         async with AsyncSessionLocal() as session:
-            user_id = user_id
             new_account_key = AccountKey(
                 user_id=user_id,
-                public_key=public_key.lower()
+                public_key=public_key
             )
             session.add(new_account_key)
             await session.commit()
-            logger.debug(f"created account key for user {user_id}.")
+            await session.refresh(new_account_key)
 
-        # return both private and public keys
         return {
             "private_key": private_key,
             "public_key": public_key,
             "account_key_id": new_account_key.id
         }
-    
-    # updated create_account_key method
-    async def create_account_key(self):
-        return await self._create_account_key(get_user_id())
-    
-    async def admin_create_account_key(self, user_id: str):
-        return await self._create_account_key(user_id)
-    
+
     async def account_key_from_public_key(self, public_key: str):
         async with AsyncSessionLocal() as session:
             stmt = select(AccountKey).filter_by(public_key=public_key.lower())
             result = await session.execute(stmt)
             account_key = result.scalar_one_or_none()
-            if account_key:
-                logger.debug(f"Retrieved Account Key: {account_key}")
-            else:
-                logger.error(f"Account Key with key {public_key} not found.")
             return account_key
-    
+
     async def get_account_keys(self):
         async with AsyncSessionLocal() as session:
             user_id = get_user_id()
             stmt = select(AccountKey).filter_by(user_id=user_id)
             result = await session.execute(stmt)
             account_keys = result.scalars().all()
-            logger.debug(f"Retrieved {len(account_keys)} Account Keys for User {user_id}.")
             return account_keys
-    
+
     async def delete_account_key(self, account_key_id: int):
         async with AsyncSessionLocal() as session:
             stmt = select(AccountKey).filter_by(id=account_key_id)
             result = await session.execute(stmt)
             account_key = result.scalar_one_or_none()
             if not account_key or account_key.user_id != get_user_id():
-                raise PermissionError("You do not have access to delete this account key.")
+                raise PermissionError("No access to delete this account key.")
             await session.delete(account_key)
             await session.commit()
-            logger.debug(f"Deleted Account Key with ID {account_key_id}.")
 
     async def match_bid_ask_orders(self, session: AsyncSession, subnet_id: int):
-        """
-        Finds matching bid and ask orders in the specified subnet and assigns the ask order to the bid's task.
-        """
+        # Select bid orders that are not yet matched (Task.ask is None)
         bid_orders_stmt = (
             select(Order)
-            .filter_by(subnet_id=subnet_id, order_type=OrderType.Bid)
-            .options(
-                selectinload(Order.bid_task).selectinload(Task.ask)  # Eagerly load bid_task and its ask
+            .join(Task, Task.id == Order.bid_task_id)
+            .filter(
+                Order.subnet_id == subnet_id,
+                Order.order_type == OrderType.Bid,
+                Task.ask == None  # Ensure bid is not matched yet
             )
-            .join(Task, Task.id == Order.bid_task_id)  # Join via bid_task_id
-            .filter(Task.ask == None)  # Ensure no ask is linked yet
-        )
-        ask_orders_stmt = (
-            select(Order)
-            .filter_by(subnet_id=subnet_id, order_type=OrderType.Ask)
-            .options(selectinload(Order.ask_task))  # Eagerly load ask_task if needed
         )
 
+        # Select ask orders that are not yet matched (Order.ask_task_id is None)
+        ask_orders_stmt = (
+            select(Order)
+            .filter(
+                Order.subnet_id == subnet_id,
+                Order.order_type == OrderType.Ask,
+                Order.ask_task_id == None  # Ensure ask is not matched yet
+            )
+        )
+
+        # Execute the queries
         bid_orders_result = await session.execute(bid_orders_stmt)
         ask_orders_result = await session.execute(ask_orders_stmt)
 
@@ -353,58 +535,22 @@ class DBAdapterServer:
         ask_orders = ask_orders_result.scalars().all()
 
         matches = []
-
         for bid in bid_orders:
             for ask in ask_orders:
                 if bid.price >= ask.price:
-                    # Link the ask order to the task of the bid order
-                    bid.bid_task.ask = ask  # Assign the ask order to the bid's task
-                    bid.bid_task.status = TaskStatus.SolverSelected
-                    bid.bid_task.time_solver_selected = datetime.utcnow()
-                    session.add(bid.bid_task)
-
-                    # Prevent reuse of the ask order
+                    # Assign the ask to the bid's task
+                    bid_task = bid.bid_task
+                    bid_task.ask = ask  # Establish the relationship
+                    bid_task.status = TaskStatus.SolverSelected
+                    bid_task.time_solver_selected = datetime.utcnow()
+                    session.add(bid_task)
+                    
+                    # Remove the matched ask to prevent it from being matched again
                     ask_orders.remove(ask)
                     matches.append((bid, ask))
-                    break
-
-        if matches:
-            logger.debug(f"matched {len(matches)} bid-ask pairs in subnet {subnet_id}.")
-        else:
-            logger.info(f"no matching bid-ask orders found in subnet {subnet_id}.")
+                    break  # Move to the next bid after a successful match
 
         return matches
-
-    async def deposit_account(self, amount: float):
-        async with AsyncSessionLocal() as session:
-            user_id = get_user_id()
-            stmt = select(Account).where(Account.user_id == user_id)
-            result = await session.execute(stmt)
-            account = result.scalar_one_or_none()
-            if not account:
-                raise PermissionError("You do not have access to deposit into this account.")
-
-            await self.handle_account_transaction(session, account.id, amount, AccountTxnType.Deposit)
-            await session.commit()
-            logger.debug(f"Deposited {amount} into Account {account.id}.")
-
-
-    async def withdraw_account(self, amount: float):
-        async with AsyncSessionLocal() as session:
-            user_id = get_user_id()
-            stmt = select(Account).where(Account.user_id == user_id)
-            result = await session.execute(stmt)
-            account = result.scalar_one_or_none()
-            if not account:
-                raise PermissionError("You do not have access to withdraw from this account.")
-
-            if account.available < amount:
-                raise ValueError(f"Insufficient balance in account {account.id} to withdraw {amount}.")
-
-            await self.handle_account_transaction(session, account.id, amount, AccountTxnType.Withdrawal)
-            await session.commit()
-            logger.debug(f"Withdrew {amount} from Account {account.id}.")
-
 
     async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int):
         async with AsyncSessionLocal() as session:
@@ -415,21 +561,16 @@ class DBAdapterServer:
                 user_id=get_user_id(),
                 sot_url=sot_url,
                 iteration=iteration,
-                done=False,  # assuming default is False
+                done=False,
                 last_updated=datetime.utcnow(),
                 submitted_at=datetime.utcnow()
             )
             session.add(new_job)
             await session.commit()
-            logger.debug(f"Created Job {name} with ID {new_job.id}.")
+            await session.refresh(new_job)
             return new_job.id
 
-    async def create_subnet(
-        self,
-        dispute_period: int,
-        solve_period: int,
-        stake_multiplier: float,
-    ):
+    async def create_subnet(self, dispute_period: int, solve_period: int, stake_multiplier: float):
         async with AsyncSessionLocal() as session:
             new_subnet = Subnet(
                 dispute_period=dispute_period,
@@ -438,7 +579,7 @@ class DBAdapterServer:
             )
             session.add(new_subnet)
             await session.commit()
-            logger.debug(f"Created Subnet {new_subnet.id}.")
+            await session.refresh(new_subnet)
             return new_subnet.id
 
     async def create_plugin(self, name: str, code: str):
@@ -449,115 +590,69 @@ class DBAdapterServer:
             )
             session.add(new_plugin)
             await session.commit()
-            logger.debug(f"Created Plugin {name} with code {code}.")
+            await session.refresh(new_plugin)
             return new_plugin.id
-    
-    async def update_task_status(
-        self,
-        task_id: int,
-        job_id: int,
-        status: TaskStatus,
-        result=None,
-        solver_address=None
-    ):
+
+    async def update_task_status(self, task_id: int, job_id: int, status: TaskStatus, result=None, solver_address=None):
         async with AsyncSessionLocal() as session:
             stmt = update(Task).where(
-                Task.id == task_id
-                and Task.job_id == job_id
+                Task.id == task_id,
+                Task.job_id == job_id
             ).values(
-                status=status, result=result, solver_address=solver_address)
+                status=status, result=result
+            )
             await session.execute(stmt)
             await session.commit()
-            logger.debug(f"Updated Task {task_id} to status {status} with result {result}.")
-    
+
     async def should_dispute(self, task):
+        # placeholder: always false here
         return False
-    
-    async def resolve_task(
-        self,
-        task: Task,
-        result: str,
-        status: TaskStatus
-    ):
+
+    async def resolve_task(self, session: AsyncSession, task: Task, result: str, status: TaskStatus):
+        task.result = result
+        task.status = status
+        task.time_solved = datetime.now(timezone.utc)
+        session.add(task)
+
+        should_dispute = await self.should_dispute(task)
+        if should_dispute:
+            # Dispute scenario
+            await self.handle_dispute_scenario(session, task)
+        else:
+            # Correct solution scenario
+            await self.handle_correct_resolution_scenario(session, task)
+
+        # Do not commit here; let the caller handle the commit
+
+    async def submit_task_result(self, task_id: int, result: str) -> bool:
         async with AsyncSessionLocal() as session:
-            # update the task with the result and status
-            task.result = result
-            task.status = status
-            task.time_solved = datetime.now(timezone.utc)
-
-            # reward the solver and re-add the stake
-            bid_order = task.bid
-            if not bid_order:
-                raise ValueError(f"No associated bid order found for task {task.id}.")
-
-            # retrieve solver account
-            solver_account_stmt = select(Account).where(Account.id == bid_order.account_id)
-            solver_account_result = await session.execute(solver_account_stmt)
-            solver_account = solver_account_result.scalar_one_or_none()
-
-            if not solver_account:
-                raise ValueError(f"Solver account not found for task {task.id}.")
-
-            # ensure subnet exists
-            subnet_stmt = select(Subnet).where(Subnet.id == task.job.subnet_id)
-            subnet_result = await session.execute(subnet_stmt)
-            subnet = subnet_result.scalar_one_or_none()
-
-            if not subnet:
-                raise ValueError(f"Subnet with ID {task.job.subnet_id} not found.")
-
-            # calculate stake amount
-            stake_amount = subnet.stake_multiplier * bid_order.price
-
-            # handle reward transaction
-            await self.handle_account_transaction(
-                session=session,
-                account_id=solver_account.id,
-                amount=bid_order.price,
-                transaction_type=AccountTxnType.Deposit
+            task_stmt = select(Task).where(Task.id == task_id).options(
+                joinedload(Task.job).joinedload(Job.subnet),
+                joinedload(Task.bid).joinedload(Order.hold),  # Eagerly load bid_order.hold
+                joinedload(Task.ask).joinedload(Order.hold)   # Eagerly load ask_order.hold
             )
-
-            # handle stake re-addition transaction
-            await self.handle_account_transaction(
-                session=session,
-                account_id=solver_account.id,
-                amount=stake_amount,
-                transaction_type=AccountTxnType.Deposit
-            )
-
-            await session.commit()
-            logger.debug(f"Resolved Task {task.id}, rewarded solver, and re-added stake.")
-
-    async def submit_task_result(
-        self,
-        task_id: int,
-        result: str
-    ):
-        async with AsyncSessionLocal() as session:
-            # retrieve the task
-            task_stmt = select(Task).where(Task.id == task_id)
             task_result = await session.execute(task_stmt)
             task = task_result.scalar_one_or_none()
 
             if not task:
-                raise ValueError(f"Task with ID {task_id} not found.")
+                raise ValueError("Task not found")
 
-            # ensure the user has permission to submit the result
+            # Authorization and status checks...
+            logging.info(f'task_id: {task_id}')
+            if not task.ask:
+                logging.info(f"Task ID {task_id} has no associated Ask Order.")
+                raise PermissionError("No access to submit result")
+
             if task.ask.user_id != get_user_id():
-                raise PermissionError("You do not have access to submit a result for this task.")
+                logging.info(f"Task.ask.user_id: {task.ask.user_id}, get_user_id(): {get_user_id()}")
+                raise PermissionError("No access to submit result")
 
-            # ensure the task is in the correct status
             if task.status != TaskStatus.SolverSelected:
-                raise ValueError(f"Task {task_id} is not in SolverSelected status.")
+                raise ValueError("Task not in SolverSelected status")
 
-            # check if a dispute should be raised
-            if await self.should_dispute(task):
-                raise NotImplementedError("Dispute logic not implemented.")
-
-            # resolve the task
-            await self.resolve_task(task, result, TaskStatus.ResolvedCorrect)
-
-        
+            # Pass the existing session to resolve_task
+            await self.resolve_task(session, task, result, TaskStatus.ResolvedCorrect)
+            await session.commit()
 
     async def create_state_update(self, job_id: int, data: Dict):
         async with AsyncSessionLocal() as session:
@@ -567,7 +662,7 @@ class DBAdapterServer:
             )
             session.add(new_state_update)
             await session.commit()
-            logger.debug(f"Created State Update for Job {job_id}.")
+            await session.refresh(new_state_update)
             return new_state_update.id
 
     async def get_plugin(self, plugin_id: int):
@@ -575,10 +670,6 @@ class DBAdapterServer:
             stmt = select(Plugin).filter_by(id=plugin_id)
             result = await session.execute(stmt)
             plugin = result.scalar_one_or_none()
-            if plugin:
-                logger.debug(f"Retrieved Plugin: {plugin}")
-            else:
-                logger.error(f"Plugin with ID {plugin_id} not found.")
             return plugin
 
     async def get_subnet_using_address(self, address: str):
@@ -586,21 +677,13 @@ class DBAdapterServer:
             stmt = select(Subnet).filter_by(address=address)
             result = await session.execute(stmt)
             subnet = result.scalar_one_or_none()
-            if subnet:
-                logger.debug(f"Retrieved Subnet: {subnet}")
-            else:
-                logger.error(f"Subnet with address {address} not found.")
             return subnet
-    
+
     async def get_subnet(self, subnet_id: int):
         async with AsyncSessionLocal() as session:
             stmt = select(Subnet).filter_by(id=subnet_id)
             result = await session.execute(stmt)
             subnet = result.scalar_one_or_none()
-            if subnet:
-                logger.debug(f"Retrieved Subnet: {subnet}")
-            else:
-                logger.error(f"Subnet with ID {subnet_id} not found.")
             return subnet
 
     async def get_task(self, task_id: int):
@@ -608,69 +691,40 @@ class DBAdapterServer:
             stmt = select(Task).options(joinedload(Task.job)).filter(Task.id == task_id)
             result = await session.execute(stmt)
             task = result.scalar_one_or_none()
-            if task:
-                logger.debug(f"Retrieved Task: {task}")
-            else:
-                logger.error(f"Task with ID {task_id} not found.")
             return task
 
     async def get_assigned_tasks(self, subnet_id: int):
         async with AsyncSessionLocal() as session:
             user_id = get_user_id()
-            
             stmt = (
                 select(Task)
-                .join(Order, Task.id == Order.ask_task_id)  # join via ask_task_id
+                .join(Order, Task.id == Order.ask_task_id)
                 .filter(
                     Order.order_type == OrderType.Ask,
                     Order.user_id == user_id,
                     Task.status == TaskStatus.SolverSelected,
-                    Task.job.has(Job.subnet_id == subnet_id)  # filter by subnet_id
+                    Task.job.has(Job.subnet_id == subnet_id)
                 )
             )
-
             result = await session.execute(stmt)
             tasks = result.scalars().all()
-
-            logger.debug(f"retrieved {len(tasks)} tasks assigned to user {user_id} in subnet {subnet_id}.")
             return {'assigned_tasks': tasks}
 
     async def get_tasks_with_pagination_for_job(self, job_id: int, offset: int = 0, limit: int = 20):
-        """
-        Retrieve tasks for a specific job with pagination, ordered by the earliest created.
-        :param job_id: The ID of the job to retrieve tasks for.
-        :param offset: The starting point for pagination.
-        :param limit: The number of tasks to retrieve.
-        :return: A list of tasks.
-        """
         async with AsyncSessionLocal() as session:
-            # Select tasks for a specific job, ordered by creation time, applying offset and limit
             stmt = select(Task).filter_by(job_id=job_id).order_by(Task.submitted_at.asc()).offset(offset).limit(limit)
             result = await session.execute(stmt)
             tasks = result.scalars().all()
-            logger.debug(f"Retrieved {len(tasks)} tasks for job {job_id} with offset {offset} and limit {limit}.")
             return tasks
-        
+
     async def get_task_count_for_job(self, job_id: int):
-        """
-        Get the total number of tasks for a specific job.
-        :param job_id: The ID of the job.
-        :return: The total number of tasks for the job.
-        """
         async with AsyncSessionLocal() as session:
             stmt = select(func.count(Task.id)).filter_by(job_id=job_id)
             result = await session.execute(stmt)
             task_count = result.scalar_one()
-            logger.debug(f"Job {job_id} has {task_count} tasks.")
             return task_count
 
     async def get_task_count_by_status_for_job(self, job_id: int, statuses: list[TaskStatus]):
-        """
-        Get the number of tasks for a specific job with a list of statuses.
-        :param job_id: The ID of the job.
-        :param statuses: A list of TaskStatus values to count tasks for.
-        :return: The number of tasks with the given statuses for the job.
-        """
         async with AsyncSessionLocal() as session:
             stmt = select(func.count(Task.id)).filter(
                 Task.job_id == job_id,
@@ -678,7 +732,6 @@ class DBAdapterServer:
             )
             result = await session.execute(stmt)
             task_status_count = result.scalar_one()
-            logger.debug(f"Job {job_id} has {task_status_count} tasks with statuses {statuses}.")
             return task_status_count
 
     async def get_perm(self, address: str, perm: int):
@@ -696,17 +749,13 @@ class DBAdapterServer:
             ).values(last_nonce=last_nonce)
             await session.execute(stmt)
             await session.commit()
-            logger.debug(f"Updated last nonce for address {address} to {last_nonce}")
+            return True
 
     async def get_sot(self, id: int):
         async with AsyncSessionLocal() as session:
             stmt = select(Sot).filter_by(id=id)
             result = await session.execute(stmt)
             sot = result.scalar_one_or_none()
-            if sot:
-                logger.debug(f"Retrieved SOT: {sot}")
-            else:
-                logger.error(f"SOT with ID {id} not found.")
             return sot
 
     async def create_perm(self, address: str, perm: int):
@@ -717,7 +766,7 @@ class DBAdapterServer:
             )
             session.add(new_perm)
             await session.commit()
-            logger.debug(f"Created Perm for address {address} with perm {perm}.")
+            await session.refresh(new_perm)
             return new_perm.id
 
     async def create_perm_description(self, perm_type: PermType):
@@ -727,61 +776,44 @@ class DBAdapterServer:
             )
             session.add(new_perm_description)
             await session.commit()
-            perm_id = new_perm_description.id
-            logger.debug(f"Created Perm Description with type {perm_type} and id {perm_id}.")
-            return perm_id
+            await session.refresh(new_perm_description)
+            return new_perm_description.id
 
     async def create_sot(self, job_id: int, url: str | None):
         async with AsyncSessionLocal() as session:
-            perm = await self.create_perm_description(perm_type=PermType.ModifySot)
+            perm_id = await self.create_perm_description(perm_type=PermType.ModifySot)
             new_sot = Sot(
                 job_id=job_id,
-                perm=perm,
+                perm=perm_id,
                 url=url
             )
             session.add(new_sot)
             await session.commit()
-            logger.debug(f"Created SOT for Job {job_id} with perm {perm}.")
+            await session.refresh(new_sot)
             return new_sot.id
-    
+
     async def update_sot(self, sot_id: int, url: str | None):
         async with AsyncSessionLocal() as session:
             stmt = update(Sot).where(Sot.id == sot_id).values(url=url)
             await session.execute(stmt)
             await session.commit()
-            logger.debug(f"Updated SOT {sot_id} with URL {url}.")
+            return True
 
     async def get_sot_by_job_id(self, job_id: int):
         async with AsyncSessionLocal() as session:
             stmt = select(Sot).filter_by(job_id=job_id)
             result = await session.execute(stmt)
             sot = result.scalar_one_or_none()
-            if sot:
-                logger.debug(f"Retrieved SOT: {sot}")
-            else:
-                logger.error(f"SOT for Job {job_id} not found.")
             return sot
-    
+
     async def get_total_state_updates_for_job(self, job_id: int):
-        """
-        Get the total number of state updates for a specific job.
-        :param job_id: The ID of the job.
-        :return: The total number of state updates for the job.
-        """
         async with AsyncSessionLocal() as session:
             stmt = select(func.count(StateUpdate.id)).filter_by(job_id=job_id)
             result = await session.execute(stmt)
             total_state_updates = result.scalar_one()
-            logger.debug(f"Job {job_id} has {total_state_updates} state updates.")
             return total_state_updates
-    
+
     async def get_last_task_with_status(self, job_id: int, statuses: list[TaskStatus]):
-        """
-        Get the last task of a job that has one of the specified TaskStatus values.
-        :param job_id: The ID of the job.
-        :param statuses: A list of TaskStatus values to filter tasks by.
-        :return: The last task with one of the specified statuses or None if no task is found.
-        """
         async with AsyncSessionLocal() as session:
             stmt = select(Task).filter(
                 Task.job_id == job_id,
@@ -789,21 +821,9 @@ class DBAdapterServer:
             ).order_by(desc(Task.submitted_at)).limit(1)
             result = await session.execute(stmt)
             task = result.scalar_one_or_none()
-            if task:
-                logger.debug(f"Retrieved the last task with one of the statuses {statuses} for Job {job_id}.")
-            else:
-                logger.error(f"No task found with statuses {statuses} for Job {job_id}.")
             return task
-    
-    async def create_instance(
-        self,
-        name: str,
-        service_type: ServiceType,
-        job_id: Optional[int],
-        private_key: str | None,
-        pod_id: str | None,
-        process_id: int | None
-    ):
+
+    async def create_instance(self, name: str, service_type: ServiceType, job_id: Optional[int], private_key: str | None, pod_id: str | None, process_id: int | None):
         async with AsyncSessionLocal() as session:
             new_instance = Instance(
                 name=name,
@@ -815,7 +835,7 @@ class DBAdapterServer:
             )
             session.add(new_instance)
             await session.commit()
-            logger.debug(f"Created Instance {name} of type {service_type} with pod_id {pod_id} for Job {job_id}.")
+            await session.refresh(new_instance)
             return new_instance.id
 
     async def get_instance_by_service_type(self, service_type: ServiceType, job_id: Optional[int] = None):
@@ -825,10 +845,6 @@ class DBAdapterServer:
                 stmt = stmt.filter_by(job_id=job_id)
             result = await session.execute(stmt)
             instance = result.scalars().first()
-            if instance:
-                logger.debug(f"Retrieved Instance: {instance}")
-            else:
-                logger.error(f"Instance with service_type {service_type} and job_id {job_id} not found.")
             return instance
 
     async def get_instances_by_job(self, job_id: int):
@@ -836,15 +852,13 @@ class DBAdapterServer:
             stmt = select(Instance).filter_by(job_id=job_id)
             result = await session.execute(stmt)
             instances = result.scalars().all()
-            logger.debug(f"Retrieved {len(instances)} instances for Job {job_id}.")
             return instances
-    
+
     async def get_all_instances(self):
         async with AsyncSessionLocal() as session:
             stmt = select(Instance)
             result = await session.execute(stmt)
             instances = result.scalars().all()
-            logger.debug(f"Retrieved {len(instances)} instances.")
             return instances
 
     async def update_instance(self, instance_id: int, **kwargs):
@@ -852,18 +866,17 @@ class DBAdapterServer:
             stmt = update(Instance).where(Instance.id == instance_id).values(**kwargs)
             await session.execute(stmt)
             await session.commit()
-            logger.debug(f"Updated Instance {instance_id} with {kwargs}.")
+            return True
 
     async def get_jobs_without_instances(self):
         async with AsyncSessionLocal() as session:
             stmt = (
                 select(Job)
                 .outerjoin(Instance, Job.id == Instance.job_id)
-                .filter(Instance.id == None)  # filter for jobs with no associated instances
+                .filter(Instance.id == None)
             )
             result = await session.execute(stmt)
             jobs_without_instances = result.scalars().all()
-            logger.debug(f"Retrieved {len(jobs_without_instances)} jobs without instances.")
             return jobs_without_instances
 
     async def get_plugins(self):
@@ -871,39 +884,6 @@ class DBAdapterServer:
             stmt = select(Plugin)
             result = await session.execute(stmt)
             plugins = result.scalars().all()
-            logger.debug(f"Retrieved {len(plugins)} plugins.")
             return plugins
-    
-    async def get_or_create_account(self, user_id: str):
-        """
-        checks if an account exists for the given user_id. if not, creates one with default configuration.
 
-        :param user_id: the id of the user to check or create an account for.
-        :return: the account object (existing or newly created).
-        """
-        async with AsyncSessionLocal() as session:
-            # check if the account exists
-            stmt = select(Account).where(Account.user_id == user_id)
-            result = await session.execute(stmt)
-            account = result.scalar_one_or_none()
-
-            if account:
-                logger.debug(f"Account already exists for user_id {user_id}: {account}")
-                return account
-
-            # create a new account with default configuration if it doesn't exist
-            new_account = Account(
-                user_id=user_id,
-                amount=0.0,  # default amount
-                available=0.0,  # default available balance
-                deposited_at=datetime.utcnow()
-            )
-            session.add(new_account)
-            await session.commit()
-
-            logger.debug(f"Created new account for user_id {user_id} with default configuration.")
-            return new_account
-
-# Instantiate the server adapter
 db_adapter_server = DBAdapterServer()
-

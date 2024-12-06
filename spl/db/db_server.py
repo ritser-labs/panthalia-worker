@@ -1,5 +1,3 @@
-# db_server.py
-
 import asyncio
 from quart import Quart, request, jsonify
 import logging
@@ -26,10 +24,7 @@ logger = logging.getLogger(__name__)
 app = Quart(__name__)
 app = cors(app, allow_origin="http://localhost:3000")
 
-# Define permission constants (should match those in your original PermType)
 perm_modify_db = None
-
-# Define file paths and locks (assuming similar to your original setup)
 script_dir = os.path.dirname(os.path.abspath(__file__))
 data_dir = os.path.join(script_dir, 'data')
 state_dir = os.path.join(data_dir, 'state')
@@ -40,7 +35,6 @@ class AuthMethod(Enum):
     NONE = 0
     USER = 1
     KEY = 2
-
 
 def get_perm_modify_db():
     return perm_modify_db
@@ -57,19 +51,15 @@ def requires_auth(f):
 def requires_user_auth_with_adapter(f):
     return requires_user_auth(get_db_adapter)(f)
 
-
 def handle_errors(f):
     @wraps(f)
     async def wrapper(*args, **kwargs):
         try:
             return await f(*args, **kwargs)
         except Exception as e:
-            #import traceback
             logger.error(f"Error: {e}")
-            #logger.error("".join(traceback.format_exception(type(e), e, e.__traceback__)))
             return jsonify({'error': str(e)}), 500
     return wrapper
-
 
 def require_params(*required_params):
     def decorator(f):
@@ -87,6 +77,8 @@ def require_json_keys(*required_keys):
         @wraps(f)
         async def wrapper(*args, **kwargs):
             data = await request.get_json()
+            if data is None:
+                return jsonify({'error': 'Missing JSON body'}), 400
             missing = [key for key in required_keys if key not in data]
             if missing:
                 return jsonify({'error': f'Missing parameters: {", ".join(missing)}'}), 400
@@ -96,22 +88,16 @@ def require_json_keys(*required_keys):
 
 def convert_to_type(value, expected_type):
     if value is None:
-        # if the value is None and the type is Optional, allow it
         if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
             if type(None) in get_args(expected_type):
                 return None
         raise ValueError(f"Cannot convert None to {expected_type}")
 
-    # handle Enums
     if isinstance(expected_type, type) and issubclass(expected_type, Enum):
         return str_to_enum(expected_type, value)
-
-    # handle Lists of Enums or other types
     if get_origin(expected_type) is list:
         inner_type = expected_type.__args__[0]
         return [convert_to_type(v, inner_type) for v in value]
-
-    # handle Optional, Union, or UnionType
     if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
         for sub_type in get_args(expected_type):
             try:
@@ -120,12 +106,10 @@ def convert_to_type(value, expected_type):
                 continue
         raise ValueError(f"Cannot convert {value} to any of {get_args(expected_type)}")
 
-    # default case: attempt direct conversion
     try:
         return expected_type(value)
     except Exception as e:
         raise ValueError(f"Error converting {value} to {expected_type}: {e}")
-
 
 def parse_args_with_types(func, args: Dict[str, Any]):
     sig = signature(func)
@@ -133,15 +117,12 @@ def parse_args_with_types(func, args: Dict[str, Any]):
     parsed_args = {}
     for param_name, param in sig.parameters.items():
         if param_name == 'self':
-            continue  # Skip 'self' for class methods
+            continue
         if param_name in args:
             if param_name in hints:
                 expected_type = hints[param_name]
                 value = args[param_name]
-                try:
-                    parsed_args[param_name] = convert_to_type(value, expected_type)
-                except ValueError as ve:
-                    raise ValueError(f"Parameter '{param_name}': {ve}")
+                parsed_args[param_name] = convert_to_type(value, expected_type)
             else:
                 parsed_args[param_name] = args[param_name]
         else:
@@ -152,10 +133,6 @@ def parse_args_with_types(func, args: Dict[str, Any]):
     return parsed_args
 
 def create_route(handler_func, method, params=None, required_keys=None, id_key=None, auth_method=AuthMethod.NONE, is_post=False):
-    """
-    Generalized route creation for GET and POST routes.
-    """
-
     def recursive_as_dict(obj):
         if isinstance(obj, dict):
             return {k: recursive_as_dict(v) for k, v in obj.items()}
@@ -171,6 +148,8 @@ def create_route(handler_func, method, params=None, required_keys=None, id_key=N
             if is_post:
                 data = await request.get_json()
                 if required_keys:
+                    if data is None:
+                        return jsonify({'error': 'Missing JSON body'}), 400
                     missing = [key for key in required_keys if key not in data]
                     if missing:
                         return jsonify({'error': f'Missing parameters: {", ".join(missing)}'}), 400
@@ -212,7 +191,6 @@ def create_route(handler_func, method, params=None, required_keys=None, id_key=N
 
     return handle_errors(handler)
 
-
 def create_get_route(entity_name, method, params, auth_method=AuthMethod.NONE):
     return create_route(None, method, params=params, auth_method=auth_method)
 
@@ -222,8 +200,6 @@ def create_post_route(method, required_keys, auth_method=AuthMethod.KEY):
 def create_post_route_return_id(method, required_keys, id_key, auth_method=AuthMethod.KEY):
     return create_route(None, method, required_keys=required_keys, id_key=id_key, auth_method=auth_method, is_post=True)
 
-
-# Define GET routes
 app.route('/get_job', methods=['GET'], endpoint='get_job_endpoint')(create_get_route('Job', db_adapter_server.get_job, ['job_id']))
 app.route('/get_plugin', methods=['GET'], endpoint='get_plugin_endpoint')(create_get_route('Plugin', db_adapter_server.get_plugin, ['plugin_id']))
 app.route('/get_subnet_using_address', methods=['GET'], endpoint='get_subnet_using_address_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet_using_address, ['address']))
@@ -280,14 +256,13 @@ async def get_last_task_with_status():
     if last_task:
         return jsonify(last_task.as_dict()), 200
     else:
-        return jsonify({'error': 'No task found matching the given statuses'}), 404
+        return jsonify({'error': 'No task found'}), 404
 
 @app.route('/health', methods=['GET'], endpoint='health_endpoint')
 @handle_errors
 async def health_check():
     return jsonify({'status': 'healthy'}), 200
 
-# Define POST routes
 app.route('/create_job', methods=['POST'], endpoint='create_job_endpoint')(
     create_post_route_return_id(
         db_adapter_server.create_job,
@@ -310,7 +285,6 @@ app.route('/create_perm', methods=['POST'], endpoint='create_perm_endpoint')(
 app.route('/create_perm_description', methods=['POST'], endpoint='create_perm_description_endpoint')(
     create_post_route_return_id(db_adapter_server.create_perm_description, ['perm_type'], 'perm_description_id')
 )
-# updated create_task endpoint
 app.route('/create_task', methods=['POST'], endpoint='create_task_endpoint')(
     create_post_route_return_id(
         db_adapter_server.create_task,
@@ -323,22 +297,28 @@ app.route('/create_task', methods=['POST'], endpoint='create_task_endpoint')(
 app.route('/create_bids_and_tasks', methods=['POST'], endpoint='create_bids_and_tasks_endpoint')(
     create_post_route(
         db_adapter_server.create_bids_and_tasks,
-        ['job_id', 'num_tasks', 'price', 'params'],
+        ['job_id', 'num_tasks', 'price', 'params', 'hold_id'],
         auth_method=AuthMethod.KEY
     )
 )
 
-# create_order endpoint
+app.route('/submit_task_result', methods=['POST'], endpoint='submit_task_result_endpoint')(
+    create_post_route(
+        db_adapter_server.submit_task_result,
+        ['task_id', 'result'],
+        auth_method=AuthMethod.USER
+    )
+)
+
 app.route('/create_order', methods=['POST'], endpoint='create_order_endpoint')(
     create_post_route_return_id(
         db_adapter_server.create_order,
-        ['task_id', 'subnet_id', 'order_type', 'price'],
+        ['task_id', 'subnet_id', 'order_type', 'price', 'hold_id'],
         'order_id',
         auth_method=AuthMethod.USER
     )
 )
 
-# delete_order endpoint
 app.route('/delete_order', methods=['POST'], endpoint='delete_order_endpoint')(
     create_post_route(
         db_adapter_server.delete_order,
@@ -347,23 +327,14 @@ app.route('/delete_order', methods=['POST'], endpoint='delete_order_endpoint')(
     )
 )
 
-# deposit_account endpoint
-app.route('/deposit_account', methods=['POST'], endpoint='deposit_account_endpoint')(
+app.route('/admin_deposit_account', methods=['POST'], endpoint='admin_deposit_account_endpoint')(
     create_post_route(
-        db_adapter_server.deposit_account,
-        ['amount'],
-        auth_method=AuthMethod.USER
+        db_adapter_server.admin_deposit_account,
+        ['user_id', 'amount'],
+        auth_method=AuthMethod.KEY
     )
 )
 
-# withdraw_account endpoint
-app.route('/withdraw_account', methods=['POST'], endpoint='withdraw_account_endpoint')(
-    create_post_route(
-        db_adapter_server.withdraw_account,
-        ['amount'],
-        auth_method=AuthMethod.USER
-    )
-)
 app.route('/create_account_key', methods=['POST'], endpoint='create_account_key_endpoint')(
     create_post_route(db_adapter_server.create_account_key, [], auth_method=AuthMethod.USER)
 )
@@ -414,8 +385,8 @@ if __name__ == "__main__":
     from hypercorn.config import Config
 
     parser = argparse.ArgumentParser(description="Database Server")
-    parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind the server')
-    parser.add_argument('--port', type=int, default=8000, help='Port to bind the server')
+    parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind')
+    parser.add_argument('--port', type=int, default=8000, help='Port')
     parser.add_argument('--perm', type=int, default=0, help='Permission ID')
     parser.add_argument('--root_wallet', type=str, default='0x0', help='Root wallet address')
     args = parser.parse_args()
@@ -427,7 +398,7 @@ if __name__ == "__main__":
     config = Config()
     config.bind = [f'{args.host}:{args.port}']
 
-    logger.info(f"Starting Database Server on {args.host}:{args.port}...")
+    logger.info(f"Starting DB Server on {args.host}:{args.port}...")
     logger.info(f"Permission ID: {args.perm}")
     logger.info(f"Root wallet address: {args.root_wallet}")
     asyncio.run(serve(app, config))

@@ -9,12 +9,8 @@ from dataclasses import dataclass
 from collections import defaultdict
 from .device import device
 from .common import (
-    download_file,
-    Task, TaskStatus, load_abi, upload_tensor,
-    async_transact_with_contract_function,
-    TENSOR_NAME, PoolState, approve_token_once,
-    deposit_stake_without_approval, get_future_version_number,
-    CHUNK_SIZE
+    download_file, upload_tensor,
+    TENSOR_NAME,
 )
 from .models import OrderType
 from io import BytesIO
@@ -24,7 +20,6 @@ import asyncio
 import torch._dynamo
 import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
-import datetime
 from .db.db_adapter_client import DBAdapterClient
 from .plugin_manager import get_plugin
 from datetime import timezone
@@ -190,8 +185,8 @@ async def deposit_stake():
     for _ in range(args.max_stakes - num_orders):
         stake_multiplier = (await db_adapter.get_subnet(args.subnet_id)).stake_multiplier
         price = await get_ask_price()
-        await db_adapter.deposit_account(price * stake_multiplier)
-        await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, price)
+        #await db_adapter.deposit_account(price * stake_multiplier)
+        await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, price, None)
 
 async def handle_task(task, time_invoked):
     global last_handle_event_timestamp
@@ -347,6 +342,7 @@ async def process_tasks():
 async def submit_solution(task_id, result):
     try:
         logging.info('Submitting solution')
+        result = json.dumps(result)
         receipt = await db_adapter.submit_task_result(task_id, result)
         logging.info(f"solution submission receipt: {receipt}")
     except Exception as e:

@@ -6,13 +6,11 @@ import argparse
 import requests
 import threading
 import curses
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify
 from ..common import (
     load_abi,
-    wait_for_rpc_available,
     wait_for_health,
     SOT_PRIVATE_PORT,
-    fund_wallets,
     DB_PORT,
     generate_wallets
 )
