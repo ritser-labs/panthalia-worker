@@ -417,12 +417,14 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
                     set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
                     await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
                 if saved_num_updates > 0:
+                    state_update_data = {
+                        'num_updates': saved_num_updates,
+                        'iteration_number': saved_iteration_number,
+                    }
+                    state_update_data = json.dumps(state_update_data)
                     await db_adapter.create_state_update(
                         job_id,
-                        {
-                            'num_updates': saved_num_updates,
-                            'iteration_number': saved_iteration_number,
-                        }
+                        state_update_data
                     )
         finally:
             update_timestamp_lock.release()
@@ -531,7 +533,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
             await save_json(num_updates_file, num_updates, num_updates_file_lock)
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
-            learning_params = plugin.get_sot_learning_hyperparameters(iteration_number[tensor_name])
+            learning_params = await plugin.get_sot_learning_hyperparameters(iteration_number[tensor_name])
             future_tensor, m_update = await apply_optimizer(
                 current_version_number,
                 tensor_name,
