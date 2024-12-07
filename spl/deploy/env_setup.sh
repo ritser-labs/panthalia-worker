@@ -64,7 +64,7 @@ case $SERVICE_TYPE in
         python -m spl.sot --sot_id ${SOT_ID} --db_url ${DB_URL} --private_key ${PRIVATE_KEY}
         ;;
     db)
-        python -m spl.db.db_server --host ${DB_HOST} --port ${DB_PORT} --perm ${DB_PERM} --root_wallet ${ROOT_WALLET}
+        python -m spl.db.server --host ${DB_HOST} --port ${DB_PORT} --perm ${DB_PERM} --root_wallet ${ROOT_WALLET}
         ;;
     *)
         echo "Error: Unknown service type"

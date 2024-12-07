@@ -1,28 +1,30 @@
+# spl/auth/api_auth.py
+
 import functools
-import requests
 import json
-import os
-import time
 import logging
 from quart import request, jsonify
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from ..db.db_adapter_client import DBAdapterClient
-import aiofiles
+from ..db.server.adapter import DBAdapterServer  # Updated import
+import time
 
 EXPIRY_TIME = 10
 
 logger = logging.getLogger(__name__)
 
-async def verify_signature(db_adapter, message, signature, perm_db_column):
+async def verify_signature(db_adapter: DBAdapterServer, message: str, signature: str, perm_db_column: int):
     message = encode_defunct(text=message)
-    recovered_address = Account.recover_message(message, signature=signature)
+    try:
+        recovered_address = Account.recover_message(message, signature=signature)
+    except Exception as e:
+        logger.error(f"Error recovering address: {e}")
+        return False
 
     logger.debug(f"Recovered address: {recovered_address}")
     logger.debug(f"Perm DB column: {perm_db_column}")
 
     return await db_adapter.get_perm(recovered_address, perm_db_column)
-
 
 def requires_authentication(get_db_adapter, get_perm_db):
     def decorator(f):
@@ -65,7 +67,6 @@ def requires_authentication(get_db_adapter, get_perm_db):
                 return jsonify({'error': 'Nonce already used'}), 403
             else:
                 await db_adapter.set_last_nonce(perm.address, perm_db_column, nonce)
-            
 
             # Check if the message has expired (validity period of 10 seconds)
             current_time = int(time.time())

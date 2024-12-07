@@ -1,43 +1,24 @@
-import asyncio
-from quart import Quart, request, jsonify
 import logging
-from .db_adapter_server import db_adapter_server
-from ..auth.api_auth import requires_authentication
-from ..models import PermType, TaskStatus, ServiceType
-from ..auth.server_auth import requires_user_auth
-from quart_cors import cors
-import os
+import traceback
 from functools import wraps
+from quart import request, jsonify
 from enum import Enum
 from inspect import signature
 from typing import get_type_hints, Dict, Any, Union, get_origin, get_args
-from ..util.enums import str_to_enum
 import types
-import traceback
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from ...models import TaskStatus, PermType, ServiceType
+from ...auth.api_auth import requires_authentication
+from ...auth.server_auth import requires_user_auth
+from ...util.enums import str_to_enum
 
-app = Quart(__name__)
-app = cors(app, allow_origin="http://localhost:3000")
-
-perm_modify_db = None
-script_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = os.path.join(script_dir, 'data')
-state_dir = os.path.join(data_dir, 'state')
-db_adapter = None
-os.makedirs(state_dir, exist_ok=True)
+from .app import app, db_adapter, logger, get_perm_modify_db
+from .adapter import db_adapter_server
 
 class AuthMethod(Enum):
     NONE = 0
     USER = 1
     KEY = 2
-
-def get_perm_modify_db():
-    return perm_modify_db
 
 def get_db_adapter():
     return db_adapter_server
@@ -358,7 +339,7 @@ app.route('/create_sot', methods=['POST'], endpoint='create_sot_endpoint')(
 )
 
 app.route('/set_last_nonce', methods=['POST'], endpoint='set_last_nonce_endpoint')(
-    create_post_route_return_id(db_adapter_server.set_last_nonce, ['address', 'perm', 'last_nonce'], 'success')
+    create_post_route_return_id(db_adapter_server.set_last_nonce, ['address', 'perm', 'last_nonce'], 'perm')
 )
 app.route('/update_job_iteration', methods=['POST'], endpoint='update_job_iteration_endpoint')(
     create_post_route_return_id(db_adapter_server.update_job_iteration, ['job_id', 'new_iteration'], 'success')
@@ -378,27 +359,3 @@ app.route('/update_instance', methods=['POST'], endpoint='update_instance_endpoi
 app.route('/update_sot', methods=['POST'], endpoint='update_sot_endpoint')(
     create_post_route_return_id(db_adapter_server.update_sot, ['sot_id', 'url'], 'success')
 )
-
-if __name__ == "__main__":
-    import argparse
-    from hypercorn.asyncio import serve
-    from hypercorn.config import Config
-
-    parser = argparse.ArgumentParser(description="Database Server")
-    parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind')
-    parser.add_argument('--port', type=int, default=8000, help='Port')
-    parser.add_argument('--perm', type=int, default=0, help='Permission ID')
-    parser.add_argument('--root_wallet', type=str, default='0x0', help='Root wallet address')
-    args = parser.parse_args()
-
-    perm_modify_db = args.perm
-
-    asyncio.run(db_adapter_server.create_perm(args.root_wallet, perm_modify_db))
-
-    config = Config()
-    config.bind = [f'{args.host}:{args.port}']
-
-    logger.info(f"Starting DB Server on {args.host}:{args.port}...")
-    logger.info(f"Permission ID: {args.perm}")
-    logger.info(f"Root wallet address: {args.root_wallet}")
-    asyncio.run(serve(app, config))

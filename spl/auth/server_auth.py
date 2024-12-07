@@ -10,8 +10,6 @@ import json
 import time
 
 from .jwt_verification import verify_jwt
-from ..db.db_adapter_server import DBAdapterServer  # Adjust import as necessary
-from ..models import AccountKey, PermType  # Import necessary models
 
 logger = logging.getLogger(__name__)
 

@@ -351,7 +351,7 @@ async def main():
     public_key = Account.from_key(args.private_key).address
     db_process = subprocess.Popen(
         [
-            'python', '-m', 'spl.db.db_server',
+            'python', '-m', 'spl.db.server',
             '--host', DB_HOST,
             '--port', DB_PORT,
             '--perm', str(GUESS_DB_PERM_ID),
