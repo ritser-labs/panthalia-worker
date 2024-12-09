@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, List
 import types
 from eth_account import Account as EthAccount
-from sqlalchemy import select, update, desc, func
+from sqlalchemy import select, update, desc, func, or_
 from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,13 +24,11 @@ logger = logging.getLogger(__name__)
 
 # CONFIG CONSTANTS
 PLATFORM_FEE_PERCENTAGE = 0.1  # 10% fee
-DISPUTE_PAYOUT_DELAY_DAYS = 1
+DISPUTE_PAYOUT_DELAY_DAYS = 1  # one-day grace period
 MINIMUM_PAYOUT_AMOUNT = 50.0
 
-class DBAdapterServer:
-    def __init__(self):
-        asyncio.run(init_db())
 
+class DBAdapterServer:
     async def get_or_create_account(self, user_id: str, session: Optional[AsyncSession] = None):
         own_session = False
         if session is None:
@@ -98,6 +96,7 @@ class DBAdapterServer:
         session.add(new_rev)
 
     async def select_hold_for_order(self, session: AsyncSession, account: Account, subnet: Subnet, order_type: OrderType, price: float, specified_hold_id: Optional[int] = None):
+        # Hold expiry must allow for solve_period + dispute_period + 1-day grace
         required_expiry_buffer = timedelta(days=DISPUTE_PAYOUT_DELAY_DAYS)
         min_expiry = datetime.utcnow() + timedelta(seconds=subnet.solve_period + subnet.dispute_period) + required_expiry_buffer
 
@@ -107,7 +106,7 @@ class DBAdapterServer:
             required_amount = subnet.stake_multiplier * price
 
         if specified_hold_id is not None:
-            stmt = select(Hold).where(Hold.id == specified_hold_id, Hold.account_id == account.id)
+            stmt = select(Hold).where(Hold.id == specified_hold_id, Hold.account_id == account.id).options(selectinload(Hold.hold_transactions))
             result = await session.execute(stmt)
             hold = result.scalar_one_or_none()
             if not hold:
@@ -118,6 +117,14 @@ class DBAdapterServer:
                 raise ValueError("hold expires too soon")
             if (hold.total_amount - hold.used_amount) < required_amount:
                 raise ValueError("not enough hold amount")
+            # If hold is Credits and never backed before (no positive hold transactions), back now
+            if hold.hold_type == HoldType.Credits and not hold.charged:
+                used_before = any(ht.amount > 0 for ht in hold.hold_transactions)
+                if not used_before:
+                    if account.credits_balance < hold.total_amount:
+                        raise ValueError("insufficient credits to back this externally created credits hold")
+                    await self.add_credits_transaction(session, account, hold.total_amount, CreditTxnType.Subtract)
+                    await session.flush()
             return hold
         else:
             stmt = select(Hold).where(
@@ -125,12 +132,21 @@ class DBAdapterServer:
                 Hold.charged == False,
                 Hold.expiry > min_expiry,
                 (Hold.total_amount - Hold.used_amount) >= required_amount
-            )
+            ).options(selectinload(Hold.hold_transactions))
             result = await session.execute(stmt)
             hold = result.scalars().first()
             if hold:
+                # If hold is Credits and never backed before, back now
+                if hold.hold_type == HoldType.Credits and not hold.charged:
+                    used_before = any(ht.amount > 0 for ht in hold.hold_transactions)
+                    if not used_before:
+                        if account.credits_balance < hold.total_amount:
+                            raise ValueError("insufficient credits to back this externally created credits hold")
+                        await self.add_credits_transaction(session, account, hold.total_amount, CreditTxnType.Subtract)
+                        await session.flush()
                 return hold
 
+            # No suitable hold found, try creating a new one if we have enough credits
             if account.credits_balance >= required_amount:
                 new_hold = Hold(
                     account_id=account.id,
@@ -143,6 +159,7 @@ class DBAdapterServer:
                     charged_amount=0.0
                 )
                 session.add(new_hold)
+                # Immediately subtract credits to back this hold at creation time
                 account.credits_balance -= required_amount
                 await session.flush()
                 return new_hold
@@ -171,24 +188,26 @@ class DBAdapterServer:
         )
         session.add(hold_txn)
 
-    async def charge_hold_fully(self, session: AsyncSession, hold: Hold):
+    async def charge_hold_fully(self, session: AsyncSession, hold: Hold, add_leftover_to_account: bool = True):
         if hold.charged:
             raise ValueError("hold already charged")
         hold.charged = True
         hold.charged_amount = hold.total_amount
 
-        leftover = hold.total_amount - hold.used_amount
-        if leftover > 0:
-            stmt = select(Account).where(Account.id == hold.account_id)
-            result = await session.execute(stmt)
-            account = result.scalar_one_or_none()
-            if account:
-                await self.add_credits_transaction(session, account, leftover, CreditTxnType.Add)
+        if add_leftover_to_account:
+            leftover = hold.total_amount - hold.used_amount
+            if leftover > 0:
+                stmt = select(Account).where(Account.id == hold.account_id)
+                result = await session.execute(stmt)
+                account = result.scalar_one_or_none()
+                if account:
+                    await self.add_credits_transaction(session, account, leftover, CreditTxnType.Add)
 
     async def maybe_payout_earnings(self, session: AsyncSession, account: Account):
+        # Placeholder for automatic payouts if earnings >= MINIMUM_PAYOUT_AMOUNT
         if account.earnings_balance >= MINIMUM_PAYOUT_AMOUNT:
             payout_amount = account.earnings_balance
-            account.earnings_balance -= payout_amount
+            account.earnings_balance = 0.0
             logger.debug(f"Payout {payout_amount} to {account.user_id}")
 
     async def handle_dispute_scenario(self, session: AsyncSession, task: Task):
@@ -196,19 +215,37 @@ class DBAdapterServer:
         if not ask_order or not ask_order.hold:
             raise ValueError("No ask order or hold for dispute scenario")
 
-        hold = ask_order.hold
-        if not hold.charged:
-            await self.charge_hold_fully(session, hold)
+        # Charge solver's hold fully (no leftover to account yet)
+        await self.charge_hold_fully(session, ask_order.hold, add_leftover_to_account=False)
 
         stake_amount = task.job.subnet.stake_multiplier * ask_order.price
-        if stake_amount > hold.used_amount:
+        if stake_amount > ask_order.hold.used_amount:
             raise ValueError("data inconsistency in stake vs hold used")
 
+        # Stake portion to platform revenue
         await self.add_platform_revenue(session, stake_amount, PlatformRevenueTxnType.Add)
 
+        # Return leftover to solver after removing stake
+        leftover = ask_order.hold.total_amount - stake_amount
+        if leftover > 0:
+            stmt = select(Account).where(Account.id == ask_order.hold.account_id)
+            result = await session.execute(stmt)
+            solver_account = result.scalar_one_or_none()
+            if solver_account:
+                await self.add_credits_transaction(session, solver_account, leftover, CreditTxnType.Add)
+
+        # Free the bidder’s reserved funds from their hold
         bid_order = task.bid
         if bid_order and bid_order.hold:
             await self.free_funds_from_hold(session, bid_order.hold, bid_order.price, bid_order)
+            # If bidder hold is now unused and not charged, return full amount
+            if not bid_order.hold.charged and bid_order.hold.used_amount == 0.0:
+                stmt = select(Account).where(Account.id == bid_order.hold.account_id)
+                result = await session.execute(stmt)
+                bidder_account = result.scalar_one_or_none()
+                if bidder_account:
+                    await self.add_credits_transaction(session, bidder_account, bid_order.hold.total_amount, CreditTxnType.Add)
+                bid_order.hold.total_amount = 0.0
 
     async def handle_correct_resolution_scenario(self, session: AsyncSession, task: Task):
         bid_order = task.bid
@@ -218,15 +255,21 @@ class DBAdapterServer:
         if not ask_order or not ask_order.hold:
             raise ValueError("missing ask order/hold")
 
+        subnet = task.job.subnet
+        stake_amount = subnet.stake_multiplier * ask_order.price
+
+        # Charge bid hold fully if not charged
         if not bid_order.hold.charged:
             await self.charge_hold_fully(session, bid_order.hold)
+
+        # Charge ask hold fully if not charged
         if not ask_order.hold.charged:
             await self.charge_hold_fully(session, ask_order.hold)
 
-        subnet = task.job.subnet
-        stake_amount = subnet.stake_multiplier * ask_order.price
+        # Free the stake from the ask hold
         await self.free_funds_from_hold(session, ask_order.hold, stake_amount, ask_order)
 
+        # Add earnings to solver and platform fee to revenue
         solver_user_id = ask_order.user_id
         stmt = select(Account).where(Account.user_id == solver_user_id)
         solver_acc_result = await session.execute(stmt)
@@ -236,10 +279,9 @@ class DBAdapterServer:
 
         platform_fee = bid_order.price * PLATFORM_FEE_PERCENTAGE
         solver_earnings = bid_order.price - platform_fee
+
         await self.add_earnings_transaction(session, solver_account, solver_earnings, EarningsTxnType.Add)
         await self.add_platform_revenue(session, platform_fee, PlatformRevenueTxnType.Add)
-
-        await self.maybe_payout_earnings(session, solver_account)
 
     async def get_job(self, job_id: int):
         async with AsyncSessionLocal() as session:
@@ -493,6 +535,7 @@ class DBAdapterServer:
                 Order.order_type == OrderType.Bid,
                 Task.ask == None
             )
+            .options(joinedload(Order.bid_task))
         )
 
         ask_orders_stmt = (
@@ -502,6 +545,7 @@ class DBAdapterServer:
                 Order.order_type == OrderType.Ask,
                 Order.ask_task_id == None
             )
+            .options(joinedload(Order.ask_task))
         )
 
         bid_orders_result = await session.execute(bid_orders_stmt)
@@ -510,7 +554,6 @@ class DBAdapterServer:
         bid_orders = bid_orders_result.scalars().all()
         ask_orders = ask_orders_result.scalars().all()
 
-        matches = []
         for bid in bid_orders:
             for ask in ask_orders:
                 if bid.price >= ask.price:
@@ -521,10 +564,7 @@ class DBAdapterServer:
                     session.add(bid_task)
 
                     ask_orders.remove(ask)
-                    matches.append((bid, ask))
                     break
-
-        return matches
 
     async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int):
         async with AsyncSessionLocal() as session:
@@ -581,13 +621,17 @@ class DBAdapterServer:
     async def should_dispute(self, task):
         return False
 
-    async def resolve_task(self, session: AsyncSession, task: Task, result: str, status: TaskStatus):
+    async def resolve_task(self, session: AsyncSession, task: Task, result: str):
+        should_dispute = await self.should_dispute(task)
+        if should_dispute:
+            status = TaskStatus.ResolvedIncorrect
+        else:
+            status = TaskStatus.ResolvedCorrect
         task.result = result
         task.status = status
         task.time_solved = datetime.now(timezone.utc)
         session.add(task)
 
-        should_dispute = await self.should_dispute(task)
         if should_dispute:
             await self.handle_dispute_scenario(session, task)
         else:
@@ -606,19 +650,16 @@ class DBAdapterServer:
             if not task:
                 raise ValueError("Task not found")
 
-            logging.info(f'task_id: {task_id}')
             if not task.ask:
-                logging.info(f"Task ID {task_id} has no associated Ask Order.")
                 raise PermissionError("No access to submit result")
 
             if task.ask.user_id != get_user_id():
-                logging.info(f"Task.ask.user_id: {task.ask.user_id}, get_user_id(): {get_user_id()}")
                 raise PermissionError("No access to submit result")
 
             if task.status != TaskStatus.SolverSelected:
                 raise ValueError("Task not in SolverSelected status")
 
-            await self.resolve_task(session, task, result, TaskStatus.ResolvedCorrect)
+            await self.resolve_task(session, task, result)
             await session.commit()
 
     async def create_state_update(self, job_id: int, data: Dict):
@@ -716,8 +757,7 @@ class DBAdapterServer:
             ).values(last_nonce=last_nonce)
             await session.execute(stmt)
             await session.commit()
-            
-            # Fetch the updated Perm object
+
             updated_perm = await session.execute(
                 select(Perm).where(Perm.address == address, Perm.perm == perm)
             )
@@ -858,5 +898,43 @@ class DBAdapterServer:
             result = await session.execute(stmt)
             plugins = result.scalars().all()
             return plugins
+
+    async def check_and_cleanup_holds(self):
+        # Background task to ensure open orders still meet expiry requirements
+        async with AsyncSessionLocal() as session:
+            logger.debug("Running hold cleanup check...")
+            stmt_subnets = select(Subnet).distinct()
+            subnets = (await session.execute(stmt_subnets)).scalars().all()
+            now = datetime.utcnow()
+
+            for subnet in subnets:
+                required_expiry_buffer = timedelta(days=DISPUTE_PAYOUT_DELAY_DAYS)
+                min_expiry = now + timedelta(seconds=subnet.solve_period + subnet.dispute_period) + required_expiry_buffer
+
+                stmt_orders = select(Order).join(Task, or_(Order.bid_task_id == Task.id, Order.ask_task_id == Task.id)) \
+                    .where(Order.subnet_id == subnet.id, Task.status.in_([TaskStatus.SelectingSolver, TaskStatus.SolverSelected])) \
+                    .options(joinedload(Order.hold))
+                orders = (await session.execute(stmt_orders)).scalars().all()
+
+                for order in orders:
+                    if order.hold and order.hold.expiry < min_expiry:
+                        logger.info(f"Canceling order {order.id} due to hold expiry too soon.")
+                        if order.order_type == OrderType.Bid:
+                            amount_to_reverse = order.price
+                        else:
+                            amount_to_reverse = subnet.stake_multiplier * order.price
+
+                        await self.free_funds_from_hold(session, order.hold, amount_to_reverse, order)
+                        if not order.hold.charged and order.hold.used_amount == 0:
+                            stmt_acc = select(Account).where(Account.id == order.hold.account_id)
+                            acc_res = await session.execute(stmt_acc)
+                            hold_account = acc_res.scalar_one_or_none()
+                            if hold_account and order.hold.hold_type == HoldType.Credits:
+                                await self.add_credits_transaction(session, hold_account, order.hold.total_amount, CreditTxnType.Add)
+                            order.hold.total_amount = 0.0
+
+                        await session.delete(order)
+            await session.commit()
+
 
 db_adapter_server = DBAdapterServer()

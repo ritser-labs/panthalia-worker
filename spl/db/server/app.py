@@ -11,8 +11,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = Quart(__name__)
-app = cors(app, allow_origin="http://localhost:3000")
+original_app = Quart(__name__)
+app = cors(original_app, allow_origin="http://localhost:3000")
+
 
 _perm_modify_db = None
 

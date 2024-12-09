@@ -19,6 +19,8 @@ safetensors
 auth0-python
 python-jose
 typeguard
+pytest
+pytest-asyncio
 
 aiosqlite
 sqlalchemy
