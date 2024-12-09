@@ -229,7 +229,7 @@ def setup_plugin_files(plugin_package_dir):
         'common.py': 'common.py',
         'serialize.py': 'serialize.py',
         'requirements.txt': 'requirements.txt',
-        'plugin_server.py': 'server.py'
+        'plugins/plugin_server.py': 'server.py'
     }
 
     for local, global_target in resources.items():

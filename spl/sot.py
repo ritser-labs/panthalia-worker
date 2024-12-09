@@ -31,7 +31,7 @@ from .common import (
     CHUNK_SIZE
 )
 from .device import device
-from .plugin_manager import get_plugin
+from .plugins.manager import get_plugin
 
 # Constants for batch preloading
 dataset_iterator = None

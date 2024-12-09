@@ -21,7 +21,7 @@ from ..models import (
     PermType,
     ServiceType
 )
-from ..plugin_manager import get_plugin
+from ..plugins.manager import get_plugin
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 from .cloud_adapters.runpod import (

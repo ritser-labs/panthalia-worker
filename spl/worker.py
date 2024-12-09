@@ -21,7 +21,7 @@ import torch._dynamo
 import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from .db.db_adapter_client import DBAdapterClient
-from .plugin_manager import get_plugin
+from .plugins.manager import get_plugin
 from datetime import timezone
 
 # Removed threading imports

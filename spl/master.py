@@ -35,7 +35,7 @@ from eth_account.messages import encode_defunct
 from eth_account import Account
 import uuid
 from .db.db_adapter_client import DBAdapterClient
-from .plugin_manager import get_plugin
+from .plugins.manager import get_plugin
 from typing import List, Dict
 import subprocess
 from .models import TaskStatus, ServiceType

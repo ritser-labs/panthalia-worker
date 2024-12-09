@@ -10,7 +10,7 @@ from flask import Flask, jsonify, send_from_directory
 from ..common import wait_for_health, DB_PORT
 from ..db.db_adapter_client import DBAdapterClient
 from ..models import init_db, db_path, PermType, ServiceType
-from ..plugin_manager import get_plugin, global_plugin_dir
+from ..plugins.manager import get_plugin, global_plugin_dir
 from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
