@@ -1,58 +1,16 @@
-import os
-import asyncio
-import enum
 from datetime import datetime
 from pytz import UTC
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from sqlalchemy import (
     Column, Integer, String, ForeignKey, Text, DateTime, Enum, Float, Boolean, JSON
 )
-from .common import TaskStatus
-
-class ServiceType(enum.Enum):
-    Anvil = "anvil"
-    Db = "db"
-    Master = "master"
-    Sot = "sot"
-    Worker = "worker"
-
-class PermType(enum.Enum):
-    ModifyDb = 0
-    ModifySot = 1
-
-class OrderType(enum.Enum):
-    Bid = "bid"
-    Ask = "ask"
-
-class AccountTxnType(enum.Enum):
-    Deposit = "deposit"
-    Withdrawal = "withdrawal"
-
-class HoldType(enum.Enum):
-    CreditCard = "cc"
-    Credits = "credits"
-
-class CreditTxnType(enum.Enum):
-    Add = "add"
-    Subtract = "subtract"
-
-class EarningsTxnType(enum.Enum):
-    Add = "add"
-    Subtract = "subtract"
-
-class PlatformRevenueTxnType(enum.Enum):
-    Add = "add"
-    Subtract = "subtract"
-
-script_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.abspath(os.path.join(script_dir, os.pardir))
-db_path = os.path.join(parent_dir, "sqlite.db")
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
-
-engine = create_async_engine(DATABASE_URL, echo=False)
-AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-Base = declarative_base()
+from sqlalchemy.orm import relationship
+from .enums import (
+    ServiceType, PermType, OrderType, AccountTxnType, HoldType,
+    CreditTxnType, EarningsTxnType, PlatformRevenueTxnType
+)
+from ..common import TaskStatus  # Adjust if needed, depending on your original structure
+from . import Base
+import enum
 
 class Serializable(Base):
     __abstract__ = True
@@ -60,7 +18,9 @@ class Serializable(Base):
         result = {}
         for c in self.__table__.columns:
             value = getattr(self, c.name)
-            result[c.name] = value.name if isinstance(value, enum.Enum) else value
+            if isinstance(value, enum.Enum):
+                value = value.name
+            result[c.name] = value
         return result
 
 class TimestampMixin:
@@ -93,7 +53,6 @@ class Job(TimestampMixin, Serializable):
     sot_url = Column(String, nullable=False)
     done = Column(Boolean, nullable=False, default=False)
     iteration = Column(Integer, nullable=False)
-
     plugin = relationship("Plugin", back_populates="jobs")
     subnet = relationship("Subnet", back_populates="jobs")
     instances = relationship("Instance", back_populates="job")
@@ -112,7 +71,6 @@ class Task(TimestampMixin, Serializable):
     time_solved = Column(DateTime, nullable=True)
     time_solver_selected = Column(DateTime, nullable=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=True)
-
     job = relationship("Job", back_populates="tasks")
     bid = relationship(
         "Order",
@@ -127,7 +85,6 @@ class Task(TimestampMixin, Serializable):
         back_populates="ask_task"
     )
     account = relationship("Account", back_populates="tasks")
-
 
 class StateUpdate(Serializable):
     __tablename__ = 'state_updates'
@@ -149,7 +106,6 @@ class Perm(Serializable):
     address = Column(String, nullable=False, index=True)
     perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
     last_nonce = Column(String, nullable=False, default='0')
-
     perm_description = relationship("PermDescription", back_populates="perms")
 
 class Sot(Serializable):
@@ -178,7 +134,6 @@ class Account(Serializable):
     credits_balance = Column(Float, nullable=False, default=0.0)
     earnings_balance = Column(Float, nullable=False, default=0.0)
     deposited_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
-
     tasks = relationship("Task", back_populates="account")
     orders = relationship("Order", back_populates="account")
     transactions = relationship("AccountTransaction", back_populates="account")
@@ -205,7 +160,6 @@ class Order(Serializable):
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
     hold_id = Column(Integer, ForeignKey('holds.id'), nullable=True)
-
     subnet = relationship("Subnet", back_populates="orders")
     bid_task = relationship("Task", back_populates="bid", foreign_keys=[bid_task_id])
     ask_task = relationship("Task", back_populates="ask", foreign_keys=[ask_task_id])
@@ -220,7 +174,6 @@ class AccountTransaction(Serializable):
     amount = Column(Float, nullable=False)
     transaction_type = Column(Enum(AccountTxnType), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
-
     account = relationship("Account", back_populates="transactions")
 
 class Hold(Serializable):
@@ -234,7 +187,6 @@ class Hold(Serializable):
     expiry = Column(DateTime, nullable=False)
     charged = Column(Boolean, nullable=False, default=False)
     charged_amount = Column(Float, nullable=False, default=0.0)
-
     account = relationship("Account", back_populates="holds")
     hold_transactions = relationship("HoldTransaction", back_populates="hold")
     orders = relationship("Order", back_populates="hold")
@@ -246,7 +198,6 @@ class HoldTransaction(Serializable):
     order_id = Column(Integer, ForeignKey('orders.id'), nullable=True)
     amount = Column(Float, nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
-
     hold = relationship("Hold", back_populates="hold_transactions")
 
 class CreditTransaction(Serializable):
@@ -257,7 +208,6 @@ class CreditTransaction(Serializable):
     amount = Column(Float, nullable=False)
     txn_type = Column(Enum(CreditTxnType), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
-
     account = relationship("Account", back_populates="credit_transactions")
 
 class EarningsTransaction(Serializable):
@@ -268,7 +218,6 @@ class EarningsTransaction(Serializable):
     amount = Column(Float, nullable=False)
     txn_type = Column(Enum(EarningsTxnType), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
-
     account = relationship("Account", back_populates="earnings_transactions")
 
 class PlatformRevenue(Serializable):
@@ -277,13 +226,3 @@ class PlatformRevenue(Serializable):
     amount = Column(Float, nullable=False)
     txn_type = Column(Enum(PlatformRevenueTxnType), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
-
-async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-async def main():
-    await init_db()
-
-if __name__ == "__main__":
-    asyncio.run(main())
