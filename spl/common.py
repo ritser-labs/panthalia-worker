@@ -14,33 +14,18 @@ import math
 import asyncio
 from hexbytes import HexBytes
 from eth_abi import decode
-from .plugin import exported_plugin
 import threading
 import aiohttp
-
-model_config = exported_plugin.model_config
-model_adapter = exported_plugin.model_adapter
-dataset = exported_plugin.dataset
-tokenizer = exported_plugin.tokenizer
-get_sot_learning_hyperparameters = exported_plugin.get_sot_learning_hyperparameters
-get_master_learning_hyperparameters = exported_plugin.get_master_learning_hyperparameters
-batch_size = exported_plugin.batch_size
-expected_worker_time = exported_plugin.expected_worker_time
-
-MAX_CONCURRENT_ITERATIONS = exported_plugin.max_concurrent_iterations
-
-PRELOAD_BATCH_COUNT = exported_plugin.preload_batch_count
+from eth_account import Account
 
 SOT_PRIVATE_PORT = 5001
 
 # Define the new tokenizer and model arguments
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
-TENSOR_VERSION_INTERVAL = exported_plugin.tensor_version_interval
+DB_PORT = '5432'
 
 MAX_SUBMIT_TASK_RETRY_DURATION = 300
-
-MAX_SELECT_SOLVER_TIME = 1000
 
 MIN_REMAINING_TIME_SECONDS = 3
 
@@ -56,19 +41,19 @@ abi_dir = os.path.join(current_dir, 'abis')
 # Global variables for transaction management by private key
 pending_transactions = {}
 
-async def wait_for_sot(sot_url, timeout=1200):  # Increased timeout to 20 minutes
-    """Wait for the SOT service to be available asynchronously."""
+async def wait_for_health(url, timeout=1200):  # Increased timeout to 20 minutes
+    """Wait for the service to be available asynchronously."""
     start_time = time.time()
     
     async with aiohttp.ClientSession() as session:
         while time.time() - start_time < timeout:
             try:
-                async with session.get(f"{sot_url}/health") as response:
+                async with session.get(f"{url}/health") as response:
                     if response.status == 200:
-                        logging.debug("SOT service is available.")
+                        logging.debug("Service is available.")
                         return True
             except aiohttp.ClientConnectionError as e:
-                logging.debug(f"Waiting for SOT service to be available... {e}")
+                logging.debug(f"Waiting for service to be available... {e}")
             await asyncio.sleep(2)
     
     return False
@@ -189,11 +174,11 @@ def download_file(url):
     response = requests.get(url)
     return torch.load(BytesIO(response.content))
 
-def get_future_version_number():
-    return (int(time.time()) // TENSOR_VERSION_INTERVAL + 1) * TENSOR_VERSION_INTERVAL
+def get_future_version_number(tensor_version_interval):
+    return (int(time.time()) // tensor_version_interval + 1) * tensor_version_interval
 
-def get_current_version_number():
-    return (int(time.time()) // TENSOR_VERSION_INTERVAL) * TENSOR_VERSION_INTERVAL
+def get_current_version_number(tensor_version_interval):
+    return (int(time.time()) // tensor_version_interval) * tensor_version_interval
 
 def process_trace(trace):
     if isinstance(trace, AttributeDict):
@@ -308,107 +293,6 @@ async def wait_for_block(web3):
             return new_entries[0]
         await asyncio.sleep(SLEEP_TIME)
 
-
-async def decode_revert_reason(web3, revert_reason):
-    try:
-        # Ensure the revert reason starts with '0x' and remove it
-        if revert_reason.startswith('0x'):
-            revert_reason = revert_reason[2:]
-
-        if len(revert_reason) < 8:
-            logging.error(f"Invalid revert reason length: {revert_reason}")
-            return f"Unknown revert reason: {revert_reason}"
-
-        selector = '0x' + revert_reason[:8]
-        encoded_data = revert_reason[8:]
-
-        # Define the selector for the 'Error(string)' type
-        error_selector = '0x08c379a0'
-
-        # Check if the selector matches 'Error(string)'
-        if selector == error_selector:
-            # Decode the error message
-            try:
-                # Error(string) has a single argument of type string
-                data_bytes = bytes.fromhex(encoded_data)
-                decoded = decode(['string'], data_bytes)
-                decoded_reason = f"Error: {decoded[0]}"
-                return decoded_reason
-            except Exception as e:
-                logging.error(f"Error decoding revert reason: {e}")
-                return f"Error decoding revert reason: {revert_reason}"
-        
-        # Define the selector for the 'Panic(uint256)' type
-        panic_selector = '0x4e487b71'
-
-        # Check if the selector matches 'Panic(uint256)'
-        if selector == panic_selector:
-            # Decode the panic code
-            try:
-                # Panic(uint256) has a single argument of type uint256
-                data_bytes = bytes.fromhex(encoded_data)
-                decoded = decode(['uint256'], data_bytes)
-                decoded_reason = f"Panic: {hex(decoded[0])}"
-                return decoded_reason
-            except Exception as e:
-                logging.error(f"Error decoding panic code: {e}")
-                return f"Error decoding panic code: {revert_reason}"
-        
-        error_selectors = load_error_selectors(web3)
-
-        if selector in error_selectors:
-            error_info = error_selectors[selector]
-            name = error_info['name']
-            types = [input['type'] for input in error_info['inputs']]
-            data_bytes = bytes.fromhex(encoded_data)
-            decoded = decode(types, data_bytes)
-            decoded_reason = f"{name}({', '.join(map(str, decoded))})"
-            return decoded_reason
-        else:
-            logging.error(f'Selector {selector} not found in error selectors')
-            logging.error(f'Selectors: {error_selectors}')
-            return f"Unknown revert reason: {revert_reason}"
-    except Exception as e:
-        logging.error(f"Exception in decode_revert_reason: {e}")
-        return f"Error decoding revert reason: {revert_reason}"
-
-async def approve_token_once(web3, token_contract, private_key, spender_address, amount):
-    account = web3.eth.account.from_key(private_key)
-    current_allowance = await token_contract.functions.allowance(account.address, spender_address).call()
-    if current_allowance < amount:
-        receipt = await async_transact_with_contract_function(web3, token_contract, 'approve', private_key, spender_address, amount)
-        logging.info(f"Approved token transaction receipt: {receipt}")
-    else:
-        logging.info("Current allowance is sufficient, no need to approve more tokens.")
-
-async def deposit_stake_without_approval(web3, pool_contract, private_key, subnet_id, group, worker_address, stake_amount, max_stakes, max_retries=10):
-    stakes_deposited = await pool_contract.functions.getStakeIds(subnet_id, group, worker_address).call()
-    number_of_stakes_to_deposit = max_stakes - len(stakes_deposited)
-    
-    logging.info(f'Depositing {number_of_stakes_to_deposit} stakes for {worker_address}...')
-
-    if number_of_stakes_to_deposit > 0:
-        for attempt in range(max_retries):  # Use max_retries variable
-            try:
-                await wait_for_state_change(web3, pool_contract, PoolState.Unlocked.value, private_key)
-                receipt = await async_transact_with_contract_function(
-                    web3, 
-                    pool_contract, 
-                    'depositMultipleStakes', 
-                    private_key, 
-                    subnet_id, 
-                    group, 
-                    number_of_stakes_to_deposit
-                )
-                logging.info(f"depositMultipleStakes transaction receipt: {receipt}")
-                logging.info(f"Deposited {number_of_stakes_to_deposit} stakes for {worker_address}, total stakes: {max_stakes}")
-                break  # Exit loop if successful
-            except Exception as e:
-                logging.error(f"Failed to deposit stakes on attempt {attempt + 1}: {e}")
-                if attempt == max_retries - 1:
-                    raise  # Rethrow the exception after the last attempt
-                await asyncio.sleep(SLEEP_TIME)  # Wait before retrying
-
 # Global state tracking variable
 current_global_state = None
 # Event to notify all waiting tasks of a state change
@@ -416,176 +300,140 @@ state_change_event = asyncio.Event()
 # Flag to ensure only one state-changing transaction at a time
 state_changing = False
 
-async def update_current_global_state(pool):
-    global current_global_state
-    current_global_state = PoolState(await pool.functions.state().call())
-    logging.info(f'New global state: {current_global_state.name}')
-    state_change_event.set()
-    state_change_event.clear()
 
-async def wait_for_state_change(web3, pool, target_state, private_key):
-    max_retries = 300
-    retries = 0
+def generate_wallets(num_wallets):
+    wallets = []
+    for _ in range(num_wallets):
+        account = Account.create()
+        wallets.append({'private_key': account._private_key.hex(), 'address': account.address})
+    return wallets
 
-    global current_global_state
-    global state_change_event
-    global state_changing
 
-    await update_current_global_state(pool)
+# Initialize a lock to prioritize tensor downloads
+tensor_download_lock = asyncio.Lock()
 
-    while retries < max_retries:
-        # Check if the current state matches the target state
-        if current_global_state == PoolState(target_state):
-            # Check if there are at least MIN_REMAINING_TIME_SECONDS remaining in the target state
-            latest_block = await web3.eth.get_block('latest')
-            current_time = latest_block['timestamp']
-            if target_state == PoolState.Unlocked.value:
-                remaining_time = (await pool.functions.lastStateChangeTime().call() + 
-                                  (await pool.functions.UNLOCKED_MIN_PERIOD().call())) - current_time
-                if remaining_time >= MIN_REMAINING_TIME_SECONDS:
-                    logging.info(f'Pool state is now {PoolState(target_state).name} with {remaining_time} seconds remaining')
-                    return
-                else:
-                    logging.info(f'Not enough remaining time {remaining_time} seconds in {PoolState(target_state).name}, sleeping and rechecking state')
-                    await asyncio.sleep(max(remaining_time, SLEEP_TIME))
-                    await update_current_global_state(pool)
-            else:
-                logging.info(f'Pool state is now {PoolState(target_state).name}')
-                return
+# Initialize an event to signal tensor download in progress
+tensor_download_event = asyncio.Event()
 
-           
+tensor_download_event.set()
 
-        # Try to perform the state transition if needed
-        if not state_changing:
-            state_changing = True
-            try:
-                # Perform state transition based on the current state
-                if current_global_state == PoolState.Unlocked:
-                    logging.info("Triggering lockGlobalState to change state to Locked")
-                    await trigger_lock_global_state(web3, pool, private_key)
-                elif current_global_state == PoolState.Locked:
-                    logging.info("Triggering finalizeSelections to change state to SelectionsFinalizing")
-                    await finalize_selections(web3, pool, private_key)
-                elif current_global_state == PoolState.SelectionsFinalizing:
-                    logging.info("Triggering selectStakes to change state to Unlocked")
-                    await select_stakes(web3, pool, private_key)
+async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=5, download_type='batch_targets'):
+    """
+    Downloads data from the response stream with a timeout for each chunk.
+    Pauses if a tensor download is in progress.
 
-                # Update the global state after the transaction
-                await update_current_global_state(pool)
-            except Exception as e:
-                logging.info(f"Caught error changing state: {e}")
-                await asyncio.sleep(SLEEP_TIME)
-            finally:
-                state_changing = False
-                await update_current_global_state(pool)
-        else:
-            # Wait for the state to change
-            await state_change_event.wait()
+    Args:
+        response: The aiohttp response object.
+        chunk_size: The size of each chunk to download.
+        chunk_timeout: Timeout for each chunk in seconds.
+        download_type: Type of download ('tensor' or 'batch_targets').
 
-        retries += 1
-
-    raise RuntimeError(f"Failed to change state to {PoolState(target_state).name} after multiple attempts")
-
-async def finalize_selections(web3, pool, private_key):
-    vrf_coordinator_address = await pool.functions.vrfCoordinator().call()
-    vrf_coordinator = web3.eth.contract(address=vrf_coordinator_address, abi=load_abi('MockVRFCoordinator'))
-    vrf_request_id = await pool.functions.vrfRequestId().call()
-    receipt = await async_transact_with_contract_function(web3, vrf_coordinator, 'fulfillRandomWords', private_key, vrf_request_id, attempts=1)
-    logging.info(f"fulfillRandomWords transaction receipt: {receipt}")
-
-async def trigger_lock_global_state(web3, pool, private_key):
-    unlocked_min_period = await pool.functions.UNLOCKED_MIN_PERIOD().call()
-    last_state_change_time = await pool.functions.lastStateChangeTime().call()
-    latest_block = await web3.eth.get_block('latest')
-    current_time = latest_block['timestamp']
-    remaining_time = (last_state_change_time + unlocked_min_period) - current_time
-
-    if remaining_time > 0:
-        logging.info(f"Waiting for {remaining_time} seconds until UNLOCKED_MIN_PERIOD is over")
-        await asyncio.sleep(remaining_time + 1)
+    Returns:
+        A BytesIO object containing the downloaded data.
+    """
+    start_time = time.time()
+    content = BytesIO()
+    
+    # Get the content length from the header, if available
+    content_length = response.headers.get('Content-Length', None)
+    if content_length:
+        total_size = int(content_length)
+        logging.debug(f"Total file size (Content-Length): {total_size} bytes")
     else:
-        logging.info("UNLOCKED_MIN_PERIOD is already over, proceeding with lockGlobalState")
+        # No Content-Length header, could be chunked transfer encoding
+        total_size = None
+        logging.debug("No Content-Length header. Assuming chunked transfer encoding.")
+    
+    downloaded_size = 0
+    next_progress = 0.1
 
-    try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'lockGlobalState', private_key, attempts=1)
-        logging.info(f"lockGlobalState transaction receipt: {receipt}")
-    except Exception as e:
-        logging.error(f"Error triggering lock global state: {e}")
-        raise
-
-async def select_stakes(web3, pool, private_key):
-    try:
-        receipt = await async_transact_with_contract_function(web3, pool, 'selectStakes', private_key, attempts=1)
-        logging.info(f"selectStakes transaction receipt: {receipt}")
-    except Exception as e:
-        logging.error(f"Error triggering remove global lock: {e}")
-        raise
-
-# Add a loop to keep checking if the RPC is available
-async def wait_for_rpc_available(web3, retry_interval=5, max_retries=60):
-    """
-    Wait until the RPC connection is available.
-
-    :param web3: The web3 instance to check.
-    :param retry_interval: Time (in seconds) to wait between retries.
-    :param max_retries: Maximum number of retries before giving up.
-    """
-    retry_count = 0
-    while retry_count < max_retries:
+    # Fetch each chunk with a timeout
+    while True:
         try:
-            # Try to fetch the current block number as a simple check
-            await web3.eth.block_number
-            logging.info("RPC is available.")
-            return True
+            chunk = await asyncio.wait_for(response.content.read(chunk_size), timeout=chunk_timeout)
+        except asyncio.TimeoutError:
+            logging.error(f"Chunk download timed out after {chunk_timeout} seconds")
+            raise
+
+        if not chunk:
+            # No more chunks left to download
+            logging.debug("No more chunks to download. Download finished.")
+            break
+
+        if download_type == 'batch_targets':
+            await tensor_download_event.wait()
+
+        content.write(chunk)
+        downloaded_size += len(chunk)
+        #logging.debug(f"Downloaded chunk size: {len(chunk)} bytes. Total downloaded: {downloaded_size} bytes")
+
+        # If we have the total size, we can log progress
+        if total_size:
+            progress = downloaded_size / total_size
+            if progress >= next_progress:
+                logging.info(f"Downloaded {int(progress * 100)}%")
+                next_progress += 0.1
+
+    content.seek(0)  # Reset the stream position
+
+    # Validate that the entire content was downloaded, if we know the total size
+    if total_size and downloaded_size != total_size:
+        logging.error(f"Downloaded size ({downloaded_size}) does not match expected size ({total_size}).")
+        raise Exception(f"Incomplete download: expected {total_size} bytes but got {downloaded_size} bytes")
+
+    end_time = time.time()
+    logging.info(f"Download completed successfully in {end_time - start_time:.2f} seconds. Total size: {downloaded_size} bytes")
+    return content
+
+async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_type='batch_targets', tensor_name=None):
+    """
+    Downloads a file with retry logic and prioritizes tensor downloads over batch/targets downloads.
+    
+    Args:
+        url (str): The URL to download the file from.
+        retries (int): Number of retry attempts.
+        backoff (int): Backoff factor for retries.
+        chunk_timeout (int): Timeout for each chunk in seconds.
+        download_type (str): Type of download ('tensor' or 'batch_targets').
+    
+    Returns:
+        torch.Tensor: The downloaded tensor.
+    """
+    params = {'tensor_name': tensor_name} if tensor_name else None
+    for attempt in range(1, retries + 1):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params) as response:
+                    response.raise_for_status()
+
+                    if download_type == 'tensor':
+                        # Acquire tensor_download_lock to prioritize tensor downloads
+                        async with tensor_download_lock:
+                            # Signal that a tensor download is in progress
+                            tensor_download_event.clear()
+                            try:
+                                content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout, download_type=download_type)
+                            finally:
+                                # Clear the event after tensor download is complete
+                                tensor_download_event.set()
+                    elif download_type == 'batch_targets':
+                        # Wait for any ongoing tensor download to finish
+                        async with tensor_download_lock:
+                            pass  # Simply wait until tensor_download_lock is free
+                        content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout, download_type=download_type)
+                    else:
+                        raise ValueError("Invalid download_type specified.")
+
+                    return torch.load(content)
+
+        except asyncio.TimeoutError:
+            logging.error(f"Attempt {attempt}: Chunk download timed out.")
+        except aiohttp.ClientError as e:
+            logging.error(f"Attempt {attempt}: Client error: {e}")
         except Exception as e:
-            logging.error(f"RPC not available. Retry {retry_count + 1}/{max_retries}: {e}")
-            retry_count += 1
-            await asyncio.sleep(retry_interval)
-    logging.error(f"RPC not available after {max_retries} retries. Exiting...")
-    return False
+            logging.error(f"Attempt {attempt}: Unexpected error: {e}")
 
-async def fund_wallets(web3, private_key, wallets, deployer_address, token_contract, amount_eth, amount_token, distributor_contract_address):
-    logging.info('Funding wallets')
+        if attempt < retries:
+            await asyncio.sleep(backoff * attempt)
 
-    distributor_contract = web3.eth.contract(address=distributor_contract_address, abi=load_abi('Distributor'))
-
-    # Distribute Ether
-    recipients = [wallet['address'] for wallet in wallets]
-    eth_amounts = [web3.to_wei(amount_eth, 'ether')] * len(wallets)
-
-    distribute_eth_tx = await distributor_contract.functions.distributeEther(recipients, eth_amounts).build_transaction({
-        'from': deployer_address,
-        'nonce': await web3.eth.get_transaction_count(deployer_address),
-        'gas': 3000000,  # Adjust as needed
-        'gasPrice': await web3.eth.gas_price,
-        'value': sum(eth_amounts)
-    })
-    signed_eth_tx = web3.eth.account.sign_transaction(distribute_eth_tx, private_key)
-    eth_tx_hash = await web3.eth.send_raw_transaction(signed_eth_tx.rawTransaction)
-    receipt = await web3.eth.wait_for_transaction_receipt(eth_tx_hash)
-    if receipt['status'] != 1:
-        raise Exception(f"Error distributing Ether: {receipt}")
-    logging.info('Ether distribution completed')
-    
-    if not hasattr(fund_wallets, 'approval_submitted') or not fund_wallets.approval_submitted:
-        # Approve the distributor contract to spend the token
-        max_tokens = 1000000000000000000000000000000  # 1e27
-        await async_transact_with_contract_function(
-            web3,
-            token_contract,
-            'approve',
-            private_key,
-            *[distributor_contract_address, max_tokens],
-        )
-        logging.info('Token approval completed')
-        fund_wallets.approval_submitted = True
-    
-    
-    await async_transact_with_contract_function(
-        web3,
-        distributor_contract,
-        'distributeTokens',
-        private_key,
-        *[token_contract.address, recipients, [amount_token] * len(wallets)],
-    )
-    logging.info('Token distribution completed')
+    raise Exception(f"Failed to download file after {retries} attempts")

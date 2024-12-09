@@ -11,8 +11,6 @@ import time
 import random
 from werkzeug.utils import secure_filename
 from tqdm import tqdm
-from eth_account import Account
-from eth_account.messages import encode_defunct
 from web3 import Web3
 import functools
 from filelock import FileLock
@@ -20,21 +18,20 @@ import psutil
 import tracemalloc
 import aiofiles
 import shutil
+from .auth.api_auth import requires_authentication
+from .util.json import load_json, save_json
+from .db.db_adapter_client import DBAdapterClient
 
 # Import your custom modules
 from .common import (
-    get_sot_learning_hyperparameters,
-    model_adapter,
-    batch_size,
     get_current_version_number,
     TENSOR_NAME,
-    dataset,
     SOT_PRIVATE_PORT,
     get_future_version_number,
-    PRELOAD_BATCH_COUNT,
     CHUNK_SIZE
 )
 from .device import device
+from .plugins.manager import get_plugin
 
 # Constants for batch preloading
 dataset_iterator = None
@@ -56,7 +53,6 @@ block_timestamps_file_lock = FileLock(os.path.join(state_dir, 'block_timestamps.
 num_updates_file_lock = FileLock(os.path.join(state_dir, 'num_updates.json.lock'))
 last_future_version_file_lock = FileLock(os.path.join(state_dir, 'last_future_version_number.json.lock'))
 iteration_number_file_lock = FileLock(os.path.join(state_dir, 'iteration_number.json.lock'))
-used_nonces_file_lock = FileLock(os.path.join(state_dir, 'used_nonces.json.lock'))
 
 # Initialize locks for thread safety
 latest_loss_lock = asyncio.Lock()
@@ -76,7 +72,6 @@ logging.getLogger('.adapters.dataloader').setLevel(logging.INFO)
 
 # Add a global variable to control memory logging
 MEMORY_LOGGING_ENABLED = False
-
 
 def log_memory_usage(note=''):
     """Log the current memory usage of the process if enabled."""
@@ -130,7 +125,7 @@ def nag_update(params, grads, m, lr=0.002, weight_decay=0.2, beta1=0.9, eps=1e-6
     return new_params, new_m
 
 
-def create_app(public_keys_file, enable_memory_logging=False):
+def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
     """Create and configure the app."""
     global MEMORY_LOGGING_ENABLED
     MEMORY_LOGGING_ENABLED = enable_memory_logging
@@ -150,34 +145,31 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     logging.info("Initializing or loading initial state...")
     os.makedirs(state_dir, exist_ok=True)
-
     # Initialize variables
     update_timestamp_lock = asyncio.Lock()
-    master_public_keys = None
+    
+    plugin_id = None
+    plugin = None
 
-    async def save_json(file_path, data, file_lock):
-        with file_lock:
-            async with aiofiles.open(file_path, 'w') as f:
-                await f.write(json.dumps(data))
+    sot_db_obj = None
+    job_id = None
+    perm_db = None
+    db_adapter = None
 
-    async def load_json(file_path, default, file_lock):
-        with file_lock:
-            if os.path.exists(file_path):
-                async with aiofiles.open(file_path, 'r') as f:
-                    content = await f.read()
-                    if not content.strip():  # Check if the file is empty
-                        logging.error(f"The file {file_path} is empty. Returning default value.")
-                        return default
-                    try:
-                        return json.loads(content)  # Try loading the JSON content
-                    except json.JSONDecodeError as e:
-                        logging.error(f"JSONDecodeError in file {file_path}: {e}. Returning default value.")
-                        async with aiofiles.open(file_path, 'w') as f:
-                            await f.write(json.dumps(default))
-                        return default
-            else:
-                logging.info(f"The file {file_path} does not exist. Saving default value.")
-                return default
+    def requires_auth(f):
+        def get_db_adapter():
+            nonlocal db_adapter
+            return db_adapter
+
+        def get_perm_db():
+            nonlocal perm_db
+            return perm_db
+
+        return requires_authentication(
+            get_db_adapter,
+            get_perm_db
+        )(f)
+
 
     def set_dict_and_adam(dict_obj, tensor_name, value):
         dict_obj[tensor_name] = value
@@ -194,7 +186,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
         if sync_version_number is None:
             sync_version_number = block_timestamps.get(
-                name, get_current_version_number())
+                name, get_current_version_number(await plugin.get('tensor_version_interval')))
 
         file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
         if os.path.exists(file_path):
@@ -204,7 +196,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         if TENSOR_NAME not in name:
             raise ValueError(f"Unsupported tensor name: {name}")
 
-        tensor = model_adapter.init_tensor(zero_init)
+        tensor = await plugin.call_submodule('model_adapter', 'init_tensor', zero_init)
 
         torch.save(tensor, file_path)
         block_timestamps[name] = sync_version_number
@@ -224,59 +216,41 @@ def create_app(public_keys_file, enable_memory_logging=False):
         await initialize_tensor(TENSOR_NAME, zero_init=False)
         await initialize_tensor(f'{TENSOR_NAME}_adam_m', zero_init=True)
 
-    async def load_next_batch():
-        """Load the next batch from the dataset."""
-        batch = []
-        targets = []
-        global dataset_iterator
-        async with dataset_lock:
-            if dataset_iterator is None:
-                dataset_iterator = dataset.__aiter__()
-
-            try:
-                for _ in range(batch_size):
-                    inputs, target_tokens = await dataset_iterator.__anext__()
-                    if isinstance(inputs, list):
-                        inputs = torch.tensor(inputs)
-                    if isinstance(target_tokens, list):
-                        target_tokens = torch.tensor(target_tokens)
-                    batch.append(inputs)
-                    targets.append(target_tokens)
-            except StopAsyncIteration:
-                logging.info("Dataset iterator exhausted.")
-                dataset_iterator = None  # Reset the iterator
-
-        if not batch:
-            return None, None  # No more data
-
-        batch_tensor = torch.stack(batch)
-        targets_tensor = torch.stack(targets)
-        timestamp = int(time.time())
-        random_suffix = random.randint(1000, 9999)
-        batch_filename = f'batch_{timestamp}_{random_suffix}.pt'
-        targets_filename = f'targets_{timestamp}_{random_suffix}.pt'
-        await asyncio.to_thread(torch.save, batch_tensor, os.path.join(temp_dir, batch_filename))
-        await asyncio.to_thread(torch.save, targets_tensor, os.path.join(temp_dir, targets_filename))
-        return batch_filename, targets_filename
-
     async def initialize_service():
-        nonlocal master_public_keys
+        nonlocal plugin_id, plugin, sot_db_obj, job_id, perm_db, db_adapter
         logging.info("Initializing distributed environment and tensors")
 
-        async with aiofiles.open(public_keys_file, 'r') as f:
-            master_public_keys = json.loads(await f.read())
-        model_adapter.initialize_environment('gloo')
+
+
+        sot_db_obj = await db_adapter.get_sot(sot_id)
+
+        job_id = sot_db_obj.job_id
+        perm_db = sot_db_obj.perm
+ 
+        plugin_id = (await db_adapter.get_job(job_id)).plugin_id
+        
+        plugin = await get_plugin(plugin_id, db_adapter)
+
+        logging.info(
+            f"Initializing service for SOT {sot_id}, job {job_id}, plugin {plugin_id}, perm {perm_db}")
+
         await initialize_all_tensors()
-        dataset.initialize_dataset()
+        await plugin.call_submodule('dataset', 'initialize_dataset')
         logging.info(f'Loading initial batches for service')
+
 
         log_memory_usage('After initializing service')
         logging.info("Service initialized")
 
     @app.before_serving
     async def before_serving():
+        nonlocal db_adapter
         """Hook to run before the app starts serving."""
         logging.info("App is starting to serve.")
+        db_adapter = DBAdapterClient(
+            db_url,
+            private_key
+        )
         await initialize_service()  # Initialize asynchronously
 
     @app.after_serving
@@ -298,70 +272,6 @@ def create_app(public_keys_file, enable_memory_logging=False):
         log_memory_usage('Health check endpoint')
         return jsonify({'status': 'healthy'}), 200
 
-    def verify_signature(message, signature):
-        nonlocal master_public_keys
-        snapshot_before = tracemalloc.take_snapshot() if MEMORY_LOGGING_ENABLED else None  # Take snapshot before the operation
-
-        message = encode_defunct(text=message)
-        recovered_address = Account.recover_message(message, signature=signature)
-
-        if MEMORY_LOGGING_ENABLED:
-            snapshot_after = tracemalloc.take_snapshot()  # Take snapshot after the operation
-            log_memory_diff(snapshot_before, snapshot_after, note='After verifying signature')  # Log memory differences
-
-        logging.debug(f"Recovered address: {recovered_address}, Expected addresses: {master_public_keys}")
-        return recovered_address.lower() in [key.lower() for key in master_public_keys]
-
-    def requires_authentication(f):
-        @functools.wraps(f)
-        async def decorated_function(*args, **kwargs):
-            auth_header = request.headers.get('Authorization')
-            logging.debug(f"Authorization header: {auth_header}")
-            if not auth_header:
-                logging.error("Authorization header missing")
-                return jsonify({'error': 'Authorization header missing'}), 401
-
-            try:
-                message, signature = auth_header.rsplit(':', 1)
-            except ValueError:
-                logging.error("Invalid Authorization header format")
-                return jsonify({'error': 'Invalid Authorization header format'}), 401
-
-            if not verify_signature(message, signature):
-                logging.error("Invalid signature")
-                return jsonify({'error': 'Invalid signature'}), 403
-
-            # Parse the message to extract the nonce and timestamp
-            try:
-                message_data = json.loads(message)
-                nonce = message_data['nonce']
-                timestamp = message_data['timestamp']
-                logging.debug(f"Message nonce: {nonce}, timestamp: {timestamp}")
-            except (KeyError, json.JSONDecodeError):
-                logging.error("Invalid message format")
-                return jsonify({'error': 'Invalid message format'}), 401
-
-            # Load the used nonces from file
-            used_nonces = await load_json(os.path.join(state_dir, 'used_nonces.json'), {}, used_nonces_file_lock)
-
-            # Check if the nonce has been used before
-            if nonce in used_nonces:
-                logging.error("Nonce already used")
-                return jsonify({'error': 'Nonce already used'}), 403
-
-            # Check if the message has expired (validity period of 5 minutes)
-            current_time = int(time.time())
-            if current_time - timestamp > 300:
-                logging.error("Message expired")
-                return jsonify({'error': 'Message expired'}), 403
-
-            # Store the nonce to prevent reuse
-            used_nonces[nonce] = True
-            await save_json(os.path.join(state_dir, 'used_nonces.json'), used_nonces, used_nonces_file_lock)
-
-            return await f(*args, **kwargs)
-        return decorated_function
-
     synced_workers = 0
 
     @app.route('/report_sync', methods=['POST'])
@@ -376,12 +286,12 @@ def create_app(public_keys_file, enable_memory_logging=False):
         return jsonify(synced_workers)
 
     @app.route('/get_batch', methods=['POST'])
-    @requires_authentication
+    @requires_auth
     async def get_batch():
         logging.info("Accessing /get_batch endpoint")
         try:
             # Retrieve the next batch of token pairs
-            token_pairs = await dataset.__anext__()  # This should return a list of token pairs
+            token_pairs = await plugin.call_submodule('dataset', '__anext__')
 
             if not token_pairs:
                 logging.info("No more batches available in /get_batch.")
@@ -462,7 +372,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
     async def fix_outdated_last_future_version_number(tensor_name, last_future_version_number):
         value = last_future_version_number.get(tensor_name, 0)
-        current_version_number = get_current_version_number()
+        current_version_number = get_current_version_number(await plugin.get('tensor_version_interval'))
         if value < current_version_number:
             if os.path.exists(os.path.join(state_dir, f'{tensor_name}_{value}.pt')):
                 for f in f'{tensor_name}', f'{tensor_name}_adam_m':
@@ -477,7 +387,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
     async def update_block_timestamps(tensor_name, block_timestamps, num_updates, iteration_number, last_future_version_number):
         await update_timestamp_lock.acquire()
         try:
-            future_version_number = get_future_version_number()
+            future_version_number = get_future_version_number(await plugin.get('tensor_version_interval'))
             old_block_timestamp = None
 
             await fix_outdated_last_future_version_number(tensor_name, last_future_version_number)
@@ -496,15 +406,26 @@ def create_app(public_keys_file, enable_memory_logging=False):
 
                 set_dict_and_adam(block_timestamps, tensor_name, new_block_timestamp)
                 await save_json(block_timestamps_file, block_timestamps, block_timestamps_file_lock)
+                saved_num_updates = num_updates.get(tensor_name, 0)
 
                 set_dict_and_adam(num_updates, tensor_name, 0)
                 await save_json(num_updates_file, num_updates, num_updates_file_lock)
-
-                set_dict_and_adam(iteration_number, tensor_name, iteration_number.get(tensor_name, 0) + 1)
+                saved_iteration_number = iteration_number.get(tensor_name, 0)
+                set_dict_and_adam(iteration_number, tensor_name, saved_iteration_number + 1)
                 await save_json(iteration_number_file, iteration_number, iteration_number_file_lock)
                 if last_future_version_number.get(tensor_name, 0) < future_version_number:
                     set_dict_and_adam(last_future_version_number, tensor_name, future_version_number)
                     await save_json(last_future_version_file, last_future_version_number, last_future_version_file_lock)
+                if saved_num_updates > 0:
+                    state_update_data = {
+                        'num_updates': saved_num_updates,
+                        'iteration_number': saved_iteration_number,
+                    }
+                    state_update_data = json.dumps(state_update_data)
+                    await db_adapter.create_state_update(
+                        job_id,
+                        state_update_data
+                    )
         finally:
             update_timestamp_lock.release()
         return old_block_timestamp
@@ -539,7 +460,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         return os.path.join(state_dir, path_relative_to_state)
 
     @app.route('/update_state', methods=['POST'])
-    @requires_authentication
+    @requires_auth
     async def update_state():
         logging.info("Accessing /update_state endpoint")
         data = await request.get_json()
@@ -558,7 +479,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
         last_future_version_number = await load_json(last_future_version_file, {}, last_future_version_file_lock)
         iteration_number = await load_json(iteration_number_file, {}, iteration_number_file_lock)
 
-        future_version_number = get_future_version_number()
+        future_version_number = get_future_version_number(await plugin.get('tensor_version_interval'))
 
         if data['version_number'] != block_timestamps.get(tensor_name, 0):
             delta = block_timestamps.get(tensor_name, 0) - data['version_number']
@@ -612,7 +533,7 @@ def create_app(public_keys_file, enable_memory_logging=False):
             await save_json(num_updates_file, num_updates, num_updates_file_lock)
 
             averaged_grads = (accumulated_grads / num_of_updates).to(device)
-            learning_params = get_sot_learning_hyperparameters(iteration_number[tensor_name])
+            learning_params = await plugin.get_sot_learning_hyperparameters(iteration_number[tensor_name])
             future_tensor, m_update = await apply_optimizer(
                 current_version_number,
                 tensor_name,
@@ -850,13 +771,16 @@ if __name__ == "__main__":
 
     def main():
         parser = argparse.ArgumentParser(description="Source of Truth (SOT) Service")
-        parser.add_argument('--public_keys', type=str, required=True, help="Path to the file containing public keys of the master for verifying requests")
         parser.add_argument('--enable_memory_logging', action='store_true', help="Enable memory logging")
+        parser.add_argument('--sot_id', type=int, required=True, help="ID for the SOT service")
+        parser.add_argument('--db_url', type=str, required=True, help="URL for the database")
+        parser.add_argument('--private_key', type=str, required=True, help="Private key for the database")
+
 
         args = parser.parse_args()
 
         # Create the app with the memory logging flag
-        app = create_app(args.public_keys, enable_memory_logging=args.enable_memory_logging)
+        app = create_app(args.sot_id, args.db_url, args.private_key, enable_memory_logging=args.enable_memory_logging)
 
         logging.info("Starting SOT service...")
 
