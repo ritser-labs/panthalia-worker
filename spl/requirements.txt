@@ -21,6 +21,7 @@ python-jose
 typeguard
 pytest
 pytest-asyncio
+PyQt5
 
 aiosqlite
 sqlalchemy

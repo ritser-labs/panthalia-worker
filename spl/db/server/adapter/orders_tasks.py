@@ -328,11 +328,11 @@ class DBAdapterOrdersTasksMixin:
             if not task:
                 raise ValueError("Task not found")
 
-            if not task.ask:
-                raise PermissionError("No access to submit result")
-
             if task.ask.user_id != self.get_user_id():
-                raise PermissionError("No access to submit result")
+                raise PermissionError("No access to submit result: not the solver")
+
+            if not task.ask:
+                raise PermissionError("No access to submit result: no ask order")
 
             if task.status != TaskStatus.SolverSelected:
                 raise ValueError("Task not in SolverSelected status")

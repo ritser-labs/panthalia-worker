@@ -2,6 +2,8 @@ panthalia repo
 
 needs pytorch, docker and nvidia container toolkit
 
+libgl1-mesa-glx for qt
+
 run ./build_image.sh in spl/ to build the docker image used for isolating the plugin environment
 
 needs env variables:

@@ -1,35 +1,15 @@
-# spl/worker/main.py
-import asyncio
-import time
-import logging
-
+# spl/worker/__main__.py
+import os
 from .config import args
-from .db_client import db_adapter
-from .tasks import deposit_stake, handle_task
 from .logging_config import logger
 
-async def main():
-    logger.info("Starting main process")
+# Before starting anything, set the environment variable for the Docker engine URL
+os.environ["DOCKER_ENGINE_URL"] = args.docker_engine_url
 
-    subnet_in_db = await db_adapter.get_subnet(args.subnet_id)
-    logger.info("Starting tensor synchronization...")
-
-    processed_tasks = set()
-    last_loop_time = time.time()
-
-    while True:
-        logger.debug(f'Loop time: {time.time() - last_loop_time:.2f} seconds')
-        last_loop_time = time.time()
-
-        await deposit_stake()
-
-        assigned_tasks = await db_adapter.get_assigned_tasks(subnet_in_db.id)
-        for task in assigned_tasks:
-            if task.id not in processed_tasks:
-                asyncio.create_task(handle_task(task, time.time()))
-                processed_tasks.add(task.id)
-
-        await asyncio.sleep(args.poll_interval)
-
-if __name__ == "__main__":
+if args.gui:
+    from .gui import run_gui
+    run_gui(args)
+else:
+    from .main_logic import main
+    import asyncio
     asyncio.run(main())

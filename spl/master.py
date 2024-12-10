@@ -471,6 +471,7 @@ async def launch_worker(
     if deploy_type == 'local':
         command = [
             'python', '-m', 'spl.worker',
+            '--cli',
             '--subnet_id', str(subnet.id),
             '--db_url', db_url,
             '--private_key', worker_key,
@@ -582,13 +583,14 @@ async def check_for_new_jobs(
             logging.info(f"Starting SOT service")
             sot_db, sot_url = await launch_sot(
                 db_adapter, job, deploy_type, db_url)
-            
+            '''
             # Workers
             logging.info(f"Starting worker processes")
             await launch_workers(
                 db_adapter, job, deploy_type, subnet,
                 db_url, sot_url
             )
+            '''
 
             # Master
             logging.info(f"Starting master process")

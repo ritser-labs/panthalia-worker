@@ -1,3 +1,4 @@
+# spl/plugins/manager.py
 import aiofiles
 import os
 import sys
@@ -7,43 +8,41 @@ import docker
 import time
 import asyncio
 import json
+import base64
 from functools import partial
 import hashlib
 import tempfile
+import aiohttp
+
 from .serialize import serialize_data, deserialize_data
-import aiohttp  # Added for asynchronous HTTP requests
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Plugin management variables
-global_plugin_dir = tempfile.mkdtemp()  # e.g., /tmp/my_plugins
+# Read Docker engine URL from environment variable or use default
+DOCKER_ENGINE_URL = os.environ.get("DOCKER_ENGINE_URL", "unix:///var/run/docker.sock")
+
+global_plugin_dir = tempfile.mkdtemp()
 plugin_package_name = 'plugin_code'
-docker_plugin_dir = f'/app/{plugin_package_name}'  # Updated to match Dockerfile
+docker_plugin_dir = f'/app/{plugin_package_name}'
 server_script_name = 'server.py'
 server_script_host = os.path.join(global_plugin_dir, server_script_name)
 server_script_container = f"{docker_plugin_dir}/{server_script_name}"
 
-# Docker and server configuration
-DOCKER_IMAGE = "panthalia_plugin"  # Updated to custom image name
-DOCKERFILE_PATH = "Dockerfile"
+DOCKER_IMAGE = "panthalia_plugin"
+
 CONTAINER_NAME_TEMPLATE = "panthalia_plugin_{plugin_id}"
 HOST_PORT_BASE = 8000
 
-# Security options
 security_options = [
     "no-new-privileges:true",
 ]
-
-# Resource limits
 mem_limit = "16g"
 pids_limit = 100
 
-# Initialize Docker client
-docker_client = docker.from_env()
+docker_client = docker.DockerClient(base_url=DOCKER_ENGINE_URL)
 
-# Cache for last plugin
 last_plugin_id = None
 last_plugin_proxy = None
 
