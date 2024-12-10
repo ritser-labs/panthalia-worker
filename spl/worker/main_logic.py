@@ -7,6 +7,9 @@ from .tasks import deposit_stake, handle_task
 from .logging_config import logger
 from .gui_config import get_subnet_id
 
+# NEW: Import ensure_docker_image to build plugin image at startup if missing
+from ..plugins.manager import ensure_docker_image
+
 async def main():
     logger.info("Starting main process")
 
@@ -19,12 +22,12 @@ async def main():
     else:
         subnet_id = args.subnet_id
 
-    # Set the subnet_id in the args or create a global variable for it
+    # Set the subnet_id in the args
     args.subnet_id = subnet_id
 
     connected_once = False
 
-    # Now we can verify the DB connection and authentication 
+    # Verify DB connection and authentication
     while not connected_once:
         new_config_data = load_config()
         new_db_url = new_config_data.get("db_url", args.db_url)
@@ -40,8 +43,12 @@ async def main():
             connected_once = True
             set_connected_once(True)
         else:
-            logger.error("Failed to connect/auth to DB. Retrying in 10 seconds...")
-            await asyncio.sleep(10)
+            logger.error("Failed to connect/auth to DB. Retrying in 3 seconds...")
+            await asyncio.sleep(3)
+
+    # NEW: Ensure the Docker image is built upon startup if not already built
+    await ensure_docker_image()
+    logger.info("Docker image is ensured upon worker startup.")
 
     # Connection established, proceed as before
     # subnet_in_db can now be safely fetched
