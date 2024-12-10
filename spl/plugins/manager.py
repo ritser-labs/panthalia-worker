@@ -220,20 +220,24 @@ async def fetch_and_write_plugin_code(plugin_id, db_adapter, plugin_path):
 def setup_plugin_files(plugin_package_dir):
     """
     Copies necessary plugin resources into the plugin package directory.
+    Paths are now relative to the grandparent directory of the current file.
     """
+    # Get the grandparent directory of the current file
+    grandparent_dir = os.path.dirname(os.path.dirname(__file__))
+
     resources = {
         'adapters': 'adapters',
         'datasets': 'datasets',
         'tokenizer.py': 'tokenizer.py',
         'device.py': 'device.py',
         'common.py': 'common.py',
-        'serialize.py': 'serialize.py',
+        'plugins/serialize.py': 'serialize.py',
         'requirements.txt': 'requirements.txt',
         'plugins/plugin_server.py': 'server.py'
     }
 
     for local, global_target in resources.items():
-        src = os.path.join(os.path.dirname(__file__), local)
+        src = os.path.join(grandparent_dir, local)
         dst = os.path.join(plugin_package_dir, global_target)
         copy_if_missing(src, dst)
 
