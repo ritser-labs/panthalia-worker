@@ -37,7 +37,7 @@ cd ..
 case $SERVICE_TYPE in
     worker)
         # Build the command for the worker service
-        CMD="python -m spl.worker --subnet_id ${SUBNET_ID}--private_keys ${PRIVATE_KEYS} --sot_url ${SOT_URL} --db_url ${DB_URL}"
+        CMD="python -m spl.worker --subnet_id ${SUBNET_ID}--private_keys ${PRIVATE_KEYS} --db_url ${DB_URL}"
 
         # Append --torch_compile if TORCH_COMPILE is set to true
         if [ "$TORCH_COMPILE" = "true" ]; then

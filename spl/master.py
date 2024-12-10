@@ -472,7 +472,6 @@ async def launch_worker(
         command = [
             'python', '-m', 'spl.worker',
             '--subnet_id', str(subnet.id),
-            '--sot_url', sot_url,
             '--db_url', db_url,
             '--private_key', worker_key,
         ]

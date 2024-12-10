@@ -69,7 +69,6 @@ if not any(isinstance(handler, logging.StreamHandler) for handler in logger.hand
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test run script for starting workers and master")
-    parser.add_argument('--sot_url', type=str, required=True, help="Source of Truth URL for streaming gradient updates")
     parser.add_argument('--private_key', type=str, required=True, help="Private key of the deployer's Ethereum account")
     parser.add_argument('--detailed_logs', action='store_true', help="Enable detailed logs for all processes")
     parser.add_argument('--num_master_wallets', type=int, default=70, help="Number of wallets to generate for the master process")
@@ -281,12 +280,6 @@ async def monitor_processes(stdscr, db_adapter, task_counts):
             indicator = '*' if is_selected else ' '
 
             stdscr.addstr(i, split_point, f"{indicator} {name}", color)
-
-        # Fetch and display the latest loss
-        latest_loss = fetch_latest_loss(args.sot_url)
-        loss_display = f"Latest Loss: {latest_loss:.3f}" if latest_loss is not None else "Latest Loss: N/A"
-        loss_y = height - len(task_counts) - 5
-        stdscr.addstr(loss_y, split_point, loss_display, curses.color_pair(4))
 
         # Draw task counts below the latest loss
         task_start = height - 3 - len(task_counts)
