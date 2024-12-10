@@ -1,12 +1,8 @@
-import threading
-import queue
 import itertools
 import logging
 import asyncio
 import heapq
 
-
-# AsyncQueuedLock implementation
 class AsyncQueuedLock:
     def __init__(self):
         self._queue = []
