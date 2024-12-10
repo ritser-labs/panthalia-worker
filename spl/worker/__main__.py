@@ -5,7 +5,7 @@ import logging
 
 from .config import args
 from .db_client import db_adapter
-from .tasks import deposit_stake, handle_task, report_sync_status
+from .tasks import deposit_stake, handle_task
 from .logging_config import logger
 
 async def main():
@@ -13,7 +13,6 @@ async def main():
 
     subnet_in_db = await db_adapter.get_subnet(args.subnet_id)
     logger.info("Starting tensor synchronization...")
-    reported = False
 
     processed_tasks = set()
     last_loop_time = time.time()
@@ -23,10 +22,6 @@ async def main():
         last_loop_time = time.time()
 
         await deposit_stake()
-
-        if not reported:
-            await report_sync_status()
-            reported = True
 
         assigned_tasks = await db_adapter.get_assigned_tasks(subnet_in_db.id)
         for task in assigned_tasks:

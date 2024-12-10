@@ -15,7 +15,7 @@ def create_callback(encoder, pbar):
         pbar.update(monitor.bytes_read - pbar.n)
     return callback
 
-async def upload_tensor(tensor, tensor_name, retries=3, backoff=1):
+async def upload_tensor(tensor, tensor_name, sot_url, retries=3, backoff=1):
     tensor_bytes = BytesIO()
     torch.save(tensor, tensor_bytes)
     tensor_bytes.seek(0)
@@ -38,7 +38,7 @@ async def upload_tensor(tensor, tensor_name, retries=3, backoff=1):
             response = await loop.run_in_executor(
                 None,
                 lambda: requests.post(
-                    f'{args.sot_url}/upload_tensor',
+                    f'{sot_url}/upload_tensor',
                     data=monitor,
                     headers=headers,
                     timeout=300
@@ -47,7 +47,7 @@ async def upload_tensor(tensor, tensor_name, retries=3, backoff=1):
             pbar.close()
 
             if response.status_code == 200:
-                return args.sot_url + response.json().get('tensor_url')
+                return sot_url + response.json().get('tensor_url')
             else:
                 raise RuntimeError(f"Failed to upload tensor: {response.text}")
 

@@ -156,7 +156,7 @@ async def process_tasks():
                 await upload_lock.acquire(priority=time_solver_selected)
                 try:
                     upload_start = time.time()
-                    upload_res = await upload_results(version_number, updates, loss)
+                    upload_res = await upload_results(version_number, updates, loss, sot_url)
                     upload_end = time.time()
                     logger.info(f"{task_id}: Uploaded results in {upload_end - upload_start:.2f} seconds")
                 finally:
@@ -198,20 +198,10 @@ async def submit_solution(task_id, result):
         logger.error(f"Error submitting solution for task {task_id}: {e}")
         raise
 
-async def upload_results(version_number, updates, loss):
-    grads_url = await upload_tensor(updates, 'grads')
+async def upload_results(version_number, updates, loss, sot_url):
+    grads_url = await upload_tensor(updates, 'grads', sot_url)
     return {
         'grads_url': grads_url,
         'loss': loss,
         'version_number': version_number
     }
-
-async def report_sync_status():
-    logger.info(f'Reporting sync status to {args.sot_url}')
-    try:
-        url = f"{args.sot_url}/report_sync"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url) as response:
-                await response.text()
-    except aiohttp.ClientError as e:
-        logger.error(f"Exception while reporting sync status: {e}")
