@@ -169,9 +169,20 @@ class DBAdapterClient:
         return [self._deserialize(Task, task) for task in response.get('assigned_tasks')]
 
     @typechecked
-    async def get_num_orders(self, subnet_id: int, order_type: str) -> Optional[int]:
+    async def get_num_orders(self, subnet_id: int, order_type: str, matched: Optional[bool]) -> Optional[int]:
+        # Convert bool to string to avoid TypeError from yarl
+        params = {
+            'subnet_id': subnet_id,
+            'order_type': order_type
+        }
+        if matched is not None:
+            # Convert the boolean to a string representation ('true'/'false')
+            params['matched'] = str(matched).lower()
+
         response = await self._authenticated_request(
-            'GET', '/get_num_orders', params={'subnet_id': subnet_id, 'order_type': order_type},
+            'GET',
+            '/get_num_orders',
+            params=params,
         )
         return response.get('num_orders')
 

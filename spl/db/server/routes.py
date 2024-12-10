@@ -76,16 +76,29 @@ def convert_to_type(value, expected_type):
 
     if isinstance(expected_type, type) and issubclass(expected_type, Enum):
         return str_to_enum(expected_type, value)
+
     if get_origin(expected_type) is list:
         inner_type = expected_type.__args__[0]
         return [convert_to_type(v, inner_type) for v in value]
+
     if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
+        # Try each type in the union until one succeeds.
         for sub_type in get_args(expected_type):
             try:
                 return convert_to_type(value, sub_type)
             except ValueError:
                 continue
         raise ValueError(f"Cannot convert {value} to any of {get_args(expected_type)}")
+
+    # Explicit boolean handling
+    if expected_type is bool and isinstance(value, str):
+        lower_val = value.lower()
+        if lower_val in ['true', '1']:
+            return True
+        elif lower_val in ['false', '0']:
+            return False
+        else:
+            raise ValueError(f"Cannot convert {value} to bool")
 
     try:
         return expected_type(value)
@@ -187,7 +200,7 @@ app.route('/get_subnet_using_address', methods=['GET'], endpoint='get_subnet_usi
 app.route('/get_subnet', methods=['GET'], endpoint='get_subnet_endpoint')(create_get_route('Subnet', db_adapter_server.get_subnet, ['subnet_id']))
 app.route('/get_task', methods=['GET'], endpoint='get_task_endpoint')(create_get_route('Task', db_adapter_server.get_task, ['task_id']))
 app.route('/get_assigned_tasks', methods=['GET'], endpoint='get_assigned_tasks_endpoint')(create_get_route('Task', db_adapter_server.get_assigned_tasks, ['subnet_id'], auth_method=AuthMethod.USER))
-app.route('/get_num_orders', methods=['GET'], endpoint='get_num_orders_endpoint')(create_get_route('int', db_adapter_server.get_num_orders, ['subnet_id', 'order_type'], auth_method=AuthMethod.USER))
+app.route('/get_num_orders', methods=['GET'], endpoint='get_num_orders_endpoint')(create_get_route('int', db_adapter_server.get_num_orders, ['subnet_id', 'order_type', 'matched'], auth_method=AuthMethod.USER))
 app.route('/get_perm', methods=['GET'], endpoint='get_perm_endpoint')(create_get_route('Permission', db_adapter_server.get_perm, ['address', 'perm']))
 app.route('/get_sot', methods=['GET'], endpoint='get_sot_endpoint')(create_get_route('SOT', db_adapter_server.get_sot, ['id']))
 app.route('/get_sot_by_job_id', methods=['GET'], endpoint='get_sot_by_job_id_endpoint')(create_get_route('SOT', db_adapter_server.get_sot_by_job_id, ['job_id']))

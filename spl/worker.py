@@ -178,13 +178,13 @@ async def deposit_stake():
         logging.debug("Too many tasks being processed. Not depositing any more stakes.")
         return
     
-    num_orders = await db_adapter.get_num_orders(args.subnet_id, OrderType.Ask.name)
+    num_orders = await db_adapter.get_num_orders(args.subnet_id, OrderType.Ask.name, False)
     
     logging.info(f"Current number of stakes: {num_orders}")
     
     for _ in range(args.max_stakes - num_orders):
-        stake_multiplier = (await db_adapter.get_subnet(args.subnet_id)).stake_multiplier
         price = await get_ask_price()
+        #stake_multiplier = (await db_adapter.get_subnet(args.subnet_id)).stake_multiplier
         #await db_adapter.deposit_account(price * stake_multiplier)
         await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, price, None)
 

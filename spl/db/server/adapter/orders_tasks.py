@@ -125,13 +125,29 @@ class DBAdapterOrdersTasksMixin:
             await session.commit()
             return new_order.id
 
-    async def get_num_orders(self, subnet_id: int, order_type: OrderType):
+    async def get_num_orders(self, subnet_id: int, order_type: str, matched: bool | None) -> int:
         async with AsyncSessionLocal() as session:
-            user_id = self.get_user_id()
-            stmt = select(Order).filter_by(subnet_id=subnet_id, user_id=user_id, order_type=order_type)
-            result = await session.execute(stmt)
-            orders = result.scalars().all()
-            return {'num_orders': len(orders)}
+            query = select(func.count()).select_from(Order).where(
+                Order.subnet_id == subnet_id,
+                Order.order_type == order_type
+            )
+
+            # Apply matched filtering if provided
+            if matched is not None:
+                if matched:
+                    # Matched orders are those that have at least one associated task
+                    query = query.where(
+                        or_(Order.bid_task_id.isnot(None), Order.ask_task_id.isnot(None))
+                    )
+                else:
+                    # Unmatched orders have no associated tasks
+                    query = query.where(
+                        Order.bid_task_id.is_(None),
+                        Order.ask_task_id.is_(None)
+                    )
+
+            result = await session.execute(query)
+            return {'num_orders': result.scalar_one()}
 
     async def create_bids_and_tasks(self, job_id: int, num_tasks: int, price: float, params: str, hold_id: int | None):
         async with AsyncSessionLocal() as session:
