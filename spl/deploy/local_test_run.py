@@ -86,6 +86,32 @@ latest_loss_cache = {
 LOSS_REFRESH_INTERVAL = 60
 app = Flask(__name__)
 
+def tail_file(file_path, n=1000):
+    """
+    Efficiently fetch the last n lines from a file without reading the entire file.
+    """
+    lines = []
+    try:
+        with open(file_path, 'rb') as f:
+            f.seek(0, 2)
+            file_size = f.tell()
+            block_size = 1024
+            data = []
+            lines_found = 0
+            while lines_found < n and file_size > 0:
+                read_size = min(block_size, file_size)
+                f.seek(file_size - read_size)
+                block = f.read(read_size)
+                data.insert(0, block)
+                lines_in_block = block.count(b'\n')
+                lines_found += lines_in_block
+                file_size -= read_size
+            all_data = b''.join(data).splitlines()
+            lines = all_data[-n:]
+    except Exception as e:
+        logging.debug(f"Error reading tail of file {file_path}: {e}")
+    return [line.decode('utf-8', errors='replace') for line in lines]
+
 def generate_wallets(num_wallets):
     wallets = []
     for _ in range(num_wallets):
@@ -251,13 +277,14 @@ async def monitor_processes(stdscr, db_adapter, task_counts):
         # Display logs on the left side
         process_name = ordered_process_names[selected_process]
         log_file = os.path.join(LOG_DIR, f"{process_name}.log")
-        log_lines = []
 
+        # Instead of reading the entire file, we only read the last (height-1) lines:
         if os.path.exists(log_file):
-            with open(log_file, 'r') as f:
-                log_lines.extend(f.readlines())
+            log_lines = tail_file(log_file, height - 1)
+        else:
+            log_lines = []
 
-        for i, line in enumerate(log_lines[-(height - 1):]):
+        for i, line in enumerate(log_lines):
             stdscr.addstr(i, 0, line[:split_point - 2])
 
         # Draw the separator line
@@ -265,11 +292,11 @@ async def monitor_processes(stdscr, db_adapter, task_counts):
             stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
 
         for i, name in enumerate(ordered_process_names):
-            # inefficient but works for now
             found_instance = None
             for instance in instances:
                 if instance.name == name:
                     found_instance = instance
+                    break
             if found_instance is None:
                 continue
             instance = found_instance
@@ -281,7 +308,7 @@ async def monitor_processes(stdscr, db_adapter, task_counts):
 
             stdscr.addstr(i, split_point, f"{indicator} {name}", color)
 
-        # Draw task counts below the latest loss
+        # Draw task counts
         task_start = height - 3 - len(task_counts)
         for i, (task_type, (solver_selected, active)) in enumerate(task_counts.items()):
             stdscr.addstr(task_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))

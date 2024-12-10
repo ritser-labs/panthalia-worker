@@ -39,13 +39,11 @@ import traceback
 import socket
 import shlex
 import signal
-from .util import is_port_open
 import paramiko
 import runpod
 import aiofiles
 from .cloud_adapters.runpod import get_pod_ssh_ip_port, reconnect_and_initialize_existing_pod
 
-# Define directories and paths
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
 package_root_dir = os.path.dirname(parent_dir)
@@ -69,14 +67,12 @@ GUESS_DB_PERM_ID = 1
 DOCKER_IMAGE = 'runpod/pytorch:2.1.0-py3.10-cuda11.8.0-devel-ubuntu22.04'
 GPU_TYPE = 'NVIDIA GeForce RTX 4090'
 
-# Read Docker and Anvil setup commands
 with open(os.path.join(script_dir, 'env_setup.sh'), 'r') as f:
     DOCKER_CMD = f.read()
 
 with open(os.path.join(script_dir, 'anvil_setup.sh'), 'r') as f:
     ANVIL_CMD = f.read()
 
-# Configure logging to file and stdout
 os.makedirs(LOG_DIR, exist_ok=True)
 file_handler = logging.FileHandler(LOG_FILE)
 logging.basicConfig(level=logging.DEBUG)
@@ -88,10 +84,33 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 for handler in logger.handlers:
     handler.setFormatter(formatter)
 
+def tail_file(file_path, n=1000):
+    """
+    Efficiently fetch the last n lines from a file without reading the entire file.
+    """
+    lines = []
+    try:
+        with open(file_path, 'rb') as f:
+            f.seek(0, 2)
+            file_size = f.tell()
+            block_size = 1024
+            data = []
+            lines_found = 0
+            while lines_found < n and file_size > 0:
+                read_size = min(block_size, file_size)
+                f.seek(file_size - read_size)
+                block = f.read(read_size)
+                data.insert(0, block)
+                lines_in_block = block.count(b'\n')
+                lines_found += lines_in_block
+                file_size -= read_size
+            all_data = b''.join(data).splitlines()
+            lines = all_data[-n:]
+    except Exception as e:
+        logging.debug(f"Error reading tail of file {file_path}: {e}")
+    return [line.decode('utf-8', errors='replace') for line in lines]
+
 def get_log_file(instance_name):
-    """
-    Helper function to get the log file path based on the instance name.
-    """
     return os.path.join(LOG_DIR, f"{instance_name}.log")
 
 def parse_args():
@@ -119,10 +138,9 @@ latest_loss_cache = {
 sot_url = None
 rpc_url = None
 
-LOSS_REFRESH_INTERVAL = 60  # For example, update every 60 seconds
+LOSS_REFRESH_INTERVAL = 60
 
 def get_public_ip():
-    # Function to retrieve the public IP address of the machine
     try:
         public_ip = requests.get('https://api.ipify.org').text
         return public_ip
@@ -160,7 +178,6 @@ def delete_directory_contents(directory):
             logging.debug(f"Error deleting directory {directory}: {e}")
 
 def terminate_processes(db_adapter, job_id):
-    """Terminate all processes associated with the given job_id via the DB."""
     asyncio.run(async_terminate_processes(db_adapter, job_id))
 
 async def async_terminate_processes(db_adapter, job_id):
@@ -184,17 +201,14 @@ async def async_terminate_processes(db_adapter, job_id):
             logging.error(f"Error terminating process {instance.name}: {e}")
 
 def reset_logs(log_dir):
-    """Delete all log files in the log directory except for the LOG_FILE, which is truncated (reset)."""
     if os.path.exists(log_dir):
         for file_name in os.listdir(log_dir):
             file_path = os.path.join(log_dir, file_name)
             try:
                 if file_path == LOG_FILE:
-                    # Truncate LOG_FILE by opening it in write mode
                     open(file_path, 'w').close()
                     logging.debug(f"Reset log file: {file_path}")
                 else:
-                    # Remove other log files
                     os.remove(file_path)
                     logging.debug(f"Deleted log file: {file_path}")
             except Exception as e:
@@ -206,7 +220,6 @@ def fetch_latest_loss(sot_url):
     global latest_loss_cache
     current_time = time.time()
 
-    # Check if the cache is expired
     if current_time - latest_loss_cache['last_fetched'] > LOSS_REFRESH_INTERVAL:
         try:
             response = requests.get(f"{sot_url}/get_loss", timeout=1)
@@ -240,7 +253,6 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
     selected_process = 0
     last_resize = None
 
-    # Initialize colors
     curses.start_color()
     curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
     curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
@@ -250,7 +262,7 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
     while True:
         try:
             height, width = stdscr.getmaxyx()
-            split_point = width - 50  # Adjusted for right column width
+            split_point = width - 50
 
             instances = await db_adapter.get_all_instances()
             if not instances:
@@ -267,30 +279,31 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
             if selected_process >= len(ordered_process_names):
                 selected_process = max(0, len(ordered_process_names) - 1)
 
-            # Display logs on the left side
+            stdscr.erase()
+
+            # Display logs for selected process
             if ordered_process_names:
                 process_name = ordered_process_names[selected_process]
                 log_file = get_log_file(process_name)
-                log_lines = []
-
                 if os.path.exists(log_file):
-                    with open(log_file, 'r') as f:
-                        log_lines.extend(f.readlines())
+                    log_lines = tail_file(log_file, height - 2)
+                else:
+                    log_lines = []
 
-                for i, line in enumerate(log_lines[-(height - 2):]):
+                for i, line in enumerate(log_lines):
                     try:
                         stdscr.addstr(i, 0, line[:split_point - 2])
                     except curses.error:
-                        pass  # Ignore if the line doesn't fit
+                        pass
 
             # Draw the separator line
             for y in range(height):
                 try:
                     stdscr.addch(y, split_point - 2, curses.ACS_VLINE)
                 except curses.error:
-                    pass  # Ignore if the position is out of bounds
+                    pass
 
-            # Display process list on the right side
+            # Display process list on the right
             for i, name in enumerate(ordered_process_names):
                 is_selected = (i == selected_process)
                 instance = next((inst for inst in instances if inst.name == name), None)
@@ -302,9 +315,8 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
                     try:
                         stdscr.addstr(i, split_point, f"{indicator} {name}", color)
                     except curses.error:
-                        pass  # Ignore if the position is out of bounds
+                        pass
 
-            # Fetch and display the latest loss
             if sot_url:
                 latest_loss = fetch_latest_loss(sot_url)
                 loss_display = f"Latest Loss: {latest_loss:.3f}" if latest_loss is not None else "Latest Loss: N/A"
@@ -312,25 +324,22 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
                 try:
                     stdscr.addstr(loss_y, split_point, loss_display, curses.color_pair(4))
                 except curses.error:
-                    pass  # Ignore if the position is out of bounds
+                    pass
 
-            # Draw task counts below the latest loss
             task_start = height - 3 - len(task_counts)
             for i, (task_type, (solver_selected, active)) in enumerate(task_counts.items()):
                 try:
                     stdscr.addstr(task_start + i, split_point, f"{task_type}: {solver_selected}/{active}", curses.color_pair(3))
                 except curses.error:
-                    pass  # Ignore if the position is out of bounds
+                    pass
 
-            # Footer
             try:
                 stdscr.addstr(height - 1, split_point, "PANTHALIA SIMULATOR V0", curses.color_pair(3))
             except curses.error:
-                pass  # Ignore if the position is out of bounds
+                pass
 
             stdscr.refresh()
 
-            # Handle key presses
             key = stdscr.getch()
             if key == curses.KEY_UP and ordered_process_names:
                 selected_process = (selected_process - 1) % len(ordered_process_names)
@@ -352,19 +361,16 @@ async def monitor_processes(stdscr, db_adapter, job_id, task_counts):
 
     stdscr.keypad(False)
     curses.endwin()
-    os._exit(0)  # Force exit the program
+    os._exit(0)
 
 async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
     contracts = {}
     filters = {}
     tasks = {}
 
-    # Load the contracts and set up filters for events
     for task_type, address in subnet_addresses.items():
         abi = load_abi('SubnetManager')
         contracts[task_type] = web3.eth.contract(address=address, abi=abi)
-
-        # Create filters for task-related events
         filters[task_type] = {
             'TaskRequestSubmitted': await contracts[task_type].events.TaskRequestSubmitted.create_filter(fromBlock='latest'),
             'SolutionSubmitted': await contracts[task_type].events.SolutionSubmitted.create_filter(fromBlock='latest'),
@@ -372,7 +378,6 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
             'TaskResolved': await contracts[task_type].events.TaskResolved.create_filter(fromBlock='latest')
         }
 
-    # Main tracking loop
     while True:
         for task_type, contract_filters in filters.items():
             for event_name, event_filter in contract_filters.items():
@@ -396,21 +401,17 @@ async def track_tasks(web3, subnet_addresses, pool_contract, task_counts):
                 except Exception as e:
                     logging.error(f"Error processing events for {task_type}: {e}")
 
-        # Update the task counts
         for task_type in subnet_addresses.keys():
             active_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['active'])
             solver_selected_tasks = sum(1 for task in tasks.get(task_type, {}).values() if task['solver_selected'] and task['active'])
             task_counts[task_type] = (solver_selected_tasks, active_tasks)
 
-        await asyncio.sleep(0.5)  # Polling interval
+        await asyncio.sleep(0.5)
 
 async def set_interval_mining(web3, interval):
-    """Set the mining interval on the Ethereum node."""
     await web3.provider.make_request('evm_setIntervalMining', [interval])
 
-
 def load_state():
-    """Load the state from the state file."""
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, 'r') as f:
             return json.load(f)
@@ -419,7 +420,6 @@ def load_state():
         return {}
 
 def save_state(state):
-    """Save the state to the state file."""
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=4)
@@ -430,7 +430,6 @@ def check_guessed_ids(guessed_id, actual_id, name):
         exit(1)
 
 async def launch_db_instance(state, db_adapter, is_reconnecting):
-    """Launch the DB instance if not already running."""
     if not is_reconnecting:
         logging.info("Starting DB instance...")
         public_key = Account.from_key(args.private_key).address
@@ -446,21 +445,19 @@ async def launch_db_instance(state, db_adapter, is_reconnecting):
         db_instance, db_helpers = await launch_instance_and_record_logs(
             name="db",
             gpu_type=GPU_TYPE,
-            container_disk_in_gb=20,  # Set disk size appropriately for DB instance
+            container_disk_in_gb=20,
             image=DOCKER_IMAGE,
-            gpu_count=0,  # No GPU required for the DB instance
-            ports=f'{DB_PORT}/tcp',  # Expose the DB port
+            gpu_count=0,
+            ports=f'{DB_PORT}/tcp',
             log_file=get_log_file("db"),
             template_id=BASE_TEMPLATE_ID,
             cmd=DOCKER_CMD,
             env=env
         )
 
-        # Get public IP and port for DB
         db_ip, db_port = await get_public_ip_and_port(db_instance['id'], private_port=int(DB_PORT))
         db_url = f"http://{db_ip}:{db_port}"
 
-        # Save DB info to state
         state['db'] = {
             'private_key': db_helpers['private_key'],
             'address': db_url
@@ -472,12 +469,10 @@ async def launch_db_instance(state, db_adapter, is_reconnecting):
         save_state(state)
         logging.info(f"DB service started on {db_url}")
 
-        # Wait for DB to become healthy
         if not await wait_for_health(db_url):
             logging.error("Error: DB service did not become available within the timeout period.")
             exit(1)
 
-        # Initialize DB schema
         await init_db()
     else:
         logging.info("DB instance already running. Reconnecting...")
@@ -489,51 +484,34 @@ async def launch_db_instance(state, db_adapter, is_reconnecting):
 async def main():
     global sot_url, rpc_url
     task_counts = {}
-
-    # Load or initialize state
     state = load_state()
-
-    # Determine if we are reconnecting based on existing DB info in state
     is_reconnecting = 'db' in state and 'address' in state['db'] and 'private_key' in state['db']
 
-    # Initialize DB adapter
     db_adapter = DBAdapterClient(base_url="", private_key=args.private_key)
-
-    # Launch or reconnect DB instance
     await launch_db_instance(state, db_adapter, is_reconnecting)
 
-    # Update db_adapter with actual DB URL
     db_url = state['db']['address']
     db_adapter.base_url = db_url
     db_adapter.private_key = state['db']['private_key']
 
-    # Reset logs
     reset_logs(LOG_DIR)
 
-    # If not reconnecting, perform initial setup
     if not is_reconnecting:
-        # Remove existing DB file if exists
         if os.path.exists(db_path):
             os.remove(db_path)
 
-        # Remove global plugin directory if exists
-        global_plugin_dir = os.path.join(parent_dir, 'plugins', 'global_plugins')  # Adjust as per your directory structure
+        global_plugin_dir = os.path.join(parent_dir, 'plugins', 'global_plugins')
         if os.path.exists(global_plugin_dir):
             shutil.rmtree(global_plugin_dir, ignore_errors=True)
 
-        # Start Flask server in a separate thread
         app = Flask(__name__)
-
         @app.route('/')
         def index():
             return jsonify({"status": "DB is running"})
-
         flask_thread = threading.Thread(target=lambda: app.run(port=5002))
         flask_thread.start()
 
         logging.info("Starting deployment...")
-
-        # Set environment variables for deployment
         os.environ['SUBNET_ADDRESSES_JSON'] = args.subnet_addresses
         os.environ['PANTHALIA_DEPLOYMENT'] = args.deployment_config
         os.environ['SOT_URL'] = args.sot_url
@@ -541,12 +519,11 @@ async def main():
         logging.info(f'Time in string: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
 
         web3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(rpc_url))
-        if not await wait_for_rpc_available(web3):
+        if not await wait_for_health(rpc_url):
             exit(1)
 
         await set_interval_mining(web3, 1)
 
-        # Run the deployment command
         deploy_command = [
             'forge', 'script', os.path.basename(args.forge_script),
             '--broadcast', '--rpc-url', rpc_url,
@@ -556,7 +533,6 @@ async def main():
 
         logging.info("Deployment completed successfully, loading JSON files...")
 
-        # Load subnet_addresses and deployment_config
         with open(args.subnet_addresses, 'r') as file:
             subnet_addresses = json.load(file)
 
@@ -600,8 +576,6 @@ async def main():
 
         logging.info('Generating wallets')
 
-
-        # Start master process
         logging.info("Starting master process...")
 
         master_env = {
@@ -635,7 +609,6 @@ async def main():
             env=master_env
         )
 
-        # Create instance entry in the DB
         await db_adapter.create_instance(
             name="master",
             service_type=ServiceType.Master.name,
@@ -648,34 +621,26 @@ async def main():
         logging.info(f"Master process started on instance {master_instance['id']}")
 
     else:
-        # If reconnecting, skip launching new instances
-        logging.info("Skipping launching new instances as we are reconnecting to an existing DB.")
-        # Here, you might want to fetch existing instances from the DB and ensure they are running
-        # Depending on your DB and infrastructure setup, additional reconnection logic might be needed
+        logging.info("Reconnecting to existing DB, skipping new instance launches.")
 
-    # Start curses interface in a separate thread
     curses_thread = threading.Thread(
         target=curses.wrapper,
-        args=(monitor_processes, db_adapter, 1, task_counts)  # Assuming job_id is 1
+        args=(monitor_processes, db_adapter, 1, task_counts)
     )
     curses_thread.start()
 
-    # If not reconnecting, proceed with launching services
     if not is_reconnecting:
-        # Run the task tracking in an asyncio loop
         pool_contract = web3.eth.contract(address=pool_address, abi=load_abi('Pool'))
         await track_tasks(web3, subnet_addresses, pool_contract, task_counts)
 
-    # Keep the main thread alive to allow curses and tracking to run
     while True:
         await asyncio.sleep(1)
 
 def signal_handler(signal_received, frame):
     logging.info("SIGINT received, shutting down...")
-    terminate_processes(db_adapter=None, job_id=1)  # Adjust as needed
-    os._exit(0)  # Force exit the program
+    terminate_processes(db_adapter=None, job_id=1)
+    os._exit(0)
 
-# Register the signal handler for SIGINT
 signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ == "__main__":
