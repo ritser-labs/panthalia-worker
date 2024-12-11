@@ -135,12 +135,10 @@ class DBAdapterOrdersTasksMixin:
             # Apply matched filtering if provided
             if matched is not None:
                 if matched:
-                    # Matched orders are those that have at least one associated task
                     query = query.where(
                         or_(Order.bid_task_id.isnot(None), Order.ask_task_id.isnot(None))
                     )
                 else:
-                    # Unmatched orders have no associated tasks
                     query = query.where(
                         Order.bid_task_id.is_(None),
                         Order.ask_task_id.is_(None)
@@ -315,6 +313,15 @@ class DBAdapterOrdersTasksMixin:
             task_status_count = result.scalar_one()
             return task_status_count
 
+    # New placeholder functions as requested
+    async def should_check(self, task: Task):
+        # return True or False instantly. For now, always False
+        return False
+
+    async def check_invalid(self, task: Task):
+        # Long check. For now, always return False
+        return False
+
     async def submit_task_result(self, task_id: int, result: str) -> bool:
         async with AsyncSessionLocal() as session:
             task_stmt = select(Task).where(Task.id == task_id).options(
@@ -328,34 +335,93 @@ class DBAdapterOrdersTasksMixin:
             if not task:
                 raise ValueError("Task not found")
 
-            if task.ask.user_id != self.get_user_id():
-                raise PermissionError("No access to submit result: not the solver")
-
             if not task.ask:
                 raise PermissionError("No access to submit result: no ask order")
+
+            if task.ask.user_id != self.get_user_id():
+                raise PermissionError("No access to submit result: not the solver")
 
             if task.status != TaskStatus.SolverSelected:
                 raise ValueError("Task not in SolverSelected status")
 
-            await self.resolve_task(session, task, result)
+            # Check if we need a verification step
+            should_check = await self.should_check(task)
+            if should_check:
+                # If we should check further, set status to Checking and store the result
+                task.result = result
+                task.status = TaskStatus.Checking
+                task.time_solved = datetime.now(timezone.utc)
+                session.add(task)
+                await session.commit()
+                return True
+            else:
+                # If no further check needed, resolve as correct immediately
+                await self.resolve_task(session, task, result, correct=True)
+                await session.commit()
+                return True
+
+    async def finalize_check(self, task_id: int):
+        # This is called after the long checking process is done
+        async with AsyncSessionLocal() as session:
+            task_stmt = select(Task).where(Task.id == task_id).options(
+                joinedload(Task.job).joinedload(Job.subnet),
+                joinedload(Task.bid).joinedload(Order.hold),
+                joinedload(Task.ask).joinedload(Order.hold)
+            )
+            task_result = await session.execute(task_stmt)
+            task = task_result.scalar_one_or_none()
+
+            if not task:
+                raise ValueError("Task not found")
+
+            if task.status != TaskStatus.Checking:
+                raise ValueError("Task not in Checking status, cannot finalize check")
+
+            invalid = await self.check_invalid(task)
+            if invalid:
+                # resolve incorrect
+                await self.resolve_task(session, task, task.result, correct=False)
+            else:
+                # resolve correct
+                await self.resolve_task(session, task, task.result, correct=True)
             await session.commit()
 
-    async def should_dispute(self, task: Task):
-        return False
+    async def resolve_task(self, session: AsyncSession, task: Task, result: str, correct: bool):
+        if correct:
+            status = TaskStatus.ResolvedCorrect
+        else:
+            status = TaskStatus.ResolvedIncorrect
 
-    async def handle_dispute_scenario(self, session: AsyncSession, task: Task):
+        task.result = result
+        task.status = status
+        task.time_solved = datetime.now(timezone.utc)
+        session.add(task)
+
+        if correct:
+            await self.handle_correct_resolution_scenario(session, task)
+        else:
+            await self.handle_incorrect_resolution_scenario(session, task)
+
+    async def handle_incorrect_resolution_scenario(self, session: AsyncSession, task: Task):
+        # This logic previously existed in handle_dispute_scenario.
+        # "Resolving incorrect" means the solver loses their stake, and the bidder is not penalized.
+        # The original handle_dispute_scenario does exactly that, so we reuse it here.
+
         ask_order = task.ask
         if not ask_order or not ask_order.hold:
-            raise ValueError("No ask order or hold for dispute scenario")
+            raise ValueError("No ask order or hold for incorrect scenario")
 
+        # Charge solver hold fully
         await self.charge_hold_fully(session, ask_order.hold, add_leftover_to_account=False)
 
         stake_amount = task.job.subnet.stake_multiplier * ask_order.price
         if stake_amount > ask_order.hold.used_amount:
             raise ValueError("data inconsistency in stake vs hold used")
 
+        # Solver loses their stake: that stake is taken by the platform as revenue
         await self.add_platform_revenue(session, stake_amount, PlatformRevenueTxnType.Add)
 
+        # If there's leftover in the solver hold after taking stake, return it to solver
         leftover = ask_order.hold.total_amount - stake_amount
         if leftover > 0:
             stmt = select(Account).where(Account.id == ask_order.hold.account_id)
@@ -364,6 +430,7 @@ class DBAdapterOrdersTasksMixin:
             if solver_account:
                 await self.add_credits_transaction(session, solver_account, leftover, CreditTxnType.Add)
 
+        # Bidder does not get penalized, so free bidder hold and return their entire amount
         bid_order = task.bid
         if bid_order and bid_order.hold:
             await self.free_funds_from_hold(session, bid_order.hold, bid_order.price, bid_order)
@@ -391,6 +458,7 @@ class DBAdapterOrdersTasksMixin:
         if not ask_order.hold.charged:
             await self.charge_hold_fully(session, ask_order.hold)
 
+        # Return solver stake to solver
         await self.free_funds_from_hold(session, ask_order.hold, stake_amount, ask_order)
 
         solver_user_id = ask_order.user_id
@@ -405,22 +473,6 @@ class DBAdapterOrdersTasksMixin:
 
         await self.add_earnings_transaction(session, solver_account, solver_earnings, EarningsTxnType.Add)
         await self.add_platform_revenue(session, platform_fee, PlatformRevenueTxnType.Add)
-
-    async def resolve_task(self, session: AsyncSession, task: Task, result: str):
-        should_dispute = await self.should_dispute(task)
-        if should_dispute:
-            status = TaskStatus.ResolvedIncorrect
-        else:
-            status = TaskStatus.ResolvedCorrect
-        task.result = result
-        task.status = status
-        task.time_solved = datetime.now(timezone.utc)
-        session.add(task)
-
-        if should_dispute:
-            await self.handle_dispute_scenario(session, task)
-        else:
-            await self.handle_correct_resolution_scenario(session, task)
 
     async def get_last_task_with_status(self, job_id: int, statuses: list[TaskStatus]):
         async with AsyncSessionLocal() as session:

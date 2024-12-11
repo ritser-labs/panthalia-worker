@@ -12,6 +12,7 @@ needs env variables:
 - `PANTHALIA_AUTH0_CLIENT_ID`
 - `PANTHALIA_AUTH0_AUDIENCE`
 
+run tests with `pytest spl/tests`
 
 https://arxiv.org/abs/2403.07816
 https://arxiv.org/abs/2312.07987

@@ -156,7 +156,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             params="{}"
         )
 
-        # Buyer also uses a CC hold (not credits) for their bid
+        # Buyer also uses a CC hold for their bid
         async with AsyncSessionLocal() as session:
             buyer_account = await server.get_or_create_account("testuser", session=session)
             buyer_cc_hold = Hold(
@@ -191,7 +191,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             hold_id=solver_hold.id
         )
 
-        # Submit correct result as solveruser
+        # By default, should_check returns False, so this resolves correct immediately
         await solver_server.submit_task_result(task_id, result={"output": "success"})
 
         async with AsyncSessionLocal() as session:
@@ -203,13 +203,14 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
 
             # Buyer used a CC hold, so their credits remain unchanged
             assert buyer_account.credits_balance == 500.0
-            # Solver got earnings after platform fee deduction
+            # Solver got earnings after platform fee deduction (100 price - 10 fee = 90)
             assert solver_account.earnings_balance == 90.0
-            # The solver hold was charged fully, leftover added to solver's credits
+            # Solver stake returned (1.5 * 100 = 150)
             assert solver_account.credits_balance == 150.0
 
 @pytest.mark.asyncio
 async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
+    # Now we simulate an incorrect resolution scenario using should_check() and check_invalid().
     async with original_app.test_request_context('/'):
         server = db_adapter_server_fixture
 
@@ -281,34 +282,40 @@ async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
             hold_id=solver_hold.id
         )
 
-        # Force a dispute scenario
-        # Just override the method on server for testing:
-        original_should_dispute = server.should_dispute
-        async def mock_should_dispute(task):
+        async def mock_should_check(task):
             return True
-        server.should_dispute = mock_should_dispute
 
+        async def mock_check_invalid(task):
+            return True
+
+        server.should_check = mock_should_check
+        server.check_invalid = mock_check_invalid
+
+        # Submit result that will fail after checking
         await server.submit_task_result(task_id, result={"output": "fail"})
+        task = await server.get_task(task_id)
+        assert task.status == TaskStatus.Checking
 
-        # Restore original method
-        server.should_dispute = original_should_dispute
+        # Now finalize check
+        await server.finalize_check(task_id)
+        task = await server.get_task(task_id)
+        assert task.status == TaskStatus.ResolvedIncorrect
 
         async with AsyncSessionLocal() as session:
-            task = await server.get_task(task_id)
-            assert task.status == TaskStatus.ResolvedIncorrect
-
-            # Check platform revenue got the stake (80.0 = 2.0 * 40.0)
+            # Check platform revenue got the stake (stake_multiplier=2.0, price=40.0 => 80.0)
             platform_revenues = (await session.execute(select(PlatformRevenue))).scalars().all()
             assert any(r.amount == 80.0 and r.txn_type == PlatformRevenueTxnType.Add for r in platform_revenues)
 
             solver_account = await server.get_or_create_account("testuser", session=session)
-            bidder_account = await server.get_or_create_account("testuser", session=session)
-
-            # Credits calculation: solver_account gets leftover after stake removal
+            # Solver had a total hold of 300.0, 80.0 taken as stake to platform
+            # Leftover 220.0 returned to solver
+            # Initially solver had 500.0 credits, after leftover return = 720.0
             assert solver_account.credits_balance == 720.0
 
 @pytest.mark.asyncio
 async def test_dispute_can_only_happen_while_result_uploaded(db_adapter_server_fixture):
+    # This test ensures that once a task is resolved, you cannot submit a new result.
+    # The logic remains the same: once resolved correct, no further submissions are allowed.
     async with original_app.test_request_context('/'):
         server = db_adapter_server_fixture
 
@@ -371,7 +378,10 @@ async def test_dispute_can_only_happen_while_result_uploaded(db_adapter_server_f
             hold_id=bid_hold.id
         )
 
+        # By default, should_check returns False, so direct resolution correct
         await server.submit_task_result(task_id, result={"output": "success"})
+        task = await server.get_task(task_id)
+        assert task.status == TaskStatus.ResolvedCorrect
 
         # Trying another result after it was already resolved should fail
         with pytest.raises(ValueError) as excinfo:

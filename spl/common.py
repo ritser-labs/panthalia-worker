@@ -59,14 +59,11 @@ async def wait_for_health(url, timeout=1200):  # Increased timeout to 20 minutes
     return False
 # Define Enums
 class TaskStatus(Enum):
-    SelectingSolver = 0
-    SolverSelected = 1
-    SolutionSubmitted = 2
-    Disputed = 3
-    VerifiersSelected = 4
-    Verified = 5
-    ResolvedCorrect = 6
-    ResolvedIncorrect = 7
+    SelectingSolver = "SelectingSolver"
+    SolverSelected = "SolverSelected"
+    Checking = "Checking"  # Newly added status
+    ResolvedCorrect = "ResolvedCorrect"
+    ResolvedIncorrect = "ResolvedIncorrect"
 
 class Vote(Enum):
     NoVote = 0
