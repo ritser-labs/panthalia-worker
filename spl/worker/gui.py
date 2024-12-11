@@ -4,14 +4,13 @@ import asyncio
 import threading
 import logging
 from PyQt5 import QtWidgets, QtCore
-from .gui_config import get_api_key, set_api_key, get_config, update_config
+from .gui_config import get_private_key, set_private_key, get_config, update_config
 from .logging_config import logger, set_gui_handler
 from .main_logic import main
 from .config import args
 from logging import Handler, LogRecord
 import os
 
-# Import these for checking connection state and verifying after save
 from .db_client import have_connected_once, verify_db_connection_and_auth
 
 class LogSignal(QtCore.QObject):
@@ -29,9 +28,9 @@ class GuiLogHandler(Handler):
 class LoginDialog(QtWidgets.QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Set API Key")
+        self.setWindowTitle("Set Private Key")
         layout = QtWidgets.QVBoxLayout()
-        self.label = QtWidgets.QLabel("Enter API Key:")
+        self.label = QtWidgets.QLabel("Enter Private Key:")
         self.edit = QtWidgets.QLineEdit()
         self.edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.button = QtWidgets.QPushButton("Save")
@@ -42,9 +41,9 @@ class LoginDialog(QtWidgets.QDialog):
         self.setLayout(layout)
 
     def save_key(self):
-        api_key = self.edit.text().strip()
-        if api_key:
-            set_api_key(api_key)
+        private_key = self.edit.text().strip()
+        if private_key:
+            set_private_key(private_key)
             self.accept()
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -57,14 +56,15 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.db_url_edit = QtWidgets.QLineEdit(self.config.get("db_url", ""))
         self.docker_url_edit = QtWidgets.QLineEdit(self.config.get("docker_engine_url", ""))
-        self.api_key_edit = QtWidgets.QLineEdit(self.config.get("api_key", ""))
-        self.api_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        # CHANGED: rename from api_key to private_key
+        self.private_key_edit = QtWidgets.QLineEdit(self.config.get("private_key", "")) 
+        self.private_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.subnet_id_edit = QtWidgets.QLineEdit(str(self.config.get("subnet_id", "")))
 
         layout.addRow("DB URL:", self.db_url_edit)
         layout.addRow("Docker Engine URL:", self.docker_url_edit)
-        layout.addRow("API Key:", self.api_key_edit)
-        layout.addRow("Subnet ID:", self.subnet_id_edit)  # new line
+        layout.addRow("Private Key:", self.private_key_edit)  # CHANGED: was API Key
+        layout.addRow("Subnet ID:", self.subnet_id_edit)
 
         self.save_btn = QtWidgets.QPushButton("Save")
         self.save_btn.clicked.connect(self.save_settings)
@@ -75,7 +75,7 @@ class SettingsDialog(QtWidgets.QDialog):
     def save_settings(self):
         new_db_url = self.db_url_edit.text().strip()
         new_docker_url = self.docker_url_edit.text().strip()
-        new_api_key = self.api_key_edit.text().strip()
+        new_private_key = self.private_key_edit.text().strip()
         new_subnet_id = self.subnet_id_edit.text().strip()
 
         try:
@@ -87,19 +87,20 @@ class SettingsDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Invalid Subnet ID", "Subnet ID must be an integer.")
             return
 
-        update_config({
+        update_data = {
             "db_url": new_db_url,
             "docker_engine_url": new_docker_url,
-            "api_key": new_api_key,
+            "private_key": new_private_key,
             "subnet_id": new_subnet_id
-        })
+        }
+
+        update_config({k:v for k,v in update_data.items() if v is not None and v != ""})
 
         self.accept()
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_signal):
         super().__init__()
-        # Changed from "Worker Application" to "Panthalia Worker"
         self.setWindowTitle("Panthalia Worker")
         self.text_edit = QtWidgets.QTextEdit()
         self.text_edit.setReadOnly(True)
@@ -127,14 +128,14 @@ def run_worker_loop(loop):
 
 def run_gui(args):
     os.environ["DOCKER_ENGINE_URL"] = args.docker_engine_url
-    api_key = get_api_key()
+    private_key = get_private_key()
     app = QtWidgets.QApplication(sys.argv)
 
-    if not api_key:
+    if not private_key:
         dlg = LoginDialog()
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             sys.exit(0)
-        api_key = get_api_key()
+        private_key = get_private_key()
 
     loop = asyncio.new_event_loop()
     worker_thread = threading.Thread(target=run_worker_loop, args=(loop,), daemon=True)

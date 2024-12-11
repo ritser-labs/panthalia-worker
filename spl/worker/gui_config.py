@@ -9,12 +9,13 @@ def update_config(new_data):
     current.update(new_data)
     save_config(current)
 
-def get_api_key():
+# CHANGED: Replace api_key references with private_key
+def get_private_key():
     config = get_config()
-    return config.get("api_key")
+    return config.get("private_key")
 
-def set_api_key(api_key):
-    update_config({"api_key": api_key})
+def set_private_key(private_key):
+    update_config({"private_key": private_key})
 
 def get_db_url():
     return get_config().get("db_url")
