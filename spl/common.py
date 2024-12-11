@@ -1,6 +1,5 @@
 import torch
 import os
-import json
 import logging
 import time
 from io import BytesIO
@@ -8,13 +7,9 @@ import requests
 from enum import Enum
 from collections import namedtuple
 from web3.datastructures import AttributeDict
-from web3.exceptions import ContractLogicError
 from .device import device
-import math
 import asyncio
 from hexbytes import HexBytes
-from eth_abi import decode
-import threading
 import aiohttp
 from eth_account import Account
 
@@ -108,60 +103,6 @@ def load_layer_state_dict(filename):
         print(f"File {filename} does not exist")
         return None
 
-def extract_error_selectors(abi, web3, error_selectors):
-    for item in abi:
-        if item.get('type') == 'error':
-            name = item['name']
-            inputs = item['inputs']
-            selector = web3.keccak(text=f"{name}({','.join([input['type'] for input in inputs])})")[:4].hex()
-            selector = selector.lower()
-            error_selectors[selector] = item
-            logging.debug(f"Extracted error selector {selector} for {name}")
-
-def load_error_selectors(web3):
-    error_selectors = {}
-    for root, dirs, files in os.walk(abi_dir):
-        for file in files:
-            if file.endswith('.json'):
-                contract_path = os.path.join(root, file)
-                with open(contract_path, 'r') as abi_file:
-                    abi = json.load(abi_file).get('abi', [])
-                    extract_error_selectors(abi, web3, error_selectors)
-    return error_selectors
-
-def load_contracts(web3, subnet_addresses):
-    abis = load_all_abis(abi_dir)
-    contracts = {}
-
-    for task, address in subnet_addresses.items():
-        contract_name = 'SubnetManager'
-        if contract_name in abis:
-            abi = abis[contract_name]
-            contracts[task] = web3.eth.contract(address=address, abi=abi)
-            logging.info(f"Loaded contract for {task} with address {address}")
-        else:
-            logging.error(f"Contract ABI not found for {contract_name}")
-
-    error_selectors = load_error_selectors(web3)
-
-    return abis, contracts, error_selectors
-
-def load_all_abis(abi_dir):
-    abis = {}
-    for root, dirs, files in os.walk(abi_dir):
-        for file in files:
-            if file.endswith('.json'):
-                contract_name = file.split('.')[0]
-                with open(os.path.join(root, file), 'r') as abi_file:
-                    abi = json.load(abi_file).get('abi', [])
-                    abis[contract_name] = abi
-    return abis
-
-def load_abi(name):
-    contract_path = os.path.join(abi_dir, f'{name}.sol', f'{name}.json')
-    with open(contract_path, 'r') as abi_file:
-        return json.load(abi_file).get('abi', [])
-
 def upload_tensor(tensor, local_storage_dir):
     local_file_path = os.path.join(local_storage_dir, f'{int(time.time())}.pt')
     torch.save(tensor, local_file_path)
@@ -188,107 +129,6 @@ def process_trace(trace):
         return trace.hex()
     else:
         return trace
-
-async def get_debug_trace(web3, tx_hash):
-    try:
-        # Ensure tx_hash is in string format
-        if isinstance(tx_hash, HexBytes):
-            tx_hash = tx_hash.hex()
-        elif isinstance(tx_hash, bytes):
-            tx_hash = tx_hash.hex()
-        
-        trace = await web3.manager.request_blocking('debug_traceTransaction', [tx_hash])
-        processed_trace = process_trace(trace)
-        for key, value in processed_trace.items():
-            logging.info(f"{key}: {value}")
-        return processed_trace
-    except Exception as e:
-        logging.error(f"ERROR IN GET_DEBUG_TRACE: {e}")
-        return {}
-
-async def async_transact_with_contract_function(web3, contract, function_name, private_key, *args, value=0, attempts=5):
-    global pending_transactions
-
-    # Initialize the transaction state for the given private key if not already done
-    if private_key not in pending_transactions:
-        pending_transactions[private_key] = False
-
-
-    # Use the condition to wait for the transaction to complete
-    while pending_transactions[private_key]:
-        await asyncio.sleep(SLEEP_TIME)
-    # Set the transaction as pending for this private key
-    pending_transactions[private_key] = True
-
-    try:
-        account = web3.eth.account.from_key(private_key)
-        gas_price = await web3.eth.gas_price
-
-        function = getattr(contract.functions, function_name)(*args)
-
-        for attempt in range(attempts):  # Retry up to 5 times
-            tx_hash = None
-            try:
-                nonce = await web3.eth.get_transaction_count(account.address)
-                # Dynamically estimate gas
-                estimated_gas = await function.estimate_gas({
-                    'from': account.address,
-                    'value': value
-                })
-
-                tx_params = {
-                    'chainId': await web3.eth.chain_id,
-                    'gas': estimated_gas,
-                    'gasPrice': gas_price,
-                    'nonce': nonce,
-                    'value': value
-                }
-
-                tx = await function.build_transaction(tx_params)
-                signed_tx = account.sign_transaction(tx)
-                tx_hash = await web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-                receipt = await web3.eth.wait_for_transaction_receipt(tx_hash)
-
-                if receipt['status'] == 0:
-                    error_message = await decode_revert_reason(web3, await web3.eth.call({
-                        'to': tx['to'],
-                        'data': tx.get('input', b'')
-                    }, receipt.blockNumber))
-                    logging.error(f"Transaction failed: {error_message}")
-                    raise ContractLogicError(f"Transaction failed: {error_message}")
-                else:
-                    return receipt
-            except ContractLogicError as cle:
-                # Extract revert reason from ContractLogicError
-                try:
-                    error_data = cle.args[0]  # Directly use the first argument
-                    if isinstance(error_data, dict) and 'data' in error_data:
-                        error_data = error_data['data']
-                    decoded_error = await decode_revert_reason(web3, error_data)
-                    logging.error(f"Contract logic error on attempt {attempt + 1} - {function_name}: {decoded_error}")
-                except Exception as e:
-                    logging.error(f"Failed to decode contract logic error - {function_name}: {cle}, original error: {e}")
-                if attempt == attempts - 1:
-                    raise
-            except Exception as e:
-                logging.error(f"Error on attempt {attempt + 1} - {function_name}: {e}")
-                if attempt == attempts - 1:
-                    raise
-
-            # Wait for the next block before retrying
-            await wait_for_block(web3)
-
-    finally:
-        pending_transactions[private_key] = False
-
-
-async def wait_for_block(web3):
-    block_filter = await web3.eth.filter('latest')
-    while True:
-        new_entries = await block_filter.get_new_entries()
-        if new_entries:
-            return new_entries[0]
-        await asyncio.sleep(SLEEP_TIME)
 
 # Global state tracking variable
 current_global_state = None
