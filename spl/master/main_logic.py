@@ -46,36 +46,6 @@ class Master:
         data_dir = os.path.join(script_dir, "..", "data", "state")
         data_dir = os.path.abspath(data_dir)  # ensure abs path
         os.makedirs(data_dir, exist_ok=True)
-        self.plot_file = os.path.join(data_dir, "plot.json")
-
-        if os.path.exists(self.plot_file):
-            try:
-                with open(self.plot_file, "r") as f:
-                    self.losses = json.load(f)
-                logging.info(
-                    f"Loaded {len(self.losses)} existing loss values from {self.plot_file}"
-                )
-            except Exception as e:
-                logging.error(
-                    f"Failed to load existing loss values from {self.plot_file}: {e}"
-                )
-                self.losses = []
-        else:
-            self.losses = []
-            logging.info("No existing plot.json found. Starting fresh.")
-
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        self.fig, self.ax = plt.subplots()
-        (self.line,) = self.ax.plot(
-            range(len(self.losses)), self.losses, label="Loss"
-        )
-        self.ax.set_xlabel("Iteration")
-        self.ax.set_ylabel("Loss")
-        self.ax.set_title("Loss over Iterations")
-        self.ax.legend()
-        self.ax.grid(True)
 
         self.tasks = []
 
@@ -86,28 +56,6 @@ class Master:
         )
         self.max_concurrent_iterations = await self.plugin.get("max_concurrent_iterations")
         logging.info('Initialized plugin')
-
-    def update_plot(self):
-        while not self.loss_queue.empty():
-            loss = self.loss_queue.get_nowait()
-            self.losses.append(loss)
-        self.line.set_xdata(range(len(self.losses)))
-        self.line.set_ydata(self.losses)
-        self.ax.relim()
-        self.ax.autoscale_view()
-
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        data_dir = os.path.join(script_dir, "..", "data", "state")
-        file_path = os.path.join(data_dir, "loss_plot.png")
-        self.fig.savefig(file_path)
-        logging.info(f"Saved updated plot to {file_path}")
-
-        try:
-            with open(self.plot_file, "w") as f:
-                json.dump(self.losses, f)
-            logging.debug(f"Saved {len(self.losses)} loss values to {self.plot_file}")
-        except Exception as e:
-            logging.error(f"Failed to save loss values to {self.plot_file}: {e}")
 
     async def get_bid_price(self):
         return 1
@@ -194,8 +142,6 @@ class Master:
             self.main_iteration(self.iteration)
         )
         self.tasks.append(task)
-
-        self.update_plot()
 
     async def run_main(self):
         logging.info("Starting main process")
