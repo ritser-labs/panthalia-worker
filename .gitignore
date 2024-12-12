@@ -4,15 +4,13 @@ __pycache__/
 *$py.class
 
 pipeline/storage
-spl/data/*.pt
-spl/data/state
-spl/data/state/*
-spl/data/gradients/*
+spl/sot/data/*.pt
+spl/sot/data/state
+spl/sot/data/state/*
+spl/sot/data/gradients/*
 spl/out.txt
 spl/sot.log
 spl/loss_plot.png
-spl/data/master_wallets.json
-spl/data/master_public_keys.json
 
 spl/venv/*
 

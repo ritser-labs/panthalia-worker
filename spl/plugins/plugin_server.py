@@ -9,12 +9,10 @@ from quart import Quart, jsonify, request
 from functools import partial
 from .serialize import serialize_data, deserialize_data
 
-# Adjust the plugin directory as needed
 PLUGIN_DIR = os.environ.get('DOCKER_PLUGIN_DIR', '/app/plugin_code')
 if PLUGIN_DIR not in sys.path:
     sys.path.append(PLUGIN_DIR)
 
-# Set the current package for the plugin_code package context
 current_package = __package__
 exported_plugin = None
 
@@ -22,13 +20,12 @@ logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 app = Quart(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 * 1024  # 100 GB limit
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 * 1024
 
 @app.route('/execute', methods=['POST'])
 async def handle():
     try:
         payload = await request.get_json()
-        # logger.debug(f"Received payload: {payload}")
         action = payload.get('action')
 
         if not exported_plugin and action != 'health_check':
@@ -51,24 +48,22 @@ async def handle():
 
             try:
                 if asyncio.iscoroutinefunction(func):
-                    result = await func(*args, **kwargs)  # Await coroutine functions
+                    result = await func(*args, **kwargs)
                 else:
-                    # Offload blocking functions to a thread pool
                     loop = asyncio.get_event_loop()
                     result = await loop.run_in_executor(None, partial(func, *args, **kwargs))
             except StopAsyncIteration:
-                return jsonify({'result': serialize_data({'error': 'StopAsyncIteration'})}), 500
+                # CHANGED: Return 404 instead of 500 on StopAsyncIteration
+                return jsonify({'result': serialize_data({'error': 'StopAsyncIteration'})}), 404
             except Exception as e:
                 error_trace = traceback.format_exc()
                 logger.error(f"Exception during function '{func_name}': {error_trace}")
                 return jsonify({'result': serialize_data({'error': str(e), 'traceback': error_trace})}), 500
 
-            # Serialize and return the result
             serialized_result = serialize_data(result)
             return jsonify({'result': serialized_result})
 
         elif action == 'health_check':
-            # Simple health check action
             return jsonify({'result': serialize_data({'status': 'ok'})})
 
         else:
@@ -80,15 +75,12 @@ async def handle():
         serialized_error = serialize_data({'error': str(e), 'traceback': error_trace})
         return jsonify({'result': serialized_error}), 500
 
-
 @app.route('/health', methods=['GET'])
 async def health_check():
     return jsonify({'result': serialize_data({'status': 'ok'})})
 
-
 async def init_plugin():
     global exported_plugin
-    # Import the plugin as a module within the plugin_code package
     try:
         plugin_id = os.environ.get('PLUGIN_ID')
         if not plugin_id:
@@ -103,7 +95,6 @@ async def init_plugin():
             logger.error(f"'exported_plugin' not found in module '{plugin_module_name}'.")
             return
 
-        # Initialize the plugin environment if required
         if hasattr(exported_plugin, 'model_adapter'):
             exported_plugin.model_adapter.initialize_environment()
         logger.info("Plugin loaded successfully.")
@@ -111,11 +102,9 @@ async def init_plugin():
         logger.error(f"Failed to load plugin: {e}")
         logger.debug(traceback.format_exc())
 
-
 @app.before_serving
 async def startup():
     await init_plugin()
-
 
 if __name__ == '__main__':
     from uvicorn import Config, Server

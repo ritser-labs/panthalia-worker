@@ -68,18 +68,21 @@ class PluginProxy:
         try:
             headers = {'Content-Type': 'application/json'}
             async with self.session.post(self.base_url, json=payload, headers=headers) as response:
+                text = await response.text()
                 if response.status != 200:
-                    text = await response.text()
+                    # If we got a 404 and it contains "StopAsyncIteration", raise StopAsyncIteration
+                    if response.status == 404 and '"StopAsyncIteration"' in text:
+                        raise StopAsyncIteration
                     logger.error(f"HTTP error {response.status}: {text}")
                     raise Exception(f"HTTP error {response.status}: {text}")
 
-                response_obj = await response.json()
+                response_obj = json.loads(text)
                 result_serialized = response_obj.get('result')
                 if result_serialized is None:
                     raise Exception("No 'result' in response.")
 
                 result = deserialize_data(result_serialized)
-                
+
                 if isinstance(result, dict) and 'error' in result:
                     error_msg = result['error']
                     logger.error(f"Error during function '{function}': {error_msg}")
@@ -113,6 +116,7 @@ class PluginProxy:
         Close the aiohttp session when done.
         """
         await self.session.close()
+
 
 async def get_plugin(plugin_id, db_adapter):
     """
@@ -251,7 +255,6 @@ async def ensure_docker_image():
         logger.info(f"Docker image '{DOCKER_IMAGE}' already exists.")
     except docker.errors.ImageNotFound:
         logger.info(f"Docker image '{DOCKER_IMAGE}' not found. Building the image.")
-        # Build the image
         await build_image()
 
 async def build_image():
@@ -259,8 +262,9 @@ async def build_image():
     Build the custom Docker image using the Dockerfile.
     """
     logger.info(f"Building Docker image '{DOCKER_IMAGE}'. This may take a while...")
+    # The DOCKERFILE_PATH must be set or inferred. Assuming it's in the current directory:
+    DOCKERFILE_PATH = 'Dockerfile'
     try:
-        # Use the Docker SDK to build the image
         image, logs = docker_client.images.build(
             path=".",  # Context is current directory
             dockerfile=DOCKERFILE_PATH,
@@ -295,14 +299,13 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
     except docker.errors.NotFound:
         logger.info(f"Creating and starting container {container_name}")
         try:
-            # Mount the plugin directory
             container = docker_client.containers.run(
                 DOCKER_IMAGE,
                 name=container_name,
                 detach=True,
                 security_opt=security_options,
                 ports={
-                    f'{host_port}/tcp': host_port  # Map container's 8000 to host_port
+                    f'{host_port}/tcp': host_port
                 },
                 mem_limit=mem_limit,
                 pids_limit=pids_limit,
@@ -322,7 +325,6 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
                 device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])],
                 extra_hosts={"host.docker.internal": "host-gateway"}
             )
-
             logger.info(f"Container {container_name} started with ID: {container.id}")
         except docker.errors.DockerException as e:
             logger.error(f"Failed to start Docker container: {e}")
@@ -343,10 +345,8 @@ def get_port(plugin_id):
     Generate a unique port number for the given plugin_id.
     """
     try:
-        # Attempt to convert plugin_id to int
         return HOST_PORT_BASE + int(plugin_id)
     except ValueError:
-        # If plugin_id is not an int, generate a hash-based port
         hash_object = hashlib.sha256(str(plugin_id).encode())
         hash_int = int(hash_object.hexdigest(), 16)
         return HOST_PORT_BASE + (hash_int % 1000)  # Ports 8000-8999
@@ -358,7 +358,6 @@ async def wait_for_server(url, timeout=30):
     async with aiohttp.ClientSession() as session:
         while time.time() - start_time < timeout:
             try:
-                # Create the payload with a health_check action
                 payload = {
                     'action': 'health_check'
                 }
@@ -366,7 +365,6 @@ async def wait_for_server(url, timeout=30):
 
                 async with session.post(url, json=payload, headers=headers) as response:
                     logger.debug(f"Server raw response: {await response.text()}")
-
                     if response.status == 200:
                         response_obj = await response.json()
                         result_serialized = response_obj.get('result')
