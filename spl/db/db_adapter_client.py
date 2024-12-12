@@ -437,13 +437,14 @@ class DBAdapterClient:
         return response.get('total_state_updates')
 
     @typechecked
-    async def create_state_update(self, job_id: int, data: str) -> Optional[int]:
+    async def create_state_update(self, job_id: int, data: Dict[str, Any]) -> Optional[int]:
         payload = {
             'job_id': job_id,
-            'data': data
+            'data': data  # Pass the dictionary directly
         }
         response = await self._authenticated_request('POST', '/create_state_update', data=payload)
         return self._extract_id(response, 'state_update_id')
+
 
     async def _fetch_entity(self, endpoint: str, model_cls: Type[T], data: Optional[dict] = None, params: Optional[dict] = None) -> Optional[T]:
         response = await self._authenticated_request('GET', endpoint, data=data, params=params)

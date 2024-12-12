@@ -166,7 +166,6 @@ async def update_block_timestamps(tensor_name, block_timestamps, num_updates, it
                     'num_updates': saved_num_updates,
                     'iteration_number': saved_iteration_number,
                 }
-                state_update_data = str(state_update_data)
                 await db_adapter.create_state_update(job_id, state_update_data)
         return old_block_timestamp
 
