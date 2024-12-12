@@ -21,6 +21,8 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         tracemalloc.start()
 
     app = Quart(__name__)
+    app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 1024  # 1 TB
+    # END FIX
 
     script_dir = os.path.dirname(__file__)
     data_dir = os.path.join(script_dir, 'data')
