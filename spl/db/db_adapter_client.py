@@ -281,7 +281,10 @@ class DBAdapterClient:
     @typechecked
     async def create_account_key(self) -> Optional[int]:
         response = await self._authenticated_request('POST', '/create_account_key')
-        return response if isinstance(response, int) else None
+        if isinstance(response, dict) and 'account_key_id' in response and isinstance(response['account_key_id'], int):
+            return response['account_key_id']
+        return None
+
 
     @typechecked
     async def admin_create_account_key(self, user_id: str) -> Optional[Dict[str, Any]]:
@@ -356,7 +359,8 @@ class DBAdapterClient:
             'last_nonce': last_nonce
         }
         response = await self._authenticated_request('POST', '/set_last_nonce', data=data)
-        return 'success' in response
+        # If 'perm' is returned, consider it successful.
+        return isinstance(response, dict) and 'perm' in response
 
     @typechecked
     async def get_sot(self, sot_id: int) -> Optional[Sot]:
