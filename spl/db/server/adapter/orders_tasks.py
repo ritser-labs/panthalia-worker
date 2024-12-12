@@ -408,8 +408,10 @@ class DBAdapterOrdersTasksMixin:
         # The original handle_dispute_scenario does exactly that, so we reuse it here.
 
         ask_order = task.ask
-        if not ask_order or not ask_order.hold:
-            raise ValueError("No ask order or hold for incorrect scenario")
+        if not ask_order:
+            raise ValueError("No ask order for incorrect scenario")
+        if not ask_order.hold:
+            raise ValueError("No hold for ask order in incorrect scenario")
 
         # Charge solver hold fully
         await self.charge_hold_fully(session, ask_order.hold, add_leftover_to_account=False)
