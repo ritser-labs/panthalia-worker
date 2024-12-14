@@ -6,7 +6,7 @@ from quart_cors import cors
 from .adapter import db_adapter_server
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
