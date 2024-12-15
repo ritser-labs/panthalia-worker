@@ -109,14 +109,15 @@ class Master:
         logging.info(
             f"Learning parameters for iteration {iteration_number}: {learning_params}"
         )
-        batch_url, targets_url = await self.get_batch_and_targets_url()
 
         logging.info(f"Iteration {iteration_number}: Starting training task")
+        input_url = await self.get_input_url()  # We'll create a similar function or rename get_batch_and_targets_url to get_input_url
+
         task_params = json.dumps({
-            "batch_url": batch_url,
-            "targets_url": targets_url,
+            "input_url": input_url,
             **learning_params,
         })
+
         task_id = (await self.submit_task(
             task_params, iteration_number
         ))[0]['task_id']
@@ -236,7 +237,18 @@ class Master:
                         f"Updated latest loss value to {loss_value}"
                     )
 
-    async def get_batch_and_targets_url(self):
+    async def get_input_url(self):
+        """
+        Retrieve a single input_url from the SOT (Source of Truth) service.
+        This replaces the old logic of retrieving batch_url and targets_url separately.
+
+        The SOT /get_batch endpoint is expected to return a JSON of the form:
+        {
+            "input_url": "/data/state/temp/input_XXXX.pt"
+        }
+
+        We prepend self.sot_url to form a full URL for the input file.
+        """
         url = os.path.join(self.sot_url, "get_batch")
 
         retry_delay = 1
@@ -244,22 +256,23 @@ class Master:
         retries = 0
         while retries < max_retries:
             try:
-                logging.info(f"Retrieving batch and targets URL from {url}")
+                logging.info(f"Retrieving input_url from {url}")
                 message = json.dumps(
                     self.generate_message("get_batch"), sort_keys=True
                 )
                 signature = self.sign_message(message)
                 headers = {"Authorization": f"{message}:{signature}"}
+
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        url, headers=headers
-                    ) as response:
+                    async with session.post(url, headers=headers) as response:
                         if response.status == 200:
                             response_json = await response.json()
-                            return (
-                                self.sot_url + response_json["batch_url"],
-                                self.sot_url + response_json["targets_url"],
-                            )
+                            if "input_url" in response_json:
+                                input_url = self.sot_url + response_json["input_url"]
+                                logging.info(f"Retrieved input_url: {input_url}")
+                                return input_url
+                            else:
+                                logging.error("Response JSON does not contain 'input_url'.")
                         else:
                             logging.error(
                                 f"Request failed with status code {response.status}"
@@ -273,5 +286,5 @@ class Master:
             await asyncio.sleep(retry_delay)
 
         raise Exception(
-            f"Failed to retrieve batch and targets URL after {max_retries} attempts."
+            f"Failed to retrieve input_url after {max_retries} attempts."
         )
