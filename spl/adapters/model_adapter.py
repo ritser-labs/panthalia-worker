@@ -137,6 +137,7 @@ class StandardModelAdapter(ModelAdapter):
 
             optimizer.zero_grad()
             loss = self.forward_and_loss(model, batch_inputs, batch_targets)
+            logging.debug(f"Step {i + 1}/{steps}: Loss: {loss.item():.4f}")
             loss_value = loss.item()
             if first_loss is None:
                 first_loss = loss_value
