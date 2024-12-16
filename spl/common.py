@@ -6,10 +6,8 @@ from io import BytesIO
 import requests
 from enum import Enum
 from collections import namedtuple
-from web3.datastructures import AttributeDict
 from .device import device
 import asyncio
-from hexbytes import HexBytes
 import aiohttp
 from eth_account import Account
 
@@ -117,18 +115,6 @@ def get_future_version_number(tensor_version_interval):
 
 def get_current_version_number(tensor_version_interval):
     return (int(time.time()) // tensor_version_interval) * tensor_version_interval
-
-def process_trace(trace):
-    if isinstance(trace, AttributeDict):
-        return {k: process_trace(v) for k, v in trace.items()}
-    elif isinstance(trace, dict):
-        return {k: process_trace(v) for k, v in trace.items()}
-    elif isinstance(trace, list):
-        return [process_trace(i) for i in trace]
-    elif isinstance(trace, HexBytes):
-        return trace.hex()
-    else:
-        return trace
 
 # Global state tracking variable
 current_global_state = None

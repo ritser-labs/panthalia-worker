@@ -20,6 +20,7 @@ pytest
 pytest-asyncio
 PyQt5
 docker
+eth-account
 
 aiosqlite
 sqlalchemy
