@@ -18,7 +18,7 @@ class ModelAdapter(ABC):
 
     @abstractmethod
     async def execute_task(
-        self, TENSOR_NAME, sot_url, tensor_version_interval, expected_worker_time,
+        self, TENSOR_NAME, sot_url,
         task_params, predownloaded_data
     ):
         pass
@@ -85,8 +85,6 @@ class StandardModelAdapter(ModelAdapter):
         self,
         TENSOR_NAME,
         sot_url,
-        tensor_version_interval,
-        expected_worker_time,
         task_params,
         combined_tensor
     ):
@@ -107,6 +105,8 @@ class StandardModelAdapter(ModelAdapter):
         min_lr = task_params['min_lr']
         T_0 = task_params['T_0']
         weight_decay = task_params['weight_decay']
+        tensor_version_interval = task_params['tensor_version_interval']
+        expected_worker_time = task_params['expected_worker_time']
 
         # Split the combined tensor into batch and targets
         half = combined_tensor.size(0) // 2

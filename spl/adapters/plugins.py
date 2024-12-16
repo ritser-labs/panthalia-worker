@@ -48,6 +48,8 @@ class StandardPlugin:
             'min_lr': self.inner_min_lr,
             'T_0': self.inner_T_0,
             'weight_decay': self.inner_weight_decay,
+            'tensor_version_interval': self.tensor_version_interval,
+            'expected_worker_time': self.expected_worker_time,
         }
     
     def get_sot_learning_hyperparameters(self, current_iteration):

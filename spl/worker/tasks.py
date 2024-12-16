@@ -121,8 +121,6 @@ async def process_tasks():
                         'model_adapter', 'execute_task',
                         TENSOR_NAME,
                         sot_url,
-                        await plugin.get('tensor_version_interval'),
-                        await plugin.get('expected_worker_time'),
                         task_params,
                         predownloaded_data
                     )
