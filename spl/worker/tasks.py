@@ -113,12 +113,12 @@ async def process_tasks():
 
                 # First, predownload data required by the adapter
                 predownloaded_data = await download_file(task_params['input_url'])
-                # Acquire processing lock and run train_task
+                # Acquire processing lock and run execute_task
                 await task_processing_lock.acquire(priority=time_solver_selected)
                 try:
                     plugin = await get_plugin(next_task['plugin_id'], db_adapter)
                     result = await plugin.call_submodule(
-                        'model_adapter', 'train_task',
+                        'model_adapter', 'execute_task',
                         TENSOR_NAME,
                         sot_url,
                         await plugin.get('tensor_version_interval'),

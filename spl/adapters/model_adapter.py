@@ -17,7 +17,7 @@ class ModelAdapter(ABC):
         self.model_config = model_config
 
     @abstractmethod
-    async def train_task(
+    async def execute_task(
         self, TENSOR_NAME, sot_url, tensor_version_interval, expected_worker_time,
         task_params, predownloaded_data
     ):
@@ -81,7 +81,7 @@ class StandardModelAdapter(ModelAdapter):
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss
 
-    async def train_task(
+    async def execute_task(
         self,
         TENSOR_NAME,
         sot_url,
@@ -96,7 +96,7 @@ class StandardModelAdapter(ModelAdapter):
         The first half of combined_tensor is the batch, and the second half is the targets.
         """
 
-        logging.info("Starting train_task with a pre-downloaded combined input tensor")
+        logging.info("Starting execute_task with a pre-downloaded combined input tensor")
 
         # this is so janky bruh
         sot_url = sot_url.replace('localhost', 'host.docker.internal')

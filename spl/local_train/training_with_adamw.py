@@ -45,7 +45,7 @@ def train_model(model, train_loader, model_adapter, epochs):
             inputs = torch.tensor(inputs).unsqueeze(0).to(device)
             targets = torch.tensor(targets).unsqueeze(0).to(device)
 
-            updates, loss = model_adapter.train_task(model, inputs, targets, ACCUMULATION_STEPS)
+            updates, loss = model_adapter.execute_task(model, inputs, targets, ACCUMULATION_STEPS)
             
 
             
