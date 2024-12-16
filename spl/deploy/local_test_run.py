@@ -11,7 +11,6 @@ from ..common import wait_for_health, DB_PORT
 from ..db.db_adapter_client import DBAdapterClient
 from ..models import init_db, db_path, PermType, ServiceType
 from ..plugins.manager import get_plugin, global_plugin_dir
-from web3 import AsyncWeb3, Web3
 from eth_account import Account
 import glob
 import shutil
@@ -343,10 +342,6 @@ async def monitor_processes(stdscr, db_adapter, task_counts):
     curses.endwin()
     os._exit(0)  # Force exit the program
 
-
-async def set_interval_mining(web3, interval):
-    """Set the mining interval on the Ethereum node."""
-    await web3.provider.make_request('evm_setIntervalMining', [interval])
 
 def run_monitor_processes(stdscr, db_adapter, task_counts):
     asyncio.run(monitor_processes(stdscr, db_adapter, task_counts))

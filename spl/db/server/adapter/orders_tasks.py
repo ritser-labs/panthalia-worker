@@ -353,12 +353,12 @@ class DBAdapterOrdersTasksMixin:
                 task.time_solved = datetime.now(timezone.utc)
                 session.add(task)
                 await session.commit()
-                return True
+                return {'success': True}
             else:
                 # If no further check needed, resolve as correct immediately
                 await self.resolve_task(session, task, result, correct=True)
                 await session.commit()
-                return True
+                return {'success': True}
 
     async def finalize_check(self, task_id: int):
         # This is called after the long checking process is done

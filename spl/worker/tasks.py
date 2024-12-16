@@ -3,8 +3,6 @@ import time
 import json
 import logging
 import asyncio
-import aiohttp
-import torch
 from dataclasses import dataclass
 from collections import defaultdict
 from datetime import timezone
@@ -20,10 +18,8 @@ from ..plugins.manager import get_plugin
 
 logger = logging.getLogger(__name__)
 
-# Constants
 MAX_WORKER_TASK_RETRIES = 3
 
-# Global variables
 concurrent_tasks_counter = 0
 concurrent_tasks_counter_lock = asyncio.Lock()
 task_start_times = {}
@@ -67,7 +63,7 @@ async def handle_task(task, time_invoked):
     logger.debug(f"Task params: {task.params}")
     task_params = json.loads(task.params)
 
-    logger.debug(f"Adding task to queue with ID: {task.id} and params: {task_params}")
+    logger.debug(f"Adding task to queue with ID: {task.id}")
     job_db = await db_adapter.get_job(task.job_id)
 
     task_queue_obj = {
@@ -87,11 +83,6 @@ async def handle_task(task, time_invoked):
     async with task_start_times_lock:
         task_start_times[task.id] = time.time()
     await process_tasks()
-
-def tensor_memory_size(tensor):
-    size_in_bytes = tensor.element_size() * tensor.numel()
-    size_in_mb = size_in_bytes / (1024 * 1024)
-    return size_in_mb
 
 async def process_tasks():
     global task_queue, concurrent_tasks_counter
@@ -121,34 +112,22 @@ async def process_tasks():
 
                 logger.debug(f"{task_id}: Processing task with params: {task_params}")
 
-                start_time = time.time()
-                # Download input data
-                logger.debug(f"{task_id}: Downloading batch from {task_params['batch_url']}")
-                batch = await download_file(task_params['batch_url'], download_type='batch_targets')
-
-                logger.debug(f"{task_id}: Downloading targets from {task_params['targets_url']}")
-                targets = await download_file(task_params['targets_url'], download_type='batch_targets')
-
-                # Acquire processing lock
+                # First, predownload data required by the adapter
+                predownloaded_data = await download_file(task_params['input_url'])
+                # Acquire processing lock and run train_task
                 await task_processing_lock.acquire(priority=time_solver_selected)
                 try:
-                    steps = task_params['steps']
-                    max_lr = task_params['max_lr']
-                    min_lr = task_params['min_lr']
-                    T_0 = task_params['T_0']
-                    weight_decay = task_params['weight_decay']
-
-                    logger.debug(f"{task_id}: Executing training task")
-                    time_synced = time.time()
                     result = await plugin.call_submodule(
                         'model_adapter', 'train_task',
-                        TENSOR_NAME, sot_url,
+                        TENSOR_NAME,
+                        sot_url,
                         await plugin.get('tensor_version_interval'),
                         await plugin.get('expected_worker_time'),
-                        batch, targets, steps, max_lr, min_lr, T_0, weight_decay
+                        task_params,
+                        predownloaded_data
                     )
                     version_number, updates, loss = result
-                    logger.info(f"{task_id}: Updates tensor size: {tensor_memory_size(updates):.2f} MB")
+                    logger.info(f"{task_id}: Updates tensor size: {updates.element_size() * updates.numel() / (1024*1024):.2f} MB")
                 finally:
                     await task_processing_lock.release()
 
@@ -170,10 +149,9 @@ async def process_tasks():
                 if task_start_time:
                     total_time = time.time() - task_start_time
                     logger.info(f"{task_id}: Total time to process: {total_time:.2f}s")
-                    logger.info(f'{task_id}: Time since sync: {time.time() - time_synced:.2f}s')
 
                 end_time = time.time()
-                logger.info(f"{task_id}: process_tasks() completed in {end_time - start_time:.2f}s. Concurrent tasks: {concurrent_tasks_counter}")
+                logger.info(f"{task_id}: process_tasks() completed in {end_time - (task_start_time if task_start_time else end_time):.2f}s. Concurrent tasks: {concurrent_tasks_counter}")
                 task_success = True
 
             except Exception as e:

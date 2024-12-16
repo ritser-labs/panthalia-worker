@@ -241,7 +241,7 @@ class DBAdapterClient:
             'result': result
         }
         response = await self._authenticated_request('POST', '/submit_task_result', data=data)
-        return response
+        return response['success']
 
     @typechecked
     async def create_order(self, task_id: int | None, subnet_id: int, order_type: str, price: float, hold_id: Optional[int]) -> Optional[int]:

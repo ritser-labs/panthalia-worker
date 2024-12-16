@@ -76,9 +76,13 @@ def register_routes(app):
 
         logging.info(f"Sending batch: {batch_filename}, targets: {targets_filename}")
 
+        # Load both batch and targets tensors and combine them into a single tensor.
+        combined_filename = f'input_{timestamp}_{random_suffix}.pt'
+        combined_tensor = torch.cat([batch_tensor, targets_tensor], dim=0)
+        await asyncio.to_thread(torch.save, combined_tensor, os.path.join(temp_dir, combined_filename))
+
         return jsonify({
-            'batch_url': f'/data/state/temp/{batch_filename}',
-            'targets_url': f'/data/state/temp/{targets_filename}'
+            'input_url': f'/data/state/temp/{combined_filename}'
         })
 
     @app.route('/update_state', methods=['POST'])
