@@ -3,12 +3,9 @@ fairscale
 tiktoken
 fair
 blobfile
-eth-abi
-web3>=6.0.0,<7.0.0
 datasets
 psutil
 paramiko
-runpod
 quart
 requests-toolbelt
 Hypercorn
