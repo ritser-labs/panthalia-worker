@@ -7,7 +7,7 @@ DOCKERFILE_PATH="Dockerfile"
 docker rmi -f $IMAGE_NAME 2>/dev/null
 
 echo "Building Docker image: $IMAGE_NAME"
-docker build -t $IMAGE_NAME -f $DOCKERFILE_PATH .
+docker build -t $IMAGE_NAME -f $DOCKERFILE_PATH . --progress=plain
 if [[ $? -ne 0 ]]; then
     echo "Failed to build Docker image."
     exit 1
