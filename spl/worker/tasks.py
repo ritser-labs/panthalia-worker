@@ -106,7 +106,6 @@ async def process_tasks():
 
                 task_id = next_task['task_id']
                 task_params = next_task['task_params']
-                plugin = await get_plugin(next_task['plugin_id'], db_adapter)
                 sot_url = next_task['sot_url']
                 time_solver_selected = next_task['time_solver_selected']
 
@@ -117,6 +116,7 @@ async def process_tasks():
                 # Acquire processing lock and run train_task
                 await task_processing_lock.acquire(priority=time_solver_selected)
                 try:
+                    plugin = await get_plugin(next_task['plugin_id'], db_adapter)
                     result = await plugin.call_submodule(
                         'model_adapter', 'train_task',
                         TENSOR_NAME,
