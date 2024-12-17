@@ -155,6 +155,26 @@ class StandardModelAdapter(ModelAdapter):
 
         logging.info(f"Model task completed. Loss: {first_loss:.4f}. Total time: {time.time() - start_time:.2f} s")
         return version_number, updates, first_loss
+    
+    def run_sanity_check(self, task_result: dict) -> bool:
+        """
+        Run sanity checks on the given task result.
+
+        Args:
+            task_result (dict): The result dictionary from the solver.
+
+        Returns:
+            bool: True if the sanity check passes, False otherwise.
+        """
+        # Example sanity check:
+        if not isinstance(task_result, dict):
+            return False
+        if 'loss' not in task_result:
+            return False
+        if not isinstance(task_result['loss'], (int, float)):
+            return False
+        # Additional checks can be added here
+        return True
 
 
     async def initialize_tensor(

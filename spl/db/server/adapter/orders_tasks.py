@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy import select, update, desc, func, or_
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
+import json
 
 from ....models import (
     AsyncSessionLocal, Job, Task, TaskStatus, Subnet,
@@ -336,29 +337,26 @@ class DBAdapterOrdersTasksMixin:
                 raise ValueError("Task not found")
 
             if not task.ask:
-                raise PermissionError("No access to submit result: no ask order")
+                raise PermissionError("No solver assignment")
 
             if task.ask.user_id != self.get_user_id():
-                raise PermissionError("No access to submit result: not the solver")
+                raise PermissionError("Not the solver")
 
             if task.status != TaskStatus.SolverSelected:
                 raise ValueError("Task not in SolverSelected status")
 
-            # Check if we need a verification step
-            should_check = await self.should_check(task)
-            if should_check:
-                # If we should check further, set status to Checking and store the result
-                task.result = result
-                task.status = TaskStatus.Checking
-                task.time_solved = datetime.now(timezone.utc)
-                session.add(task)
-                await session.commit()
-                return {'success': True}
-            else:
-                # If no further check needed, resolve as correct immediately
-                await self.resolve_task(session, task, result, correct=True)
-                await session.commit()
-                return {'success': True}
+            try:
+                result_data = json.loads(result)
+            except json.JSONDecodeError:
+                result_data = None
+
+            task.result = result_data
+            task.status = TaskStatus.SanityCheckPending
+            task.time_solved = datetime.now(timezone.utc)
+            session.add(task)
+            await session.commit()
+            return {'success': True}
+
 
     async def finalize_check(self, task_id: int):
         # This is called after the long checking process is done
@@ -520,4 +518,21 @@ class DBAdapterOrdersTasksMixin:
                             order.hold.total_amount = 0.0
 
                         await session.delete(order)
+            await session.commit()
+
+    async def finalize_sanity_check(self, task_id: int, is_valid: bool):
+        async with AsyncSessionLocal() as session:
+            task_stmt = select(Task).where(Task.id == task_id)
+            task_result = await session.execute(task_stmt)
+            task = task_result.scalar_one_or_none()
+
+            if not task:
+                raise ValueError("Task not found for sanity check finalization")
+
+            if task.status != TaskStatus.SanityCheckPending:
+                raise ValueError("Task is not in SanityCheckPending status")
+
+            task.status = TaskStatus.ResolvedCorrect if is_valid else TaskStatus.ResolvedIncorrect
+            task.time_solved = datetime.now(timezone.utc)
+            session.add(task)
             await session.commit()

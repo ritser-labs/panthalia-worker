@@ -372,3 +372,6 @@ app.route('/update_instance', methods=['POST'], endpoint='update_instance_endpoi
 app.route('/update_sot', methods=['POST'], endpoint='update_sot_endpoint')(
     create_post_route_return_id(db_adapter_server.update_sot, ['sot_id', 'url'], 'success')
 )
+app.route('/finalize_sanity_check', methods=['POST'], endpoint='finalize_sanity_check_endpoint')(
+    create_post_route(db_adapter_server.finalize_sanity_check, ['task_id', 'is_valid'], 'success')
+)

@@ -131,8 +131,7 @@ class Master:
             learning_params,
             TENSOR_NAME,
             result,
-            batch_url,
-            targets_url,
+            input_url
         )
 
         await self.db_adapter.update_job_iteration(self.job_id, self.iteration)
@@ -180,24 +179,46 @@ class Master:
             "timestamp": timestamp,
         }
         return message
-
+    
     async def wait_for_result(self, task_id):
+        logging.info(f"Waiting for result of task {task_id}")
         while True:
             task = await self.db_adapter.get_task(task_id)
-            if task.status == TaskStatus.ResolvedCorrect.name:
-                result = json.loads(task.result)
-                return result
+            if task.status == TaskStatus.SanityCheckPending.name:
+                # Task awaits sanity check
+                if task.result is not None:
+                    is_valid = await self.plugin.call_submodule(
+                        "model_adapter", "run_sanity_check", task.result
+                    )
+                    await self.finalize_sanity_check(task_id, is_valid)
+                    # After finalizing sanity check, it will become ResolvedCorrect or ResolvedIncorrect
+                    # Continue loop to wait for final status
+                    continue
+            if task.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
+                # Final status reached
+                return task.result
             await asyncio.sleep(0.5)
 
+    async def finalize_sanity_check(self, task_id: int, is_valid: bool):
+        url = f"{self.db_adapter.base_url}/finalize_sanity_check"
+        payload = {"task_id": task_id, "is_valid": is_valid}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status != 200:
+                    logging.error("Failed to finalize sanity check")
+                else:
+                    logging.info(f"Finalized sanity check for task {task_id} with is_valid={is_valid}")
+
+
     async def update_sot(
-        self, learning_params, tensor_name, result, batch_url, targets_url
+        self, learning_params, tensor_name, result, input_url
     ):
         params = {
             "result_url": result["grads_url"],
             "tensor_name": tensor_name,
             "version_number": result["version_number"],
-            "batch_url": batch_url,
-            "targets_url": targets_url,
+            "input_url": input_url,
             **learning_params,
         }
 

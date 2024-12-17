@@ -54,9 +54,10 @@ async def wait_for_health(url, timeout=1200):  # Increased timeout to 20 minutes
 class TaskStatus(Enum):
     SelectingSolver = "SelectingSolver"
     SolverSelected = "SolverSelected"
-    Checking = "Checking"  # Newly added status
+    Checking = "Checking"
     ResolvedCorrect = "ResolvedCorrect"
     ResolvedIncorrect = "ResolvedIncorrect"
+    SanityCheckPending = "SanityCheckPending"
 
 class Vote(Enum):
     NoVote = 0
