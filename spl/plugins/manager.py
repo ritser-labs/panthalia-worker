@@ -11,6 +11,7 @@ import hashlib
 import tempfile
 import aiohttp
 import inspect
+import subprocess
 
 from .serialize import serialize_data, deserialize_data
 
@@ -219,11 +220,30 @@ async def build_image():
         logger.error(f"Docker API error during image build: {e}")
         raise
 
+def is_gpu_available():
+    """Check if an NVIDIA GPU is available on the host system."""
+    try:
+        # Try running nvidia-smi
+        subprocess.run(["nvidia-smi"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # nvidia-smi not found or returns an error, assume no GPU
+        return False
+
 async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
     container_name = CONTAINER_NAME_TEMPLATE.format(plugin_id=plugin_id)
 
     server_url = f"http://localhost:{host_port}/execute"
     tmp_dir = "/tmp"
+
+    # Check for GPU availability
+    gpu_available = is_gpu_available()
+    device_requests = None
+    if gpu_available:
+        device_requests = [docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])]
+        logger.info("GPU detected. Requesting GPU device in container.")
+    else:
+        logger.info("No GPU detected. Running container with CPU only.")
 
     try:
         container = docker_client.containers.get(container_name)
@@ -254,7 +274,7 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
                 "DOCKER_PLUGIN_DIR": docker_plugin_dir
             },
             user="nobody",
-            device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])],
+            device_requests=device_requests,
             extra_hosts={"host.docker.internal": "host-gateway"}
         )
         logger.info(f"Container {container_name} started with ID: {container.id}")
