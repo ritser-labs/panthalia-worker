@@ -2,6 +2,7 @@ from .adapters.dataloader import ShakespeareDataLoader
 from .adapters.model_config import NanoGPTConfig
 from .adapters.models.nanogpt import GPT, GPTConfig
 from .adapters.model_adapter import NanoGPTModelAdapter
+from .adapters.default_sot_adapter import DefaultSOTAdapter
 from .adapters.plugins import StandardPlugin
 from .tokenizer import CharacterLevelTokenizer
 import math
@@ -35,9 +36,16 @@ dataset = ShakespeareDataLoader(
     batch_size=NUM_STEPS * EXAMPLES_PER_STEP
 )
 
+sot_adapter = DefaultSOTAdapter(
+    model_adapter,
+    dataset,
+    state_dir='/app/data/state',
+)
+
 exported_plugin = StandardPlugin(
     model_adapter,
     model_config,
+    sot_adapter,
     dataset,
     tokenizer,
     num_steps=NUM_STEPS,

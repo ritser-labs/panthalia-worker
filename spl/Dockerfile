@@ -15,6 +15,9 @@ ENV PYTHONUNBUFFERED=1 \
 # Create and set the working directory
 WORKDIR /app
 
+# Ensure the data directory exists and is writable
+RUN mkdir -p /app/data && chmod 777 /app/data
+
 # Copy and install requirements using Python 3.11
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --no-cache-dir --ignore-installed pyyaml \

@@ -1,4 +1,3 @@
-# spl/sot/utils_nag.py
 import torch
 
 def nag_update(params, grads, m, lr=0.002, weight_decay=0.2, beta1=0.9, eps=1e-6, step=1):

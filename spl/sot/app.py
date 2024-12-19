@@ -8,7 +8,7 @@ from ..db.db_adapter_client import DBAdapterClient
 from ..common import SOT_PRIVATE_PORT
 from ..plugins.manager import get_plugin
 from .utils import (
-    log_memory_usage, initialize_all_tensors
+    log_memory_usage
 )
 
 MEMORY_LOGGING_ENABLED = False
@@ -21,23 +21,17 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         tracemalloc.start()
 
     app = Quart(__name__)
-    app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 1024  # 1 TB
-    # END FIX
+    app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 1024
 
+    # We no longer set STATE_DIR here. We wait until we load the plugin.
     script_dir = os.path.dirname(__file__)
     data_dir = os.path.join(script_dir, 'data')
-    state_dir = os.path.join(data_dir, 'state')
-    temp_dir = os.path.join(state_dir, 'temp')
-    os.makedirs(temp_dir, exist_ok=True)
-
     app.config['SOT_ID'] = sot_id
     app.config['DB_URL'] = db_url
     app.config['PRIVATE_KEY'] = private_key
     app.config['DATA_DIR'] = data_dir
-    app.config['STATE_DIR'] = state_dir
-    app.config['TEMP_DIR'] = temp_dir
-    app.config['MEMORY_LOGGING_ENABLED'] = enable_memory_logging
 
+    app.config['MEMORY_LOGGING_ENABLED'] = enable_memory_logging
     app.config['db_adapter'] = None
     app.config['plugin'] = None
     app.config['perm_db'] = None
@@ -45,7 +39,6 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
     app.config['synced_workers'] = 0
     app.config['latest_loss'] = None
 
-    # Initialize locks for all JSON files or resources accessed concurrently
     app.config['file_locks'] = {
         'block_timestamps': asyncio.Lock(),
         'num_updates': asyncio.Lock(),
@@ -54,7 +47,6 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         'latest_loss': asyncio.Lock()
     }
 
-    # Lock used during timestamp updates
     app.config['update_timestamp_lock'] = asyncio.Lock()
 
     log_memory_usage('Before initializing or loading initial state', enabled=enable_memory_logging)
@@ -70,8 +62,7 @@ def create_app(sot_id, db_url, private_key, enable_memory_logging=False):
         )
         app.config['db_adapter'] = db_adapter
 
-        # Initialize service (async)
-        await initialize_service(app)
+        await initialize_service(app) # We call it here.
 
     @app.after_serving
     async def after_serving():
@@ -93,16 +84,20 @@ async def initialize_service(app):
     plugin = await get_plugin(plugin_id, db_adapter)
     app.config['plugin'] = plugin
 
+    # Retrieve state directory
+    state_dir = await plugin.call_submodule('sot_adapter', 'get_state_dir')
+    app.config['STATE_DIR'] = state_dir
+    temp_dir = os.path.join(state_dir, 'temp')
+    app.config['TEMP_DIR'] = temp_dir
+
+    # Previously we did os.makedirs and initialization here - remove that.
+
     logging.info(
-        f"Initializing service for SOT {sot_id}, job {job_id}, plugin {plugin_id}, perm {perm_db}"
+        f"Initializing service for SOT {app.config['SOT_ID']}, job {job_id}, plugin {plugin_id}, perm {perm_db}"
     )
 
-    # Pass file_locks explicitly to initialize_all_tensors
-    await initialize_all_tensors(
-        app.config['STATE_DIR'],
-        plugin,
-        memory_logging=app.config['MEMORY_LOGGING_ENABLED'],
-        file_locks=app.config['file_locks']
-    )
+    # Instead of calling initialize_all_tensors here, delegate to sot_adapter
+    await plugin.call_submodule('sot_adapter', 'initialize_directories')
+    await plugin.call_submodule('sot_adapter', 'initialize_all_tensors')
     await plugin.call_submodule('dataset', 'initialize_dataset')
     logging.info("Service initialized")

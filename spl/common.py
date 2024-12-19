@@ -10,6 +10,7 @@ from .device import device
 import asyncio
 import aiohttp
 from eth_account import Account
+import io
 
 SOT_PRIVATE_PORT = 5001
 
@@ -209,46 +210,55 @@ async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=
     logging.info(f"Download completed successfully in {end_time - start_time:.2f} seconds. Total size: {downloaded_size} bytes")
     return content
 
-async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_type='batch_targets', tensor_name=None):
+async def download_file(
+    url,
+    retries=3,
+    backoff=1,
+    chunk_timeout=5,
+    download_type='batch_targets',
+    tensor_name=None
+):
     """
     Downloads a file with retry logic and prioritizes tensor downloads over batch/targets downloads.
-    
+
     Args:
         url (str): The URL to download the file from.
         retries (int): Number of retry attempts.
         backoff (int): Backoff factor for retries.
         chunk_timeout (int): Timeout for each chunk in seconds.
         download_type (str): Type of download ('tensor' or 'batch_targets').
-    
+        tensor_name (str): Optional tensor name parameter.
+
     Returns:
         torch.Tensor: The downloaded tensor.
     """
     params = {'tensor_name': tensor_name} if tensor_name else None
+
     for attempt in range(1, retries + 1):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params) as response:
                     response.raise_for_status()
 
+                    # Depending on download_type, handle locks
                     if download_type == 'tensor':
                         # Acquire tensor_download_lock to prioritize tensor downloads
                         async with tensor_download_lock:
-                            # Signal that a tensor download is in progress
                             tensor_download_event.clear()
                             try:
-                                content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout, download_type=download_type)
+                                content = await read_streamed_content(response, chunk_timeout)
                             finally:
-                                # Clear the event after tensor download is complete
                                 tensor_download_event.set()
                     elif download_type == 'batch_targets':
                         # Wait for any ongoing tensor download to finish
+                        # Just acquiring and releasing lock ensures no tensor is currently downloading
                         async with tensor_download_lock:
-                            pass  # Simply wait until tensor_download_lock is free
-                        content = await download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=chunk_timeout, download_type=download_type)
+                            pass
+                        content = await read_streamed_content(response, chunk_timeout)
                     else:
                         raise ValueError("Invalid download_type specified.")
 
-                    return torch.load(content)
+                    return torch.load(io.BytesIO(content))
 
         except asyncio.TimeoutError:
             logging.error(f"Attempt {attempt}: Chunk download timed out.")
@@ -261,3 +271,30 @@ async def download_file(url, retries=3, backoff=1, chunk_timeout=5, download_typ
             await asyncio.sleep(backoff * attempt)
 
     raise Exception(f"Failed to download file after {retries} attempts")
+
+async def read_streamed_content(response, chunk_timeout):
+    """
+    Reads streamed content from the response until EOF.
+    Uses chunk_timeout to time out individual chunks if needed.
+
+    Args:
+        response: aiohttp response object.
+        chunk_timeout (int): Timeout for each chunk in seconds.
+
+    Returns:
+        bytes: The full content.
+    """
+    data = bytearray()
+    while True:
+        try:
+            # Use asyncio.wait_for to enforce chunk_timeout per chunk
+            chunk = await asyncio.wait_for(response.content.readany(), timeout=chunk_timeout)
+        except asyncio.TimeoutError:
+            raise asyncio.TimeoutError("Chunk download timed out.")
+
+        if not chunk:
+            # EOF reached
+            break
+        data.extend(chunk)
+
+    return bytes(data)
