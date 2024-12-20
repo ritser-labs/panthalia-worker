@@ -89,6 +89,9 @@ class StandardModelAdapter(ModelAdapter):
         combined_tensor
     ):
         logging.info("Starting execute_task with a pre-downloaded combined input tensor")
+        
+        # this is so janky bruh
+        sot_url = sot_url.replace('localhost', 'host.docker.internal')
 
         # Check combined_tensor validity:
         if combined_tensor is None or not isinstance(combined_tensor, torch.Tensor) or combined_tensor.numel() == 0:

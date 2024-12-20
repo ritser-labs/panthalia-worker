@@ -35,22 +35,6 @@ docker_client = docker.DockerClient(base_url=DOCKER_ENGINE_URL)
 last_plugin_id = None
 last_plugin_proxy = None
 
-async def byte_stream_gen(response):
-    """
-    Asynchronously yield chunks from the response content.
-    """
-    try:
-        async for chunk in response.content.iter_chunked(65536):
-            logging.debug(f"manager: received {len(chunk)} bytes from plugin")
-            yield chunk
-            logging.debug("manager: yielded chunk to next layer")
-    except aiohttp.ClientConnectionError:
-        logging.error("manager: ClientConnectionError: Remote side closed connection unexpectedly.")
-        raise Exception("Connection closed prematurely by remote server.")
-    except Exception as e:
-        logging.error("manager: exception while reading from plugin", exc_info=True)
-        raise
-
 class PluginProxy:
     def __init__(self, host='localhost', port=8000):
         self.host = host
@@ -68,28 +52,30 @@ class PluginProxy:
 
         headers = {'Content-Type': 'application/json'}
         async with self.session.post(self.base_url, json=payload, headers=headers) as response:
-            content_type = response.headers.get('Content-Type', '')
-
             if response.status != 200:
                 text = await response.text()
                 logger.error(f"HTTP error {response.status}: {text}")
                 raise Exception(f"HTTP error {response.status}: {text}")
 
+            content_type = response.headers.get('Content-Type', '')
             if 'application/octet-stream' in content_type:
-                # Return a generator for streaming binary data
-                return byte_stream_gen(response)
+                # Read entire binary response at once
+                data = await response.read()
+                return data
 
-            # Otherwise JSON
+            # JSON response
             text = await response.text()
             response_obj = json.loads(text)
             result_serialized = response_obj.get('result')
             if result_serialized is None:
+                # Maybe it's an error
+                if 'error' in response_obj:
+                    raise Exception(response_obj['error'])
                 raise Exception("No 'result' in response.")
+
             result = deserialize_data(result_serialized)
             if isinstance(result, dict) and 'error' in result:
-                error_msg = result['error']
-                logger.error(f"Error during function '{function}': {error_msg}")
-                raise Exception(error_msg)
+                raise Exception(result['error'])
             return result
 
     def __getattr__(self, name):

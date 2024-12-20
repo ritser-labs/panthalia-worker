@@ -230,35 +230,19 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
     async def stream_data_file(self, filename):
         full_path = os.path.join(self.temp_dir, filename)
-        logging.debug(f"stream_data_file: Attempting to stream file: {full_path}")
-
         if not os.path.exists(full_path):
-            logging.error(f"stream_data_file: File not found {full_path}")
             return {'error': 'file not found'}
 
         file_size = os.path.getsize(full_path)
-        logging.debug(f"stream_data_file: File {full_path} size: {file_size} bytes before reading")
-
         if file_size == 0:
-            logging.error(f"stream_data_file: File {full_path} is actually size 0.")
             return {'error': 'empty_file'}
 
-        async def file_chunk_generator():
-            try:
-                async with aiofiles.open(full_path, 'rb') as f:
-                    while True:
-                        chunk = await f.read(65536)
-                        if not chunk:
-                            # End of file
-                            break
-                        logging.debug(f"stream_data_file: About to yield chunk of size {len(chunk)}")
-                        yield chunk
-                        logging.debug(f"stream_data_file: Successfully yielded chunk of size {len(chunk)}")
-            except Exception as e:
-                logging.error("Error in file_chunk_generator:", exc_info=True)
-                raise
+        # Read the entire file into memory
+        async with aiofiles.open(full_path, 'rb') as f:
+            data = await f.read()
 
-        return file_chunk_generator()
+        # Return raw bytes directly
+        return data
 
 
     async def get_latest_state(self, tensor_name):

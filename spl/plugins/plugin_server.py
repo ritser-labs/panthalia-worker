@@ -22,6 +22,7 @@ logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 app = Quart(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 1024  # 1 TB
 
 @app.route('/execute', methods=['POST'])
 async def handle():
@@ -51,35 +52,25 @@ async def handle():
             except Exception as e:
                 error_trace = traceback.format_exc()
                 logger.error(f"Exception during function '{func_name}': {error_trace}")
-
-                # If this is the known "no more data" exception, return 404 instead of 500
-                if "No more data available from dataset." in str(e):
+                if "No more data available" in str(e):
                     return jsonify({'error': 'No more data available'}), 404
-
-                # Otherwise return a 500
                 return jsonify({'error': str(e), 'traceback': error_trace}), 500
 
-            import inspect
-            if inspect.isasyncgen(result):
-                async def generator_to_stream(result):
-                    try:
-                        async for chunk in result:
-                            logging.debug(f"plugin_server: yielding {len(chunk)} bytes")
-                            yield chunk
-                            logging.debug("plugin_server: successfully yielded chunk")
-                    except Exception as e:
-                        logging.error("plugin_server: exception while streaming chunks", exc_info=True)
-                        raise
+            # If result is a dict with error:
+            if isinstance(result, dict) and 'error' in result:
+                return jsonify(result), 400
 
-                # Pass the `result` generator to `generator_to_stream`
-                return Response(generator_to_stream(result), mimetype='application/octet-stream')
+            # If result is bytes:
+            if isinstance(result, (bytes, bytearray)):
+                length = len(result)
+                return Response(result, mimetype='application/octet-stream', headers={'Content-Length': str(length)})
 
+            # Otherwise, assume JSON-serializable result
             serialized_result = serialize_data(result)
             return jsonify({'result': serialized_result}), 200
 
         elif action == 'health_check':
             return jsonify({'result': serialize_data({'status': 'ok'})}), 200
-
         else:
             return jsonify({'error': 'Invalid or unsupported action'}), 400
 
@@ -87,6 +78,7 @@ async def handle():
         error_trace = traceback.format_exc()
         logger.error(f"Unhandled exception: {error_trace}")
         return jsonify({'error': str(e), 'traceback': error_trace}), 500
+
 
 @app.route('/health', methods=['GET'])
 async def health_check():
