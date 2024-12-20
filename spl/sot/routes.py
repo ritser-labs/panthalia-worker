@@ -93,13 +93,25 @@ def register_routes(app):
     async def get_data_file(filename):
         plugin = app.config['plugin']
         chunk_generator = await plugin.call_submodule('sot_adapter', 'stream_data_file', filename)
-        if inspect.isasyncgen(chunk_generator):
-            return Response(chunk_generator, mimetype='application/octet-stream')
-        elif isinstance(chunk_generator, dict) and 'error' in chunk_generator:
+
+        # If an error dict is returned
+        if isinstance(chunk_generator, dict) and 'error' in chunk_generator:
             return jsonify(chunk_generator), 404
-        else:
-            # If it's a normal object, not a generator, treat as binary data
+
+        # If it's an async generator, consume it fully into memory:
+        if inspect.isasyncgen(chunk_generator):
+            content = bytearray()
+            async for chunk in chunk_generator:
+                content.extend(chunk)
+            # Now we have the full file content in memory
+            return Response(bytes(content), mimetype='application/octet-stream')
+
+        # If it's just bytes
+        if isinstance(chunk_generator, (bytes, bytearray)):
             return Response(chunk_generator, mimetype='application/octet-stream')
+
+        # If we reach here, it's an unexpected return type
+        return jsonify({'error': 'unexpected_return_type'}), 500
 
     @app.route('/latest_state', methods=['GET'])
     async def latest_state():

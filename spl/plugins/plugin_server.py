@@ -53,23 +53,21 @@ async def handle():
                 else:
                     loop = asyncio.get_event_loop()
                     result = await loop.run_in_executor(None, partial(func, *args, **kwargs))
-            except StopAsyncIteration:
-                return jsonify({'result': serialize_data({'error': 'StopAsyncIteration'})}), 404
             except Exception as e:
                 error_trace = traceback.format_exc()
                 logger.error(f"Exception during function '{func_name}': {error_trace}")
                 return jsonify({'result': serialize_data({'error': str(e), 'traceback': error_trace})}), 500
 
-            # If the result is an async generator, stream it chunked
             if inspect.isasyncgen(result):
                 async def generator_to_stream():
                     async for chunk in result:
+                        # yield chunks until no more data
                         if isinstance(chunk, str):
                             chunk = chunk.encode('utf-8')
                         yield chunk
                 return Response(generator_to_stream(), mimetype='application/octet-stream')
 
-            # Otherwise, return JSON
+            # Otherwise, a normal JSON response:
             serialized_result = serialize_data(result)
             return jsonify({'result': serialized_result})
 

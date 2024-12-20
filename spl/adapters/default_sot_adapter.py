@@ -202,20 +202,25 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
     async def stream_data_file(self, filename):
         full_path = os.path.join(self.temp_dir, filename)
-        if not os.path.abspath(full_path).startswith(os.path.abspath(self.temp_dir)):
-            raise FileNotFoundError("Access denied.")
         if not os.path.exists(full_path):
-            raise FileNotFoundError("File not found.")
-
+            # Return a dict here, before returning the generator
+            return {'error': 'file not found'}
+        
+        # If the file exists, return the generator
         async def file_chunk_generator():
-            async with aiofiles.open(full_path, 'rb') as f:
-                while True:
-                    chunk = await f.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    yield chunk
+            try:
+                async with aiofiles.open(full_path, 'rb') as f:
+                    while True:
+                        chunk = await f.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk
+            except Exception as e:
+                # We cannot return from here with a value. Instead, raise an exception or just stop yielding.
+                raise RuntimeError(f"Error reading file {full_path}: {e}")
 
         return file_chunk_generator()
+
 
     async def get_latest_state(self, tensor_name):
         # The latest version number is stored in block_timestamps

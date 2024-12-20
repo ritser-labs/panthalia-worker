@@ -56,16 +56,18 @@ class PluginProxy:
 
             if response.status != 200:
                 text = await response.text()
-                if response.status == 404 and '"StopAsyncIteration"' in text:
-                    raise StopAsyncIteration
+                # No more checking for "StopAsyncIteration"
                 logger.error(f"HTTP error {response.status}: {text}")
                 raise Exception(f"HTTP error {response.status}: {text}")
 
-            # If binary streaming
             if 'application/octet-stream' in content_type:
                 async def byte_stream_gen():
-                    async for chunk in response.content.iter_chunked(65536):
-                        yield chunk
+                    try:
+                        async for chunk in response.content.iter_chunked(65536):
+                            yield chunk
+                    except aiohttp.ClientConnectionError as e:
+                        logger.error(f"Streaming error: {e}")
+                        # gracefully end if connection closed
                 return byte_stream_gen()
 
             # Otherwise JSON
@@ -78,11 +80,9 @@ class PluginProxy:
             if isinstance(result, dict) and 'error' in result:
                 error_msg = result['error']
                 logger.error(f"Error during function '{function}': {error_msg}")
-                if error_msg == 'StopAsyncIteration':
-                    raise StopAsyncIteration
-                else:
-                    raise Exception(error_msg)
+                raise Exception(error_msg)
             return result
+
 
     def __getattr__(self, name):
         async def method(*args, **kwargs):
