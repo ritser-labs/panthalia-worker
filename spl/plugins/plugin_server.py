@@ -29,59 +29,64 @@ async def handle():
         payload = await request.get_json()
         action = payload.get('action')
 
-        if not exported_plugin and action != 'health_check':
-            return jsonify({'result': serialize_data({'error': 'Plugin not loaded'})}), 500
-
         if action == 'call_function':
             func_name = payload.get('function')
             args_serialized = payload.get('args', [])
             kwargs_serialized = payload.get('kwargs', {})
-
             args = deserialize_data(args_serialized) if args_serialized else []
             kwargs = deserialize_data(kwargs_serialized) if kwargs_serialized else {}
 
             func = getattr(exported_plugin, func_name, None)
             if not func:
-                return jsonify({'result': serialize_data({'error': f"Function '{func_name}' not found"})}), 404
-
+                return jsonify({'error': f"Function '{func_name}' not found"}), 404
             if not callable(func):
-                return jsonify({'result': serialize_data({'error': f"'{func_name}' is not callable"})}), 400
+                return jsonify({'error': f"'{func_name}' is not callable"}), 400
 
             try:
                 if asyncio.iscoroutinefunction(func):
                     result = await func(*args, **kwargs)
                 else:
                     loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(None, partial(func, *args, **kwargs))
+                    result = await loop.run_in_executor(None, lambda: func(*args, **kwargs))
             except Exception as e:
                 error_trace = traceback.format_exc()
                 logger.error(f"Exception during function '{func_name}': {error_trace}")
-                return jsonify({'result': serialize_data({'error': str(e), 'traceback': error_trace})}), 500
 
+                # If this is the known "no more data" exception, return 404 instead of 500
+                if "No more data available from dataset." in str(e):
+                    return jsonify({'error': 'No more data available'}), 404
+
+                # Otherwise return a 500
+                return jsonify({'error': str(e), 'traceback': error_trace}), 500
+
+            import inspect
             if inspect.isasyncgen(result):
-                async def generator_to_stream():
-                    async for chunk in result:
-                        # yield chunks until no more data
-                        if isinstance(chunk, str):
-                            chunk = chunk.encode('utf-8')
-                        yield chunk
-                return Response(generator_to_stream(), mimetype='application/octet-stream')
+                async def generator_to_stream(result):
+                    try:
+                        async for chunk in result:
+                            logging.debug(f"plugin_server: yielding {len(chunk)} bytes")
+                            yield chunk
+                            logging.debug("plugin_server: successfully yielded chunk")
+                    except Exception as e:
+                        logging.error("plugin_server: exception while streaming chunks", exc_info=True)
+                        raise
 
-            # Otherwise, a normal JSON response:
+                # Pass the `result` generator to `generator_to_stream`
+                return Response(generator_to_stream(result), mimetype='application/octet-stream')
+
             serialized_result = serialize_data(result)
-            return jsonify({'result': serialized_result})
+            return jsonify({'result': serialized_result}), 200
 
         elif action == 'health_check':
-            return jsonify({'result': serialize_data({'status': 'ok'})})
+            return jsonify({'result': serialize_data({'status': 'ok'})}), 200
 
         else:
-            return jsonify({'result': serialize_data({'error': 'Invalid or unsupported action'})}), 400
+            return jsonify({'error': 'Invalid or unsupported action'}), 400
 
     except Exception as e:
         error_trace = traceback.format_exc()
         logger.error(f"Unhandled exception: {error_trace}")
-        serialized_error = serialize_data({'error': str(e), 'traceback': error_trace})
-        return jsonify({'result': serialized_error}), 500
+        return jsonify({'error': str(e), 'traceback': error_trace}), 500
 
 @app.route('/health', methods=['GET'])
 async def health_check():

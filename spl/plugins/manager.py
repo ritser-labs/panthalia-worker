@@ -35,8 +35,24 @@ docker_client = docker.DockerClient(base_url=DOCKER_ENGINE_URL)
 last_plugin_id = None
 last_plugin_proxy = None
 
+async def byte_stream_gen(response):
+    """
+    Asynchronously yield chunks from the response content.
+    """
+    try:
+        async for chunk in response.content.iter_chunked(65536):
+            logging.debug(f"manager: received {len(chunk)} bytes from plugin")
+            yield chunk
+            logging.debug("manager: yielded chunk to next layer")
+    except aiohttp.ClientConnectionError:
+        logging.error("manager: ClientConnectionError: Remote side closed connection unexpectedly.")
+        raise Exception("Connection closed prematurely by remote server.")
+    except Exception as e:
+        logging.error("manager: exception while reading from plugin", exc_info=True)
+        raise
+
 class PluginProxy:
-    def __init__(self, host='localhost', port=HOST_PORT_BASE):
+    def __init__(self, host='localhost', port=8000):
         self.host = host
         self.port = port
         self.base_url = f"http://{host}:{port}/execute"
@@ -56,19 +72,12 @@ class PluginProxy:
 
             if response.status != 200:
                 text = await response.text()
-                # No more checking for "StopAsyncIteration"
                 logger.error(f"HTTP error {response.status}: {text}")
                 raise Exception(f"HTTP error {response.status}: {text}")
 
             if 'application/octet-stream' in content_type:
-                async def byte_stream_gen():
-                    try:
-                        async for chunk in response.content.iter_chunked(65536):
-                            yield chunk
-                    except aiohttp.ClientConnectionError as e:
-                        logger.error(f"Streaming error: {e}")
-                        # gracefully end if connection closed
-                return byte_stream_gen()
+                # Return a generator for streaming binary data
+                return byte_stream_gen(response)
 
             # Otherwise JSON
             text = await response.text()
@@ -83,14 +92,10 @@ class PluginProxy:
                 raise Exception(error_msg)
             return result
 
-
     def __getattr__(self, name):
         async def method(*args, **kwargs):
             return await self.call_remote(name, args=args, kwargs=kwargs)
         return method
-
-    async def close(self):
-        await self.session.close()
 
 
 async def get_plugin(plugin_id, db_adapter):

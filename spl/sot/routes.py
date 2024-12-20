@@ -17,14 +17,22 @@ def register_routes(app):
     @requires_auth
     async def get_batch():
         plugin = app.config['plugin']
-        batch_data = await plugin.call_submodule('sot_adapter', 'get_batch')
-        if batch_data is None:
-            return jsonify({'error': 'No more batches available'}), 404
+        try:
+            batch_data = await plugin.call_submodule('sot_adapter', 'get_batch')
+            if batch_data is None:
+                # No more data available scenario.
+                logging.error("No more data available.")
+                return jsonify({'error': 'No more data available'}), 404
 
-        if inspect.isasyncgen(batch_data):
-            return Response(batch_data, mimetype='application/octet-stream')
-        else:
+            if 'input_url' not in batch_data:
+                logging.error("Batch data missing 'input_url'.")
+                return jsonify({'error': 'Batch missing input_url'}), 500
+
             return jsonify(batch_data), 200
+        except Exception as e:
+            logging.error(f"Error getting batch: {e}", exc_info=True)
+            # If other error occurs, also return 404 to signal no batch obtained.
+            return jsonify({'error': str(e)}), 404
 
     @app.route('/update_state', methods=['POST'])
     @requires_auth
@@ -94,23 +102,41 @@ def register_routes(app):
         plugin = app.config['plugin']
         chunk_generator = await plugin.call_submodule('sot_adapter', 'stream_data_file', filename)
 
-        # If an error dict is returned
+        # Check if returned an error dict
         if isinstance(chunk_generator, dict) and 'error' in chunk_generator:
-            return jsonify(chunk_generator), 404
+            error_msg = chunk_generator['error']
+            logging.error(f"File retrieval error: {error_msg}")
+            if error_msg == 'file not found':
+                return jsonify({'error': 'File not found'}), 404
+            elif error_msg == 'empty_file':
+                return jsonify({'error': 'File is empty'}), 500
+            else:
+                return jsonify({'error': 'Unexpected error'}), 500
 
-        # If it's an async generator, consume it fully into memory:
+        # If it's an async generator, stream it directly
         if inspect.isasyncgen(chunk_generator):
-            content = bytearray()
-            async for chunk in chunk_generator:
-                content.extend(chunk)
-            # Now we have the full file content in memory
-            return Response(bytes(content), mimetype='application/octet-stream')
+            async def async_gen_wrapper():
+                try:
+                    async for chunk in chunk_generator:
+                        logging.debug(f"SOT route: forwarding {len(chunk)} bytes to worker")
+                        yield chunk
+                        logging.debug("SOT route: successfully forwarded chunk to worker")
+                except Exception as e:
+                    logging.error("SOT route: exception while forwarding chunks", exc_info=True)
+                    # Raise or just stop yielding. Here we raise to trigger a 500 at the client side.
+                    raise
 
-        # If it's just bytes
+            return Response(async_gen_wrapper(), mimetype='application/octet-stream', status=200)
+
+        # If chunk_generator is bytes
         if isinstance(chunk_generator, (bytes, bytearray)):
-            return Response(chunk_generator, mimetype='application/octet-stream')
+            if len(chunk_generator) == 0:
+                logging.error("File is empty when returning bytes.")
+                return jsonify({'error': 'File is empty'}), 500
+            return Response(chunk_generator, mimetype='application/octet-stream', status=200)
 
-        # If we reach here, it's an unexpected return type
+        # If none of the above, return an error
+        logging.error("unexpected_return_type from get_data_file")
         return jsonify({'error': 'unexpected_return_type'}), 500
 
     @app.route('/latest_state', methods=['GET'])

@@ -115,9 +115,15 @@ class StandardPlugin:
 
         # check if the function is coroutine
         if asyncio.iscoroutinefunction(func):
-            return await func(*args, **kwargs)
+            result = await func(*args, **kwargs)
         else:
-            return func(*args, **kwargs)
+            result =  func(*args, **kwargs)
+        
+        if result is None:
+            # No more data scenario. Instead of treating it as an error,
+            # we return a structured response or propagate a known status.
+            return {"status": "no_more_data"}
+        return result
 
     def get(self, key):
         """

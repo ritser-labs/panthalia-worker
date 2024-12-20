@@ -57,33 +57,53 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         )
 
     async def get_batch(self):
-        # The dataset yields token pairs or combined tensors
-        # Return a dict with "input_url"
+        # The dataset yields token pairs or combined tensors.
+        # Return a dict with "input_url" or None if no more data.
+
         try:
             token_pairs = await self.dataset.__anext__()
-            if not token_pairs:
-                return None
+            if not token_pairs or len(token_pairs) == 0:
+                # If no token pairs, treat as unexpected data scenario.
+                logging.error("get_batch: Received empty token_pairs from dataset.")
+                raise Exception("No token pairs available from dataset.")
 
-            # Save combined_tensor to temp
             inputs = [torch.tensor(pair[0], dtype=torch.long) for pair in token_pairs]
             targets = [torch.tensor(pair[1], dtype=torch.long) for pair in token_pairs]
+
+            if len(inputs) == 0 or len(targets) == 0:
+                logging.error("get_batch: Empty inputs or targets after processing token pairs.")
+                raise Exception("Empty batch generated.")
+
             batch_tensor = torch.stack(inputs)
             targets_tensor = torch.stack(targets)
             combined_tensor = torch.cat([batch_tensor, targets_tensor], dim=0)
 
+            if combined_tensor.numel() == 0:
+                logging.error("get_batch: Combined tensor is empty.")
+                raise Exception("Combined tensor is empty.")
+
             timestamp = int(time.time())
-            random_suffix = random.randint(1000,9999)
+            random_suffix = random.randint(1000, 9999)
             combined_filename = f'input_{timestamp}_{random_suffix}.pt'
             combined_path = os.path.join(self.temp_dir, combined_filename)
 
             await asyncio.to_thread(torch.save, combined_tensor, combined_path)
 
+            # Double check file size:
+            if not os.path.exists(combined_path) or os.path.getsize(combined_path) == 0:
+                logging.error(f"get_batch: Saved file {combined_path} is empty or not found.")
+                raise Exception(f"Failed to save a valid batch tensor to {combined_path}")
+
             return {'input_url': f'/data/state/temp/{combined_filename}'}
+
         except StopAsyncIteration:
+            # Dataset is exhausted, no more data available.
+            logging.error("get_batch: Dataset exhausted, no more data.")
             return None
         except Exception as e:
-            logging.error(f"Error getting batch: {e}")
-            return None
+            logging.error(f"Error getting batch: {e}", exc_info=True)
+        raise
+
 
     async def update_state(self, tensor_name, result_url, version_number, input_url, learning_params):
         # All logic that applies gradients and updates state goes here
@@ -146,7 +166,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         else:
             m = torch.zeros_like(params, device=device)
 
-        from .utils.nag import nag_update
+        from ..util.nag import nag_update
         new_params, new_m = await asyncio.to_thread(nag_update, params, averaged_grads, m, lr, weight_decay, beta1, epsilon)
 
         future_param_path = os.path.join(self.state_dir, f'{tensor_name}_{future_version_number}.pt')
@@ -192,32 +212,51 @@ class DefaultSOTAdapter(BaseSOTAdapter):
     async def get_data_file(self, filename):
         full_path = os.path.join(self.temp_dir, filename)
         if not os.path.abspath(full_path).startswith(os.path.abspath(self.temp_dir)):
-            raise FileNotFoundError("Access denied.")
+            logging.error(f"get_data_file: Access denied for {full_path}.")
+            return {'error': 'Access denied'}
+
         if not os.path.exists(full_path):
-            raise FileNotFoundError("File not found.")
+            logging.error(f"get_data_file: File not found {full_path}.")
+            return {'error': 'File not found'}
 
         async with aiofiles.open(full_path, 'rb') as f:
             data = await f.read()
+
+        if len(data) == 0:
+            logging.error(f"get_data_file: File {full_path} is empty.")
+            return {'error': 'File is empty'}
+
         return {'data': data, 'mime_type': 'application/octet-stream'}
 
     async def stream_data_file(self, filename):
         full_path = os.path.join(self.temp_dir, filename)
+        logging.debug(f"stream_data_file: Attempting to stream file: {full_path}")
+
         if not os.path.exists(full_path):
-            # Return a dict here, before returning the generator
+            logging.error(f"stream_data_file: File not found {full_path}")
             return {'error': 'file not found'}
-        
-        # If the file exists, return the generator
+
+        file_size = os.path.getsize(full_path)
+        logging.debug(f"stream_data_file: File {full_path} size: {file_size} bytes before reading")
+
+        if file_size == 0:
+            logging.error(f"stream_data_file: File {full_path} is actually size 0.")
+            return {'error': 'empty_file'}
+
         async def file_chunk_generator():
             try:
                 async with aiofiles.open(full_path, 'rb') as f:
                     while True:
                         chunk = await f.read(65536)
                         if not chunk:
+                            # End of file
                             break
+                        logging.debug(f"stream_data_file: About to yield chunk of size {len(chunk)}")
                         yield chunk
+                        logging.debug(f"stream_data_file: Successfully yielded chunk of size {len(chunk)}")
             except Exception as e:
-                # We cannot return from here with a value. Instead, raise an exception or just stop yielding.
-                raise RuntimeError(f"Error reading file {full_path}: {e}")
+                logging.error("Error in file_chunk_generator:", exc_info=True)
+                raise
 
         return file_chunk_generator()
 

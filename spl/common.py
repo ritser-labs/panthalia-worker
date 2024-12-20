@@ -210,39 +210,78 @@ async def download_with_timeout(response, chunk_size=1024 * 1024, chunk_timeout=
     logging.info(f"Download completed successfully in {end_time - start_time:.2f} seconds. Total size: {downloaded_size} bytes")
     return content
 
+
+class NoMoreDataException(Exception):
+    pass
+
+async def read_streamed_content(response, chunk_timeout):
+    """
+    Read all content from the response stream with a chunk timeout.
+    If the stream ends prematurely, this function will return whatever it got.
+    """
+    content = io.BytesIO()
+    total_chunks = 0
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(response.content.read(65536), timeout=chunk_timeout)
+            except asyncio.TimeoutError:
+                logging.error("read_streamed_content: Chunk download timed out.")
+                raise
+
+            if not chunk:
+                # End of stream
+                break
+            content.write(chunk)
+            total_chunks += 1
+
+        data_size = content.getbuffer().nbytes
+        logging.info(f"read_streamed_content: Finished reading. Total chunks: {total_chunks}, total size: {data_size} bytes")
+        content.seek(0)
+        return content.getvalue()
+    except Exception as e:
+        logging.error(f"read_streamed_content: Exception occurred while reading stream: {e}")
+        raise
+
+
 async def download_file(
     url,
     retries=3,
     backoff=1,
-    chunk_timeout=5,
+    chunk_timeout=20,  # Increased from 5 to allow slower downloads
     download_type='batch_targets',
     tensor_name=None
 ):
     """
-    Downloads a file with retry logic and prioritizes tensor downloads over batch/targets downloads.
-
-    Args:
-        url (str): The URL to download the file from.
-        retries (int): Number of retry attempts.
-        backoff (int): Backoff factor for retries.
-        chunk_timeout (int): Timeout for each chunk in seconds.
-        download_type (str): Type of download ('tensor' or 'batch_targets').
-        tensor_name (str): Optional tensor name parameter.
-
-    Returns:
-        torch.Tensor: The downloaded tensor.
+    Download a file (e.g., model tensor or batch data) from `url` with retries,
+    backoff, and a configurable chunk_timeout. Supports special handling for
+    'no more data' scenarios.
     """
     params = {'tensor_name': tensor_name} if tensor_name else None
 
     for attempt in range(1, retries + 1):
         try:
-            async with aiohttp.ClientSession() as session:
+            # Set a total=None so that only the read operations time out, not the entire request
+            timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=chunk_timeout)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url, params=params) as response:
-                    response.raise_for_status()
+                    # Handle 404 explicitly: might mean "no more data"
+                    if response.status == 404:
+                        try:
+                            err_data = await response.json()
+                            if 'error' in err_data and 'no more data' in err_data['error'].lower():
+                                logging.info(f"No more data scenario confirmed at URL: {url}")
+                                raise NoMoreDataException("No more data available from dataset.")
+                        except Exception:
+                            pass
+                        # If not a known "no more data" scenario, raise a standard error
+                        raise Exception(f"File not found (404) at {url}")
 
-                    # Depending on download_type, handle locks
+                    if response.status != 200:
+                        raise Exception(f"HTTP error {response.status} from {url}")
+
+                    # Handle tensor download lock if needed
                     if download_type == 'tensor':
-                        # Acquire tensor_download_lock to prioritize tensor downloads
                         async with tensor_download_lock:
                             tensor_download_event.clear()
                             try:
@@ -250,51 +289,33 @@ async def download_file(
                             finally:
                                 tensor_download_event.set()
                     elif download_type == 'batch_targets':
-                        # Wait for any ongoing tensor download to finish
-                        # Just acquiring and releasing lock ensures no tensor is currently downloading
+                        # Just ensure no tensor download currently blocks
                         async with tensor_download_lock:
                             pass
                         content = await read_streamed_content(response, chunk_timeout)
                     else:
-                        raise ValueError("Invalid download_type specified.")
+                        raise ValueError("Invalid download_type. Must be 'tensor' or 'batch_targets'.")
 
-                    return torch.load(io.BytesIO(content))
+                    if len(content) == 0:
+                        logging.error(f"Downloaded file from {url} is empty on attempt {attempt}. Retrying...")
+                        if attempt == retries:
+                            raise Exception("Downloaded file is empty after all retries.")
+                        await asyncio.sleep(backoff * attempt)
+                        continue
 
-        except asyncio.TimeoutError:
-            logging.error(f"Attempt {attempt}: Chunk download timed out.")
-        except aiohttp.ClientError as e:
-            logging.error(f"Attempt {attempt}: Client error: {e}")
+                    # Successfully got non-empty data, load as tensor
+                    return torch.load(io.BytesIO(content), map_location='cpu')
+
+        except NoMoreDataException:
+            # Immediately propagate 'no more data' scenario
+            raise
+        except (asyncio.TimeoutError, aiohttp.ClientError, aiohttp.ClientPayloadError) as e:
+            logging.error(f"Attempt {attempt}: Network error while downloading {url}: {e}")
+            if attempt == retries:
+                raise Exception(f"Failed to download file after {retries} attempts due to network errors: {e}")
+            await asyncio.sleep(backoff * attempt)
         except Exception as e:
             logging.error(f"Attempt {attempt}: Unexpected error: {e}")
-
-        if attempt < retries:
+            if attempt == retries:
+                raise
             await asyncio.sleep(backoff * attempt)
-
-    raise Exception(f"Failed to download file after {retries} attempts")
-
-async def read_streamed_content(response, chunk_timeout):
-    """
-    Reads streamed content from the response until EOF.
-    Uses chunk_timeout to time out individual chunks if needed.
-
-    Args:
-        response: aiohttp response object.
-        chunk_timeout (int): Timeout for each chunk in seconds.
-
-    Returns:
-        bytes: The full content.
-    """
-    data = bytearray()
-    while True:
-        try:
-            # Use asyncio.wait_for to enforce chunk_timeout per chunk
-            chunk = await asyncio.wait_for(response.content.readany(), timeout=chunk_timeout)
-        except asyncio.TimeoutError:
-            raise asyncio.TimeoutError("Chunk download timed out.")
-
-        if not chunk:
-            # EOF reached
-            break
-        data.extend(chunk)
-
-    return bytes(data)
