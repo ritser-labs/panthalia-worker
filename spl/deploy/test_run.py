@@ -75,7 +75,7 @@ with open(os.path.join(script_dir, 'anvil_setup.sh'), 'r') as f:
 
 os.makedirs(LOG_DIR, exist_ok=True)
 file_handler = logging.FileHandler(LOG_FILE)
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 if not any(isinstance(handler, logging.FileHandler) for handler in logger.handlers):

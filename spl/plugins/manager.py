@@ -1,4 +1,3 @@
-# spl/plugins/manager.py
 import aiofiles
 import os
 import sys
@@ -8,36 +7,26 @@ import docker
 import time
 import asyncio
 import json
-import base64
-from functools import partial
 import hashlib
 import tempfile
 import aiohttp
+import inspect
+import subprocess
 
 from .serialize import serialize_data, deserialize_data
 
-# Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Read Docker engine URL from environment variable or use default
 DOCKER_ENGINE_URL = os.environ.get("DOCKER_ENGINE_URL", "unix:///var/run/docker.sock")
-
 global_plugin_dir = tempfile.mkdtemp()
 plugin_package_name = 'plugin_code'
 docker_plugin_dir = f'/app/{plugin_package_name}'
-server_script_name = 'server.py'
-server_script_host = os.path.join(global_plugin_dir, server_script_name)
-server_script_container = f"{docker_plugin_dir}/{server_script_name}"
-
 DOCKER_IMAGE = "panthalia_plugin"
-
 CONTAINER_NAME_TEMPLATE = "panthalia_plugin_{plugin_id}"
 HOST_PORT_BASE = 8000
 
-security_options = [
-    "no-new-privileges:true",
-]
+security_options = ["no-new-privileges:true"]
 mem_limit = "16g"
 pids_limit = 100
 
@@ -47,15 +36,11 @@ last_plugin_id = None
 last_plugin_proxy = None
 
 class PluginProxy:
-    """
-    Proxy class to interact with the remote plugin server.
-    Allows direct async function calls and returns their results.
-    """
-    def __init__(self, host='localhost', port=HOST_PORT_BASE):
+    def __init__(self, host='localhost', port=8000):
         self.host = host
         self.port = port
         self.base_url = f"http://{host}:{port}/execute"
-        self.session = aiohttp.ClientSession()  # Initialize aiohttp session
+        self.session = aiohttp.ClientSession()
 
     async def call_remote(self, function, args=None, kwargs=None):
         payload = {
@@ -65,64 +50,41 @@ class PluginProxy:
             'kwargs': serialize_data(kwargs) if kwargs else {}
         }
 
-        try:
-            headers = {'Content-Type': 'application/json'}
-            async with self.session.post(self.base_url, json=payload, headers=headers) as response:
+        headers = {'Content-Type': 'application/json'}
+        async with self.session.post(self.base_url, json=payload, headers=headers) as response:
+            if response.status != 200:
                 text = await response.text()
-                if response.status != 200:
-                    # If we got a 404 and it contains "StopAsyncIteration", raise StopAsyncIteration
-                    if response.status == 404 and '"StopAsyncIteration"' in text:
-                        raise StopAsyncIteration
-                    logger.error(f"HTTP error {response.status}: {text}")
-                    raise Exception(f"HTTP error {response.status}: {text}")
+                logger.error(f"HTTP error {response.status}: {text}")
+                raise Exception(f"HTTP error {response.status}: {text}")
 
-                response_obj = json.loads(text)
-                result_serialized = response_obj.get('result')
-                if result_serialized is None:
-                    raise Exception("No 'result' in response.")
+            content_type = response.headers.get('Content-Type', '')
+            if 'application/octet-stream' in content_type:
+                # Read entire binary response at once
+                data = await response.read()
+                return data
 
-                result = deserialize_data(result_serialized)
+            # JSON response
+            text = await response.text()
+            response_obj = json.loads(text)
+            result_serialized = response_obj.get('result')
+            if result_serialized is None:
+                # Maybe it's an error
+                if 'error' in response_obj:
+                    raise Exception(response_obj['error'])
+                raise Exception("No 'result' in response.")
 
-                if isinstance(result, dict) and 'error' in result:
-                    error_msg = result['error']
-                    logger.error(f"Error during function '{function}': {error_msg}")
-                    if error_msg == 'StopAsyncIteration':
-                        raise StopAsyncIteration
-                    else:
-                        raise Exception(error_msg)
-
-                return result
-        except aiohttp.ClientError as e:
-            logger.error(f"Request exception during function '{function}': {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error during function '{function}': {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error during function '{function}': {e}")
-            raise
+            result = deserialize_data(result_serialized)
+            if isinstance(result, dict) and 'error' in result:
+                raise Exception(result['error'])
+            return result
 
     def __getattr__(self, name):
-        """
-        Allows direct async method calls as attributes.
-        Example: await proxy.some_function(args) -> calls 'some_function' remotely.
-        """
         async def method(*args, **kwargs):
             return await self.call_remote(name, args=args, kwargs=kwargs)
         return method
 
-    async def close(self):
-        """
-        Close the aiohttp session when done.
-        """
-        await self.session.close()
 
-
-async def get_plugin(plugin_id, db_adapter):
-    """
-    Fetch the plugin from the database, set it up, start the Docker container, and return a PluginProxy instance.
-    Implements caching to reuse the last loaded plugin.
-    """
+async def get_plugin(plugin_id, db_adapter, forwarded_port=None):
     global last_plugin_id, last_plugin_proxy
     setup_dir()
     logger.info(f'Fetching plugin "{plugin_id}"')
@@ -131,25 +93,21 @@ async def get_plugin(plugin_id, db_adapter):
         logger.info(f'Reusing cached plugin "{plugin_id}"')
         return last_plugin_proxy
 
-    # If a different plugin was previously loaded, stop its container
     if last_plugin_proxy is not None:
         await teardown_docker_container(last_plugin_id)
-        await last_plugin_proxy.close()  # Close the aiohttp session
+        await last_plugin_proxy.close()
         last_plugin_proxy = None
         last_plugin_id = None
 
     plugin_package_dir = os.path.join(global_plugin_dir, f'plugin_{plugin_id}')
     create_subdirectory(plugin_package_dir)
 
-    # Fetch and write plugin code
     plugin_file_name = f'plugin_{plugin_id}.py'
     plugin_path = os.path.join(plugin_package_dir, plugin_file_name)
     await fetch_and_write_plugin_code(plugin_id, db_adapter, plugin_path)
 
-    # Copy necessary plugin resources
     setup_plugin_files(plugin_package_dir)
 
-    # Create __init__.py to make it a package
     init_file_path = os.path.join(plugin_package_dir, '__init__.py')
     if not os.path.exists(init_file_path):
         async with aiofiles.open(init_file_path, mode='w') as f:
@@ -157,13 +115,8 @@ async def get_plugin(plugin_id, db_adapter):
         logger.info(f"Created __init__.py at {init_file_path}")
 
     host_port = get_port(plugin_id)
-
-    # Ensure the custom Docker image is built
     await ensure_docker_image()
-
-    # Set up Docker and PluginProxy
-    plugin_proxy = await setup_docker_container(
-        plugin_id, plugin_package_dir, host_port)
+    plugin_proxy = await setup_docker_container(plugin_id, plugin_package_dir, host_port, forwarded_port)
     last_plugin_proxy = plugin_proxy
     last_plugin_id = plugin_id
     logger.info(f'Plugin "{plugin_id}" is set up and ready to use.')
@@ -171,9 +124,6 @@ async def get_plugin(plugin_id, db_adapter):
     return plugin_proxy
 
 def setup_dir():
-    """
-    Ensure the global plugin directory exists and is in sys.path.
-    """
     if not os.path.exists(global_plugin_dir):
         os.makedirs(global_plugin_dir)
         logger.info(f"Created plugin directory at {global_plugin_dir}")
@@ -181,25 +131,21 @@ def setup_dir():
         sys.path.append(global_plugin_dir)
         logger.info(f"Added {global_plugin_dir} to sys.path")
 
-    # Ensure /tmp directory exists
     tmp_dir = "/tmp"
     if not os.path.exists(tmp_dir):
         os.makedirs(tmp_dir)
         logger.info(f"Created temporary directory at {tmp_dir}")
 
 def create_subdirectory(path):
-    """
-    Create a subdirectory if it does not exist.
-    """
     if not os.path.exists(path):
         os.makedirs(path)
         logger.info(f"Created subdirectory at {path}")
 
 def copy_if_missing(src, dst):
-    """
-    Copy a file or directory from src to dst if dst does not exist.
-    """
     if os.path.exists(src) and not os.path.exists(dst):
+        # Ensure the parent directories of the destination path exist
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        
         if os.path.isdir(src):
             shutil.copytree(src, dst)
             logger.info(f"Copied directory from {src} to {dst}")
@@ -208,9 +154,6 @@ def copy_if_missing(src, dst):
             logger.info(f"Copied file from {src} to {dst}")
 
 async def fetch_and_write_plugin_code(plugin_id, db_adapter, plugin_path):
-    """
-    Fetches the plugin code from the database and writes it to the specified path.
-    """
     plugin_record = await db_adapter.get_plugin(plugin_id)
     if not plugin_record or not hasattr(plugin_record, 'code'):
         logger.error(f"No plugin code found for plugin_id: {plugin_id}")
@@ -221,11 +164,6 @@ async def fetch_and_write_plugin_code(plugin_id, db_adapter, plugin_path):
     logger.info(f"Fetched and wrote plugin code to {plugin_path}")
 
 def setup_plugin_files(plugin_package_dir):
-    """
-    Copies necessary plugin resources into the plugin package directory.
-    Paths are now relative to the grandparent directory of the current file.
-    """
-    # Get the grandparent directory of the current file
     grandparent_dir = os.path.dirname(os.path.dirname(__file__))
 
     resources = {
@@ -236,7 +174,11 @@ def setup_plugin_files(plugin_package_dir):
         'common.py': 'common.py',
         'plugins/serialize.py': 'serialize.py',
         'requirements.txt': 'requirements.txt',
-        'plugins/plugin_server.py': 'server.py'
+        'plugins/plugin_server.py': 'server.py',
+        'util': 'util',
+        'db/db_adapter_client.py': 'db/db_adapter_client.py',
+        'models': 'models',
+        'auth/api_auth.py': 'auth/api_auth.py',
     }
 
     for local, global_target in resources.items():
@@ -245,12 +187,8 @@ def setup_plugin_files(plugin_package_dir):
         copy_if_missing(src, dst)
 
 async def ensure_docker_image():
-    """
-    Ensure the custom Docker image is built before running containers.
-    """
     logger.info("Ensuring Docker image is built.")
     try:
-        # Check if image exists
         docker_client.images.get(DOCKER_IMAGE)
         logger.info(f"Docker image '{DOCKER_IMAGE}' already exists.")
     except docker.errors.ImageNotFound:
@@ -258,15 +196,11 @@ async def ensure_docker_image():
         await build_image()
 
 async def build_image():
-    """
-    Build the custom Docker image using the Dockerfile.
-    """
     logger.info(f"Building Docker image '{DOCKER_IMAGE}'. This may take a while...")
-    # The DOCKERFILE_PATH must be set or inferred. Assuming it's in the current directory:
     DOCKERFILE_PATH = 'Dockerfile'
     try:
         image, logs = docker_client.images.build(
-            path=".",  # Context is current directory
+            path=".",
             dockerfile=DOCKERFILE_PATH,
             tag=DOCKER_IMAGE,
             rm=True
@@ -283,14 +217,37 @@ async def build_image():
         logger.error(f"Docker API error during image build: {e}")
         raise
 
-async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
+def is_gpu_available():
+    """Check if an NVIDIA GPU is available on the host system."""
+    try:
+        # Try running nvidia-smi
+        subprocess.run(["nvidia-smi"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        # nvidia-smi not found or returns an error, assume no GPU
+        return False
+
+async def setup_docker_container(plugin_id, plugin_package_dir, host_port, forwarded_port=None):
     container_name = CONTAINER_NAME_TEMPLATE.format(plugin_id=plugin_id)
 
     server_url = f"http://localhost:{host_port}/execute"
     tmp_dir = "/tmp"
 
+    # Check for GPU availability
+    gpu_available = is_gpu_available()
+    device_requests = None
+    if gpu_available:
+        device_requests = [docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])]
+        logger.info("GPU detected. Requesting GPU device in container.")
+    else:
+        logger.info("No GPU detected. Running container with CPU only.")
+
+    port_bindings = {f'{host_port}/tcp': host_port}
+    if forwarded_port:
+        port_bindings[f'{forwarded_port}/tcp'] = forwarded_port
+        logger.info(f"Forwarding container port {forwarded_port} to the host.")
+
     try:
-        # Check if container exists
         container = docker_client.containers.get(container_name)
         logger.info(f"Container {container_name} already exists.")
         if container.status != 'running':
@@ -298,37 +255,31 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
             logger.info(f"Started existing container {container_name}")
     except docker.errors.NotFound:
         logger.info(f"Creating and starting container {container_name}")
-        try:
-            container = docker_client.containers.run(
-                DOCKER_IMAGE,
-                name=container_name,
-                detach=True,
-                security_opt=security_options,
-                ports={
-                    f'{host_port}/tcp': host_port
-                },
-                mem_limit=mem_limit,
-                pids_limit=pids_limit,
-                volumes={
-                    plugin_package_dir: {'bind': docker_plugin_dir, 'mode': 'rw'},
-                    tmp_dir: {'bind': tmp_dir, 'mode': 'rw'}
-                },
-                environment={
-                    "TMPDIR": tmp_dir,
-                    "PIP_NO_CACHE_DIR": "off",
-                    "HOME": tmp_dir,
-                    "PLUGIN_ID": str(plugin_id),
-                    "PORT": str(host_port),
-                    "DOCKER_PLUGIN_DIR": docker_plugin_dir
-                },
-                user="nobody",
-                device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])],
-                extra_hosts={"host.docker.internal": "host-gateway"}
-            )
-            logger.info(f"Container {container_name} started with ID: {container.id}")
-        except docker.errors.DockerException as e:
-            logger.error(f"Failed to start Docker container: {e}")
-            raise
+        container = docker_client.containers.run(
+            DOCKER_IMAGE,
+            name=container_name,
+            detach=True,
+            security_opt=security_options,
+            ports=port_bindings,
+            mem_limit=mem_limit,
+            pids_limit=pids_limit,
+            volumes={
+                plugin_package_dir: {'bind': docker_plugin_dir, 'mode': 'rw'},
+                tmp_dir: {'bind': tmp_dir, 'mode': 'rw'}
+            },
+            environment={
+                "TMPDIR": tmp_dir,
+                "PIP_NO_CACHE_DIR": "off",
+                "HOME": tmp_dir,
+                "PLUGIN_ID": str(plugin_id),
+                "PORT": str(host_port),
+                "DOCKER_PLUGIN_DIR": docker_plugin_dir
+            },
+            user="nobody",
+            device_requests=device_requests,
+            extra_hosts={"host.docker.internal": "host-gateway"}
+        )
+        logger.info(f"Container {container_name} started with ID: {container.id}")
 
     if not await wait_for_server(server_url):
         show_container_logs(container)
@@ -340,16 +291,14 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
     logger.info(f"Plugin proxy created for plugin '{plugin_id}' at {server_url}")
     return plugin_proxy
 
+
 def get_port(plugin_id):
-    """
-    Generate a unique port number for the given plugin_id.
-    """
     try:
         return HOST_PORT_BASE + int(plugin_id)
     except ValueError:
         hash_object = hashlib.sha256(str(plugin_id).encode())
         hash_int = int(hash_object.hexdigest(), 16)
-        return HOST_PORT_BASE + (hash_int % 1000)  # Ports 8000-8999
+        return HOST_PORT_BASE + (hash_int % 1000)
 
 async def wait_for_server(url, timeout=30):
     logger.info(f"Waiting for server at {url} to be ready...")
@@ -358,22 +307,20 @@ async def wait_for_server(url, timeout=30):
     async with aiohttp.ClientSession() as session:
         while time.time() - start_time < timeout:
             try:
-                payload = {
-                    'action': 'health_check'
-                }
+                payload = {'action': 'health_check'}
                 headers = {'Content-Type': 'application/json'}
 
                 async with session.post(url, json=payload, headers=headers) as response:
-                    logger.debug(f"Server raw response: {await response.text()}")
+                    raw_text = await response.text()
+                    logger.debug(f"Server raw response: {raw_text}")
                     if response.status == 200:
-                        response_obj = await response.json()
+                        response_obj = json.loads(raw_text)
                         result_serialized = response_obj.get('result')
                         if result_serialized is None:
-                            logger.debug("No 'result' in response.")
+                            logging.debug("No 'result' in response.")
                             continue
                         result = deserialize_data(result_serialized)
                         logger.debug(f'wait_for_server deserialized response: {result}')
-
                         if isinstance(result, dict) and result.get('status') == 'ok':
                             logger.info("Server is up and running.")
                             return True

@@ -7,6 +7,7 @@ class StandardPlugin:
         self,
         model_adapter,
         model_config,
+        sot_adapter,
         dataset,
         tokenizer,
         num_steps,
@@ -25,6 +26,7 @@ class StandardPlugin:
     ):
         self.model_adapter = model_adapter
         self.model_config = model_config
+        self.sot_adapter = sot_adapter
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.num_steps = num_steps
@@ -101,8 +103,9 @@ class StandardPlugin:
         Returns:
             The result of the function call.
         """
-        if target not in ["model_adapter", "dataset"]:
-            raise ValueError("Target must be 'model_adapter' or 'dataset'")
+        allowed_targets = ["model_adapter", "dataset", "sot_adapter"]
+        if target not in allowed_targets:
+            raise ValueError(f"Target must be one of {allowed_targets}")
 
         obj = getattr(self, target)
         if not hasattr(obj, func_name):
@@ -112,9 +115,15 @@ class StandardPlugin:
 
         # check if the function is coroutine
         if asyncio.iscoroutinefunction(func):
-            return await func(*args, **kwargs)
+            result = await func(*args, **kwargs)
         else:
-            return func(*args, **kwargs)
+            result =  func(*args, **kwargs)
+        
+        if result is None:
+            # No more data scenario. Instead of treating it as an error,
+            # we return a structured response or propagate a known status.
+            return {"status": "no_more_data"}
+        return result
 
     def get(self, key):
         """

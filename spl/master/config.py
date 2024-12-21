@@ -5,7 +5,7 @@ import sys
 
 # Default logger setup here (adjust as needed)
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.DEBUG, 
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 

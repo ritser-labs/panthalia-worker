@@ -5,8 +5,10 @@ import os
 import json
 import traceback
 import logging
-from quart import Quart, jsonify, request
+import inspect
 from functools import partial
+
+from quart import Quart, jsonify, request, Response
 from .serialize import serialize_data, deserialize_data
 
 PLUGIN_DIR = os.environ.get('DOCKER_PLUGIN_DIR', '/app/plugin_code')
@@ -20,7 +22,7 @@ logging.basicConfig(level=logging.DEBUG, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 app = Quart(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 1024  # 1 TB
 
 @app.route('/execute', methods=['POST'])
 async def handle():
@@ -28,52 +30,55 @@ async def handle():
         payload = await request.get_json()
         action = payload.get('action')
 
-        if not exported_plugin and action != 'health_check':
-            return jsonify({'result': serialize_data({'error': 'Plugin not loaded'})}), 500
-
         if action == 'call_function':
             func_name = payload.get('function')
             args_serialized = payload.get('args', [])
             kwargs_serialized = payload.get('kwargs', {})
-
             args = deserialize_data(args_serialized) if args_serialized else []
             kwargs = deserialize_data(kwargs_serialized) if kwargs_serialized else {}
 
             func = getattr(exported_plugin, func_name, None)
             if not func:
-                return jsonify({'result': serialize_data({'error': f"Function '{func_name}' not found"})}), 404
-
+                return jsonify({'error': f"Function '{func_name}' not found"}), 404
             if not callable(func):
-                return jsonify({'result': serialize_data({'error': f"'{func_name}' is not callable"})}), 400
+                return jsonify({'error': f"'{func_name}' is not callable"}), 400
 
             try:
                 if asyncio.iscoroutinefunction(func):
                     result = await func(*args, **kwargs)
                 else:
                     loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(None, partial(func, *args, **kwargs))
-            except StopAsyncIteration:
-                # CHANGED: Return 404 instead of 500 on StopAsyncIteration
-                return jsonify({'result': serialize_data({'error': 'StopAsyncIteration'})}), 404
+                    result = await loop.run_in_executor(None, lambda: func(*args, **kwargs))
             except Exception as e:
                 error_trace = traceback.format_exc()
                 logger.error(f"Exception during function '{func_name}': {error_trace}")
-                return jsonify({'result': serialize_data({'error': str(e), 'traceback': error_trace})}), 500
+                if "No more data available" in str(e):
+                    return jsonify({'error': 'No more data available'}), 404
+                return jsonify({'error': str(e), 'traceback': error_trace}), 500
 
+            # If result is a dict with error:
+            if isinstance(result, dict) and 'error' in result:
+                return jsonify(result), 400
+
+            # If result is bytes:
+            if isinstance(result, (bytes, bytearray)):
+                length = len(result)
+                return Response(result, mimetype='application/octet-stream', headers={'Content-Length': str(length)})
+
+            # Otherwise, assume JSON-serializable result
             serialized_result = serialize_data(result)
-            return jsonify({'result': serialized_result})
+            return jsonify({'result': serialized_result}), 200
 
         elif action == 'health_check':
-            return jsonify({'result': serialize_data({'status': 'ok'})})
-
+            return jsonify({'result': serialize_data({'status': 'ok'})}), 200
         else:
-            return jsonify({'result': serialize_data({'error': 'Invalid or unsupported action'})}), 400
+            return jsonify({'error': 'Invalid or unsupported action'}), 400
 
     except Exception as e:
         error_trace = traceback.format_exc()
         logger.error(f"Unhandled exception: {error_trace}")
-        serialized_error = serialize_data({'error': str(e), 'traceback': error_trace})
-        return jsonify({'result': serialized_error}), 500
+        return jsonify({'error': str(e), 'traceback': error_trace}), 500
+
 
 @app.route('/health', methods=['GET'])
 async def health_check():
@@ -93,7 +98,6 @@ async def init_plugin():
 
         if not exported_plugin:
             logger.error(f"'exported_plugin' not found in module '{plugin_module_name}'.")
-            return
 
         if hasattr(exported_plugin, 'model_adapter'):
             exported_plugin.model_adapter.initialize_environment()
@@ -109,12 +113,6 @@ async def startup():
 if __name__ == '__main__':
     from uvicorn import Config, Server
     loop = asyncio.new_event_loop()
-    config = Config(
-        app=app,
-        host='0.0.0.0',
-        port=int(os.environ['PORT']),
-        log_level='info',
-        loop=loop
-    )
+    config = Config(app=app, host='0.0.0.0', port=int(os.environ['PORT']), log_level='info', loop=loop)
     server = Server(config)
     loop.run_until_complete(server.serve())

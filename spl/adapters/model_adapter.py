@@ -11,6 +11,7 @@ from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 import os
 import aiohttp
 import asyncio
+from ..util.docker import janky_url_replace
 
 class ModelAdapter(ABC):
     def __init__(self, model_config):
@@ -88,16 +89,15 @@ class StandardModelAdapter(ModelAdapter):
         task_params,
         combined_tensor
     ):
-        """
-        Train the model using a combined input tensor containing both batch and targets.
-        The `combined_tensor` is passed in directly, and should already be loaded as a torch.Tensor.
-        The first half of combined_tensor is the batch, and the second half is the targets.
-        """
-
         logging.info("Starting execute_task with a pre-downloaded combined input tensor")
-
+        
         # this is so janky bruh
-        sot_url = sot_url.replace('localhost', 'host.docker.internal')
+        sot_url = janky_url_replace(sot_url)
+
+        # Check combined_tensor validity:
+        if combined_tensor is None or not isinstance(combined_tensor, torch.Tensor) or combined_tensor.numel() == 0:
+            logging.error("execute_task: combined_tensor is invalid or empty.")
+            raise ValueError("Invalid or empty combined_tensor provided to execute_task.")
 
         # Extract hyperparameters from task_params
         steps = task_params['steps']
@@ -108,10 +108,17 @@ class StandardModelAdapter(ModelAdapter):
         tensor_version_interval = task_params['tensor_version_interval']
         expected_worker_time = task_params['expected_worker_time']
 
-        # Split the combined tensor into batch and targets
         half = combined_tensor.size(0) // 2
+        if half == 0 or half * 2 != combined_tensor.size(0):
+            logging.error("execute_task: combined_tensor does not have a valid shape for splitting into inputs/targets.")
+            raise ValueError("Invalid combined_tensor shape for splitting into input/target.")
+
         batch = combined_tensor[:half]
         targets = combined_tensor[half:]
+
+        if batch.numel() == 0 or targets.numel() == 0:
+            logging.error("execute_task: Batch or targets are empty after splitting.")
+            raise ValueError("Empty batch or targets in combined_tensor.")
 
         # Initialize model from the current tensor state
         model, version_number = await self.initialize_tensor(
@@ -123,21 +130,26 @@ class StandardModelAdapter(ModelAdapter):
         targets = targets.to(device, non_blocking=True)
 
         batch_size = inputs.shape[0] // steps
+        if batch_size == 0:
+            logging.error("execute_task: batch_size computed from steps is zero.")
+            raise ValueError("batch_size is zero, check steps and input size.")
+
         initial_params = [param.clone().detach() for param in model.parameters()]
 
-        # Set up optimizer and scheduler
         optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=weight_decay)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_0, eta_min=min_lr)
 
         first_loss = None
         for i in range(steps):
-            # Slice the appropriate portion of the batch
             batch_inputs = inputs[i * batch_size:(i + 1) * batch_size].detach()
             batch_targets = targets[i * batch_size:(i + 1) * batch_size].detach()
 
+            if batch_inputs.numel() == 0 or batch_targets.numel() == 0:
+                logging.error(f"execute_task: Got empty batch at step {i+1}.")
+                raise ValueError(f"Empty batch at training step {i+1}.")
+
             optimizer.zero_grad()
             loss = self.forward_and_loss(model, batch_inputs, batch_targets)
-            logging.debug(f"Step {i + 1}/{steps}: Loss: {loss.item():.4f}")
             loss_value = loss.item()
             if first_loss is None:
                 first_loss = loss_value
@@ -148,12 +160,12 @@ class StandardModelAdapter(ModelAdapter):
 
             self.postprocess_model_after_batch(model)
 
-        # Compute updates as difference between final and initial parameters
         with torch.no_grad():
             param_diff = [init_param - param for param, init_param in zip(model.parameters(), initial_params)]
             updates = torch.cat([diff.view(-1) for diff in param_diff])
 
-        logging.info(f"Model task completed. Loss: {first_loss:.4f}. Total time: {time.time() - start_time:.2f} s")
+        end_time = time.time()
+        logging.info(f"Model task completed. Initial Loss: {first_loss:.4f}. Total time: {end_time - start_time:.2f} s")
         return version_number, updates, first_loss
     
     def run_sanity_check(self, task_result: dict) -> bool:
