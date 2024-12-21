@@ -1,262 +1,376 @@
 # spl/adapters/default_sot_adapter.py
 import os
-import logging
 import asyncio
-import aiofiles
-import torch
-import time
+import logging
 import random
-import io
-from ..common import device, TENSOR_NAME
-from .sot_adapter import BaseSOTAdapter
+import time
+import torch
+import json
 from ..util.json import load_json, save_json
-from ..common import device
-from ..util.tensors import (
-    initialize_tensor,
-    initialize_all_tensors as utils_initialize_all_tensors,
+from ..common import get_future_version_number, TENSOR_NAME
+from ..device import device
+from ..util.sot import (
+    version_number_exists, get_local_file_path, apply_optimizer,
+    update_block_timestamps, cleanup_old_timestamp,
+    update_cleanup_timestamps, initialize_all_tensors
 )
+from ..db.db_adapter_client import DBAdapterClient
 
-CHUNK_SIZE = 1024 * 1024  # 1MB chunk size, adjust as needed
+class FakeRequest:
+    def __init__(self, headers):
+        self.headers = headers
+        self.host = 'localhost:5001'  # Just a placeholder for get_local_file_path
 
-class DefaultSOTAdapter(BaseSOTAdapter):
-    def __init__(self, model_adapter, dataset, state_dir, file_locks=None):
+def read_file(path):
+    with open(path,'rb') as f:
+        return f.read()
+
+def read_torch_file(path):
+    t=torch.load(path,map_location='cpu')
+    import io
+    buf=io.BytesIO()
+    torch.save(t,buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+def parse_multipart(body,boundary):
+    boundary=boundary.encode('utf-8')
+    parts={}
+    segments=body.split(b'--'+boundary)
+    for seg in segments:
+        seg=seg.strip()
+        if not seg or seg==b'--':
+            continue
+        if b'\r\n\r\n' not in seg:
+            continue
+        header,data=seg.split(b'\r\n\r\n',1)
+        header_lines=header.split(b'\r\n')
+        name=None
+        for hl in header_lines:
+            hld=hl.decode('utf-8','replace')
+            if 'Content-Disposition:' in hld:
+                items=hld.split(';')
+                for item in items:
+                    item=item.strip()
+                    if item.startswith('name="'):
+                        name=item[6:-1]
+        data=data.rstrip(b'\r\n')
+        if name:
+            parts[name]=data
+    return parts
+
+class DefaultSOTAdapter:
+    def __init__(self, model_adapter, dataset, state_dir, tensor_version_interval, hyperparams_getter=None):
+        self.initialized = False
+        self.db_adapter = None
+        self.sot_id = None
+        self.db_url = None
+        self.private_key = None
+        self.job_id = None
+        self.perm_db = None
+
         self.model_adapter = model_adapter
+        self.tensor_version_interval = tensor_version_interval
         self.dataset = dataset
-        self.state_dir = state_dir
-        self.temp_dir = os.path.join(self.state_dir, 'temp')
+        self.base_dir = state_dir
+        self.temp_dir = os.path.join(self.base_dir, "temp")
+        self.hyperparams_getter = hyperparams_getter
 
-        self.file_locks = file_locks if file_locks is not None else {
+        self.file_locks = None
+        self.update_timestamp_lock = None
+        self.synced_workers = 0
+        os.makedirs(self.base_dir, exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
+
+    async def initialize(self, sot_id, db_url, private_key, job_id, perm_db):
+        self.sot_id = sot_id
+        self.db_url = db_url
+        self.private_key = private_key
+        self.job_id = job_id
+        self.perm_db = perm_db
+        self.db_adapter = DBAdapterClient(self.db_url, self.private_key)
+
+        self.file_locks = {
             'block_timestamps': asyncio.Lock(),
             'num_updates': asyncio.Lock(),
             'iteration_number': asyncio.Lock(),
             'last_future_version_number': asyncio.Lock(),
             'latest_loss': asyncio.Lock()
         }
+        self.update_timestamp_lock = asyncio.Lock()
 
-        self.block_timestamps_file = os.path.join(self.state_dir, 'block_timestamps.json')
-        self.num_updates_file = os.path.join(self.state_dir, 'num_updates.json')
-        self.iteration_number_file = os.path.join(self.state_dir, 'iteration_number.json')
-        self.last_future_version_file = os.path.join(self.state_dir, 'last_future_version_number.json')
-        self.latest_loss_file = os.path.join(self.state_dir, 'latest_loss.json')
-
-    def get_state_dir(self):
-        return self.state_dir
-
-    async def initialize_directories(self):
-        await asyncio.to_thread(os.makedirs, self.state_dir, exist_ok=True)
-        await asyncio.to_thread(os.makedirs, self.temp_dir, exist_ok=True)
-
-    async def initialize_all_tensors(self):
-        # Delegate to a utility function that uses initialize_tensor
-        # and sets up necessary tensors. Adjust as needed.
-        await utils_initialize_all_tensors(
-            self.state_dir, 
-            self.model_adapter,
-            memory_logging=False, 
+        # Initialize all tensors
+        await initialize_all_tensors(
+            self.base_dir,
+            self.tensor_version_interval,
+            self.model_adapter.init_tensor,
+            memory_logging=False,
             file_locks=self.file_locks
         )
 
-    async def get_batch(self):
-        # The dataset yields token pairs or combined tensors.
-        # Return a dict with "input_url" or None if no more data.
+        await self.dataset.initialize_dataset()
+        self.initialized = True
+        
+        logging.info("default_sot_adapter initialized fully")
 
-        try:
-            token_pairs = await self.dataset.__anext__()
-            if not token_pairs or len(token_pairs) == 0:
-                # If no token pairs, treat as unexpected data scenario.
-                logging.error("get_batch: Received empty token_pairs from dataset.")
-                raise Exception("No token pairs available from dataset.")
+    def _check_auth(self, headers):
+        auth = headers.get('Authorization','')
+        expected = f"Bearer {self.private_key}"
+        return auth == expected
+
+    async def handle_request(self, method, path, query, headers, body):
+        if not self.initialized:
+            return {'status':500,'headers':{},'body':b'{"error":"Not initialized"}'}
+
+        if method == 'GET' and path == 'health':
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':b'{"status":"healthy"}'}
+
+        if method == 'POST' and path == 'report_sync':
+            self.synced_workers += 1
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':b'{"status":"ok"}'}
+
+        if method == 'GET' and path == 'get_num_synced':
+            resp = json.dumps(self.synced_workers).encode('utf-8')
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':resp}
+
+        if method == 'POST' and path == 'get_batch':
+            if not self._check_auth(headers):
+                return {'status':401,'headers':{},'body':b'{"error":"Unauthorized"}'}
+            try:
+                token_pairs = await self.dataset.__anext__()
+                if not token_pairs:
+                    return {'status':404,'headers':{},'body':b'{"error":"No more batches available"}'}
+            except StopAsyncIteration:
+                return {'status':404,'headers':{},'body':b'{"error":"No more batches available"}'}
+            except Exception as e:
+                logging.error(f"Error in /get_batch: {e}", exc_info=True)
+                return {'status':500,'headers':{},'body':b'{"error":"Could not get batch"}'}
 
             inputs = [torch.tensor(pair[0], dtype=torch.long) for pair in token_pairs]
             targets = [torch.tensor(pair[1], dtype=torch.long) for pair in token_pairs]
-
-            if len(inputs) == 0 or len(targets) == 0:
-                logging.error("get_batch: Empty inputs or targets after processing token pairs.")
-                raise Exception("Empty batch generated.")
-
             batch_tensor = torch.stack(inputs)
             targets_tensor = torch.stack(targets)
-            combined_tensor = torch.cat([batch_tensor, targets_tensor], dim=0)
-
-            if combined_tensor.numel() == 0:
-                logging.error("get_batch: Combined tensor is empty.")
-                raise Exception("Combined tensor is empty.")
-
             timestamp = int(time.time())
             random_suffix = random.randint(1000, 9999)
             combined_filename = f'input_{timestamp}_{random_suffix}.pt'
-            combined_path = os.path.join(self.temp_dir, combined_filename)
+            combined_tensor = torch.cat([batch_tensor, targets_tensor], dim=0)
+            await asyncio.to_thread(torch.save, combined_tensor, os.path.join(self.temp_dir, combined_filename))
+            resp_json = json.dumps({"input_url":f"/data/state/temp/{combined_filename}"}).encode('utf-8')
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':resp_json}
 
-            await asyncio.to_thread(torch.save, combined_tensor, combined_path)
+        if method=='POST' and path=='update_state':
+            if not self._check_auth(headers):
+                return {'status':401,'headers':{},'body':b'{"error":"Unauthorized"}'}
+            data = json.loads(body)
+            tensor_name = data.get('tensor_name')
+            result_url = data.get('result_url')
+            if not tensor_name or not result_url:
+                return {'status':400,'headers':{},'body':b'{"error":"Missing tensor_name or result_url"}'}
 
-            # Double check file size:
-            if not os.path.exists(combined_path) or os.path.getsize(combined_path) == 0:
-                logging.error(f"get_batch: Saved file {combined_path} is empty or not found.")
-                raise Exception(f"Failed to save a valid batch tensor to {combined_path}")
+            state_dir = self.base_dir
+            db_adapter = self.db_adapter
+            job_id = self.job_id
+            file_locks = self.file_locks
+            update_timestamp_lock = self.update_timestamp_lock
 
-            return {'input_url': f'/data/state/temp/{combined_filename}'}
+            block_timestamps_file = os.path.join(state_dir, 'block_timestamps.json')
+            num_updates_file = os.path.join(state_dir, 'num_updates.json')
+            last_future_version_file = os.path.join(state_dir, 'last_future_version_number.json')
+            iteration_number_file = os.path.join(state_dir, 'iteration_number.json')
 
-        except StopAsyncIteration:
-            # Dataset is exhausted, no more data available.
-            logging.error("get_batch: Dataset exhausted, no more data.")
-            return None
-        except Exception as e:
-            logging.error(f"Error getting batch: {e}", exc_info=True)
-        raise
+            block_timestamps = await load_json(block_timestamps_file, {}, file_locks['block_timestamps'])
+            num_updates = await load_json(num_updates_file, {}, file_locks['num_updates'])
+            last_future_version_number = await load_json(last_future_version_file, {}, file_locks['last_future_version_number'])
+            iteration_number = await load_json(iteration_number_file, {}, file_locks['iteration_number'])
 
+            future_version_number = get_future_version_number(self.tensor_version_interval)
 
-    async def update_state(self, tensor_name, result_url, version_number, input_url, learning_params):
-        # All logic that applies gradients and updates state goes here
-        # This was previously handled inline, now moved here
-        from ..common import download_file
-        # Load grads
-        local_path = os.path.join(self.state_dir, result_url.lstrip('/data/state/'))
-        if not os.path.exists(local_path):
-            raise ValueError("Gradient file not found at {local_path}")
+            if data['version_number'] != block_timestamps.get(tensor_name,0):
+                return {'status':409,'headers':{},'body':b'{"error":"Version number mismatch"}'}
 
-        grads_tensor = await asyncio.to_thread(torch.load, local_path, map_location=device)
+            old_block_timestamp = await update_block_timestamps(
+                tensor_name, block_timestamps, num_updates, iteration_number,
+                last_future_version_number, state_dir, db_adapter, job_id, self.tensor_version_interval,
+                update_timestamp_lock, file_locks
+            )
 
-        # The update logic (e.g., applying optimizer steps) previously done in update_state
-        # Move all relevant code here. For brevity, let's just assume we do what was done before:
-        # load block_timestamps, num_updates, etc., apply NAG update, etc.
+            fake_req=FakeRequest(headers)
+            local_file_path = get_local_file_path(data.get('result_url'), fake_req, state_dir)
+            batch_url = data.get('batch_url')
+            targets_url = data.get('targets_url')
+            local_batch_file_path = get_local_file_path(batch_url, fake_req, state_dir)
+            local_targets_file_path = get_local_file_path(targets_url, fake_req, state_dir)
+            try:
+                if local_batch_file_path and os.path.exists(local_batch_file_path):
+                    await asyncio.to_thread(os.remove, local_batch_file_path)
+                if local_targets_file_path and os.path.exists(local_targets_file_path):
+                    await asyncio.to_thread(os.remove, local_targets_file_path)
+            except:
+                pass
 
-        block_timestamps = await load_json(self.block_timestamps_file, {}, self.file_locks['block_timestamps'])
-        num_updates = await load_json(self.num_updates_file, {}, self.file_locks['num_updates'])
-        iteration_number = await load_json(self.iteration_number_file, {}, self.file_locks['iteration_number'])
-        last_future_version_number = await load_json(self.last_future_version_file, {}, self.file_locks['last_future_version_number'])
+            if not local_file_path or not os.path.exists(local_file_path):
+                return {'status':404,'headers':{},'body':b'{"error":"File not found"}'}
 
-        current_version = block_timestamps.get(tensor_name, 0)
-        if version_number != current_version:
-            raise ValueError(f"Version number mismatch: {version_number} vs {current_version}")
+            tensor = torch.load(local_file_path, map_location=device)
+            accumulated_grads_path = os.path.join(state_dir,f'accumulated_grads_{tensor_name}_{future_version_number}.pt')
+            if os.path.exists(accumulated_grads_path):
+                accumulated_grads = torch.load(accumulated_grads_path, map_location=device).to(device)
+            else:
+                accumulated_grads = torch.zeros_like(tensor, device=device)
 
-        # Accumulate grads
-        future_version_number = version_number + 1
-        accumulated_grads_path = os.path.join(self.state_dir, f'accumulated_grads_{tensor_name}_{future_version_number}.pt')
-        if os.path.exists(accumulated_grads_path):
-            accumulated_grads = await asyncio.to_thread(torch.load, accumulated_grads_path, map_location=device)
-        else:
-            accumulated_grads = torch.zeros_like(grads_tensor, device=device)
+            accumulated_grads += tensor.to(device)
+            await asyncio.to_thread(torch.save, accumulated_grads, accumulated_grads_path)
 
-        accumulated_grads += grads_tensor.to(device)
-        current_updates = num_updates.get(tensor_name, 0)+1
-        num_updates[tensor_name] = current_updates
+            current_version_number = block_timestamps.get(tensor_name,0)
+            num_of_updates = num_updates.get(tensor_name,0)+1
+            num_updates[tensor_name]=num_of_updates
+            await save_json(num_updates_file, num_updates, file_locks['num_updates'])
 
-        await asyncio.to_thread(torch.save, accumulated_grads, accumulated_grads_path)
-        await save_json(self.num_updates_file, num_updates, self.file_locks['num_updates'])
+            averaged_grads=(accumulated_grads/num_of_updates).to(device)
+            learning_params=await self.hyperparams_getter(iteration_number[tensor_name])
+            future_tensor,m_update=await apply_optimizer(
+                current_version_number,
+                tensor_name,
+                averaged_grads,
+                learning_params['learning_rate'],
+                learning_params['beta1'],
+                learning_params['beta2'],
+                learning_params['epsilon'],
+                learning_params['weight_decay'],
+                learning_params['t'],
+                state_dir
+            )
 
-        averaged_grads = (accumulated_grads / current_updates).to(device)
-        current_iter = iteration_number.get(tensor_name,0)
-        iteration_number[tensor_name] = current_iter + 1
-        await save_json(self.iteration_number_file, iteration_number, self.file_locks['iteration_number'])
+            future_tensor_path=os.path.join(state_dir,f'{tensor_name}_{future_version_number}.pt')
+            future_tensor_adam_m_path=os.path.join(state_dir,f'{tensor_name}_adam_m_{future_version_number}.pt')
+            future_tensor_temp_path=future_tensor_path+'.tmp'
+            future_tensor_adam_m_temp_path=future_tensor_adam_m_path+'.tmp'
 
-        lr = learning_params['learning_rate']
-        beta1 = learning_params['beta1']
-        beta2 = learning_params['beta2']
-        epsilon = learning_params['epsilon']
-        weight_decay = learning_params['weight_decay']
+            await asyncio.to_thread(torch.save,future_tensor,future_tensor_temp_path)
+            await asyncio.to_thread(torch.save,m_update,future_tensor_adam_m_temp_path)
+            os.rename(future_tensor_temp_path,future_tensor_path)
+            os.rename(future_tensor_adam_m_temp_path,future_tensor_adam_m_path)
 
-        current_param_path = os.path.join(self.state_dir, f'{tensor_name}_{version_number}.pt')
-        if not os.path.exists(current_param_path):
-            raise FileNotFoundError(f"Param file not found: {current_param_path}")
-        params = await asyncio.to_thread(torch.load, current_param_path, map_location=device)
+            await cleanup_old_timestamp(tensor_name,old_block_timestamp,block_timestamps,state_dir)
+            for filename in os.listdir(state_dir):
+                if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
+                    await asyncio.to_thread(os.remove, os.path.join(state_dir, filename))
 
-        adam_m_path = os.path.join(self.state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
-        if os.path.exists(adam_m_path):
-            m = await asyncio.to_thread(torch.load, adam_m_path, map_location=device)
-        else:
-            m = torch.zeros_like(params, device=device)
+            if os.path.exists(local_file_path):
+                await asyncio.to_thread(os.remove, local_file_path)
+            resp=json.dumps({"status":"success","version_number":future_version_number}).encode('utf-8')
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':resp}
 
-        from ..util.nag import nag_update
-        new_params, new_m = await asyncio.to_thread(nag_update, params, averaged_grads, m, lr, weight_decay, beta1, epsilon)
+        if method=='GET' and path=='latest_state':
+            tensor_name=query.get('tensor_name')
+            if not tensor_name:
+                return {'status':400,'headers':{},'body':b'{"error":"Missing tensor_name parameter"}'}
+            state_dir=self.base_dir
+            file_locks=self.file_locks
+            block_timestamps_file=os.path.join(state_dir,'block_timestamps.json')
+            block_timestamps=await load_json(block_timestamps_file,{},file_locks['block_timestamps'])
+            latest_version_number=query.get('version_number')
+            if latest_version_number is None or not version_number_exists(latest_version_number,tensor_name,state_dir):
+                latest_version_number=block_timestamps.get(tensor_name,0)
+            else:
+                latest_version_number=int(latest_version_number)
+            state_file_path=os.path.join(state_dir,f'{tensor_name}_{latest_version_number}.pt')
+            if not os.path.exists(state_file_path):
+                return {'status':404,'headers':{},'body':b'{"error":"Tensor not found"}'}
 
-        future_param_path = os.path.join(self.state_dir, f'{tensor_name}_{future_version_number}.pt')
-        future_m_path = os.path.join(self.state_dir, f'{tensor_name}_adam_m_{future_version_number}.pt')
+            data=await asyncio.to_thread(read_torch_file, state_file_path)
+            return {'status':200,'headers':{'Content-Type':'application/octet-stream','X-Version-Number':str(latest_version_number)},'body':data}
 
-        await asyncio.to_thread(torch.save, new_params, future_param_path)
-        await asyncio.to_thread(torch.save, new_m, future_m_path)
+        if method=='POST' and path=='current_timestamp':
+            tensor_name=query.get('tensor_name')
+            if not tensor_name:
+                return {'status':400,'headers':{},'body':b'{"error":"Missing tensor_name parameter"}'}
+            state_dir=self.base_dir
+            db_adapter=self.db_adapter
+            job_id=self.job_id
+            file_locks=self.file_locks
+            block_timestamps_file=os.path.join(state_dir,'block_timestamps.json')
+            block_timestamps=await load_json(block_timestamps_file,{},file_locks['block_timestamps'])
+            num_updates_file=os.path.join(state_dir,'num_updates.json')
+            num_updates=await load_json(num_updates_file,{},file_locks['num_updates'])
+            iteration_number_file=os.path.join(state_dir,'iteration_number.json')
+            iteration_number=await load_json(iteration_number_file,{},file_locks['iteration_number'])
+            last_future_version_file=os.path.join(state_dir,'last_future_version_number.json')
+            last_future_version_number=await load_json(last_future_version_file,{},file_locks['last_future_version_number'])
 
-        block_timestamps[tensor_name] = future_version_number
-        if tensor_name not in last_future_version_number or last_future_version_number[tensor_name] < future_version_number:
-            last_future_version_number[tensor_name] = future_version_number
+            await update_cleanup_timestamps(
+                tensor_name, block_timestamps, num_updates, iteration_number,
+                last_future_version_number, state_dir, db_adapter, job_id, self.tensor_version_interval,
+                self.update_timestamp_lock, file_locks
+            )
+            latest_version_number=block_timestamps.get(tensor_name,0)
+            resp=json.dumps({"version_number":latest_version_number}).encode('utf-8')
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':resp}
 
-        await save_json(self.block_timestamps_file, block_timestamps, self.file_locks['block_timestamps'])
-        await save_json(self.last_future_version_file, last_future_version_number, self.file_locks['last_future_version_number'])
+        if method=='GET' and path=='tensor_size':
+            tensor_name=query.get('tensor_name')
+            if not tensor_name:
+                return {'status':400,'headers':{},'body':b'{"error":"Missing tensor_name parameter"}'}
+            state_dir=self.base_dir
+            state_file_path=os.path.join(state_dir,f'{tensor_name}.pt')
+            if not os.path.exists(state_file_path):
+                return {'status':404,'headers':{},'body':b'{"error":"Tensor not found"}'}
+            tensor=torch.load(state_file_path,map_location=device)
+            size=tensor.numel()
+            resp=json.dumps({"size":size}).encode('utf-8')
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':resp}
 
-        # Clean old accumulated_grads
-        for fname in os.listdir(self.state_dir):
-            if fname.startswith(f'accumulated_grads_{tensor_name}_') and not fname.endswith(f'{future_version_number}.pt'):
-                old_acc_path = os.path.join(self.state_dir, fname)
-                if os.path.exists(old_acc_path):
-                    await asyncio.to_thread(os.remove, old_acc_path)
+        if method=='GET' and path.startswith('data/state/temp/'):
+            filename=path[len('data/state/temp/'):]
+            file_path=os.path.join(self.temp_dir,filename)
+            if not os.path.abspath(file_path).startswith(os.path.abspath(self.temp_dir)):
+                return {'status':403,'headers':{},'body':b'{"error":"File not found or access denied"}'}
+            if not os.path.exists(file_path):
+                return {'status':404,'headers':{},'body':b'{"error":"File not found"}'}
+            data=await asyncio.to_thread(read_file,file_path)
+            return {'status':200,'headers':{'Content-Type':'application/octet-stream'},'body':data}
 
-        if os.path.exists(local_path):
-            await asyncio.to_thread(os.remove, local_path)
+        if method=='POST' and path=='upload_tensor':
+            ctype=headers.get('Content-Type','')
+            if 'multipart/form-data' not in ctype:
+                return {'status':400,'headers':{},'body':b'{"error":"Not multipart"}'}
+            boundary=ctype.split('boundary=')[-1]
+            if not boundary:
+                return {'status':400,'headers':{},'body':b'{"error":"No boundary"}'}
 
-    async def update_loss(self, loss_value, version_number):
-        latest_loss = await load_json(self.latest_loss_file, {'value': None}, self.file_locks['latest_loss'])
-        latest_loss['value'] = loss_value
-        await save_json(self.latest_loss_file, latest_loss, self.file_locks['latest_loss'])
+            parts=parse_multipart(body,boundary)
+            if 'tensor' not in parts or 'label' not in parts:
+                return {'status':400,'headers':{},'body':b'{"error":"No tensor file or label provided"}'}
+            tensor_data=parts['tensor']
+            label=parts['label'].decode('utf-8')
+            update_version_number=int(time.time())
+            random_suffix=random.randint(1000,9999)
+            filename=f'{label}_{update_version_number}_{random_suffix}.pt'
+            local_file_path=os.path.join(self.temp_dir,filename)
+            import io
+            t=torch.load(io.BytesIO(tensor_data),map_location=device)
+            torch.save(t,local_file_path)
+            resp=json.dumps({"message":"Tensor uploaded successfully","tensor_url":f"/data/state/temp/{filename}"}).encode('utf-8')
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':resp}
 
-    async def get_loss(self):
-        latest_loss = await load_json(self.latest_loss_file, {'value': None}, self.file_locks['latest_loss'])
-        return {'loss': latest_loss.get('value')}
+        if method=='POST' and path=='update_loss':
+            data=json.loads(body)
+            if 'loss' not in data:
+                return {'status':400,'headers':{},'body':b'{"error":"Missing loss value"}'}
 
-    async def upload_tensor(self, tensor_state, label):
-        timestamp = int(time.time())
-        random_suffix = random.randint(1000, 9999)
-        filename = f'{label}_{timestamp}_{random_suffix}.pt'
-        local_file_path = os.path.join(self.temp_dir, filename)
-        await asyncio.to_thread(torch.save, tensor_state, local_file_path)
-        return f'/data/state/temp/{filename}'
+            state_dir=self.base_dir
+            latest_loss_path=os.path.join(state_dir,'latest_loss.json')
+            latest_loss=await load_json(latest_loss_path,{'value':None},self.file_locks['latest_loss'])
+            latest_loss['value']=data['loss']
+            await save_json(latest_loss_path,latest_loss,self.file_locks['latest_loss'])
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':b'{"status":"success"}'}
 
-    async def get_data_file(self, filename):
-        full_path = os.path.join(self.temp_dir, filename)
-        if not os.path.abspath(full_path).startswith(os.path.abspath(self.temp_dir)):
-            logging.error(f"get_data_file: Access denied for {full_path}.")
-            return {'error': 'Access denied'}
+        if method=='GET' and path=='get_loss':
+            state_dir=self.base_dir
+            latest_loss_path=os.path.join(state_dir,'latest_loss.json')
+            latest_loss=await load_json(latest_loss_path,{'value':None},self.file_locks['latest_loss'])
+            loss=latest_loss.get('value')
+            resp=json.dumps({'loss':loss}).encode('utf-8')
+            return {'status':200,'headers':{'Content-Type':'application/json'},'body':resp}
 
-        if not os.path.exists(full_path):
-            logging.error(f"get_data_file: File not found {full_path}.")
-            return {'error': 'File not found'}
-
-        async with aiofiles.open(full_path, 'rb') as f:
-            data = await f.read()
-
-        if len(data) == 0:
-            logging.error(f"get_data_file: File {full_path} is empty.")
-            return {'error': 'File is empty'}
-
-        return {'data': data, 'mime_type': 'application/octet-stream'}
-
-    async def stream_data_file(self, filename):
-        full_path = os.path.join(self.temp_dir, filename)
-        if not os.path.exists(full_path):
-            return {'error': 'file not found'}
-
-        file_size = os.path.getsize(full_path)
-        if file_size == 0:
-            return {'error': 'empty_file'}
-
-        # Read the entire file into memory
-        async with aiofiles.open(full_path, 'rb') as f:
-            data = await f.read()
-
-        # Return raw bytes directly
-        return data
-
-
-    async def get_latest_state(self, tensor_name):
-        # The latest version number is stored in block_timestamps
-        block_timestamps = await load_json(self.block_timestamps_file, {}, self.file_locks['block_timestamps'])
-        latest_version_number = block_timestamps.get(tensor_name, 0)
-        state_file_path = os.path.join(self.state_dir, f'{tensor_name}_{latest_version_number}.pt')
-        if not os.path.exists(state_file_path):
-            raise FileNotFoundError("Tensor not found.")
-
-        # Load into bytes
-        tensor_data = io.BytesIO()
-        param = await asyncio.to_thread(torch.load, state_file_path, map_location='cpu')
-        torch.save(param, tensor_data)
-        tensor_bytes = tensor_data.getvalue()
-
-        return {'data': tensor_bytes, 'version_number': latest_version_number}
+        return {'status':404,'headers':{},'body':b'{"error":"Not found"}'}

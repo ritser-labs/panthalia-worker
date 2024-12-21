@@ -1,3 +1,5 @@
+# spl/plugins/plugin_examples/plugin.py
+
 from .adapters.dataloader import ShakespeareDataLoader
 from .adapters.model_config import NanoGPTConfig
 from .adapters.models.nanogpt import GPT, GPTConfig
@@ -5,9 +7,12 @@ from .adapters.model_adapter import NanoGPTModelAdapter
 from .adapters.default_sot_adapter import DefaultSOTAdapter
 from .adapters.plugins import StandardPlugin
 from .tokenizer import CharacterLevelTokenizer
-import math
+
 import os
 
+################################################################
+# 1) Set up model, dataset, etc.
+################################################################
 tokenizer = CharacterLevelTokenizer()
 
 model_params = GPTConfig(
@@ -22,11 +27,9 @@ model_params = GPTConfig(
 )
 
 model_config = NanoGPTConfig(tokenizer, model_params)
-
 model_adapter = NanoGPTModelAdapter(model_config)
 
 NUM_STEPS = 285
-
 EXAMPLES_PER_STEP = 64
 
 dataset = ShakespeareDataLoader(
@@ -36,24 +39,32 @@ dataset = ShakespeareDataLoader(
     batch_size=NUM_STEPS * EXAMPLES_PER_STEP
 )
 
+################################################################
+# 2) Create the "DefaultSOTAdapter"
+################################################################
+TENSOR_VERSION_INTERVAL = 36
 sot_adapter = DefaultSOTAdapter(
-    model_adapter,
-    dataset,
-    state_dir='/app/data/state',
+    model_adapter=model_adapter,
+    dataset=dataset,
+    state_dir="/app/data/state",
+    tensor_version_interval=TENSOR_VERSION_INTERVAL
 )
 
+################################################################
+# 3) Create the plugin with the SOT adapter
+################################################################
 exported_plugin = StandardPlugin(
-    model_adapter,
-    model_config,
-    sot_adapter,
-    dataset,
+    model_adapter,         # model adapter
+    model_config,          # model config
+    sot_adapter,           # <--- we pass the "sot_adapter" here
+    dataset,               # dataset
     tokenizer,
     num_steps=NUM_STEPS,
     examples_per_step=EXAMPLES_PER_STEP,
     outer_max_lr=1,
     outer_min_lr=1,
     outer_weight_decay=0.0,
-    tensor_version_interval=36,
+    tensor_version_interval=TENSOR_VERSION_INTERVAL,
     expected_worker_time=31,
     max_concurrent_iterations=4,
     inner_max_lr=0.001,
@@ -61,3 +72,5 @@ exported_plugin = StandardPlugin(
     inner_T_0=200,
     preload_batch_count=4
 )
+
+sot_adapter.hyperparams_getter = exported_plugin.get_sot_learning_hyperparameters

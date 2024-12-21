@@ -143,6 +143,9 @@ def create_subdirectory(path):
 
 def copy_if_missing(src, dst):
     if os.path.exists(src) and not os.path.exists(dst):
+        # Ensure the parent directories of the destination path exist
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        
         if os.path.isdir(src):
             shutil.copytree(src, dst)
             logger.info(f"Copied directory from {src} to {dst}")
@@ -173,6 +176,8 @@ def setup_plugin_files(plugin_package_dir):
         'requirements.txt': 'requirements.txt',
         'plugins/plugin_server.py': 'server.py',
         'util': 'util',
+        'db/db_adapter_client.py': 'db/db_adapter_client.py',
+        'models': 'models',
     }
 
     for local, global_target in resources.items():

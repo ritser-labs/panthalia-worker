@@ -1,55 +1,45 @@
 # spl/adapters/sot_adapter.py
+
+import asyncio
+import logging
 from abc import ABC, abstractmethod
 
+################################################################
+# Base interface for any SOT Adapter
+################################################################
+
 class BaseSOTAdapter(ABC):
-    @abstractmethod
-    def get_state_dir(self):
-        pass
+    """
+    The abstract interface for any SOT adapter implementation.
+    The plugin code should provide a class that implements these methods.
+    """
 
     @abstractmethod
-    async def initialize_directories(self):
-        pass
-
-    @abstractmethod
-    async def initialize_all_tensors(self):
-        pass
-
-    @abstractmethod
-    async def get_batch(self):
-        pass
-
-    @abstractmethod
-    async def update_state(self, tensor_name, result_url, version_number, input_url, learning_params):
-        pass
-
-    @abstractmethod
-    async def update_loss(self, loss_value, version_number):
-        pass
-
-    @abstractmethod
-    async def get_loss(self):
-        pass
-
-    @abstractmethod
-    async def upload_tensor(self, tensor_state, label):
-        pass
-
-    @abstractmethod
-    async def get_data_file(self, filename):
+    def set_plugin_and_db_adapter(self, plugin, db_adapter):
         """
-        Retrieve a file's entire contents at once.
-        Return a dict like: {'data': bytes, 'mime_type': 'application/octet-stream'}
+        Called once after we create the adapter, so it can store references
+        to the plugin object and the DB adapter object if needed.
         """
         pass
 
     @abstractmethod
-    async def stream_data_file(self, filename):
+    async def initialize(self, sot_id, db_url, private_key, job_id, perm_db):
         """
-        Return an async generator (or async iterable) that yields chunks of the file.
-        This allows streaming large files without loading them entirely into memory.
+        Called once by the SOT side, passing the relevant configuration (SOT ID,
+        DB URL, private key, job ID, permission info, etc.). This is your chance
+        to do filesystem or data structure initialization.
         """
         pass
 
     @abstractmethod
-    async def get_latest_state(self, tensor_name):
+    async def handle_request(self, method, path, query, headers, body):
+        """
+        The main entry point for handling an HTTP request from the SOT proxy side.
+        Return a dict: {
+          'status': <int>,
+          'headers': { ... },
+          'body': <bytes or an async generator/iterator>
+        }
+        """
         pass
+
