@@ -21,9 +21,10 @@ from ..util.sot import (
 )
 from ..db.db_adapter_client import DBAdapterClient
 from ..util.docker import janky_url_replace
+from .sot_adapter import BaseSOTAdapter
 
 
-class DefaultSOTAdapter:
+class DefaultSOTAdapter(BaseSOTAdapter):
     def __init__(self, model_adapter, dataset, state_dir, tensor_version_interval, hyperparams_getter=None):
         self.initialized = False
         self.db_adapter = None
