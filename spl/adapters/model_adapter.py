@@ -11,6 +11,7 @@ from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 import os
 import aiohttp
 import asyncio
+from ..util.docker import janky_url_replace
 
 class ModelAdapter(ABC):
     def __init__(self, model_config):
@@ -91,7 +92,7 @@ class StandardModelAdapter(ModelAdapter):
         logging.info("Starting execute_task with a pre-downloaded combined input tensor")
         
         # this is so janky bruh
-        sot_url = sot_url.replace('localhost', 'host.docker.internal')
+        sot_url = janky_url_replace(sot_url)
 
         # Check combined_tensor validity:
         if combined_tensor is None or not isinstance(combined_tensor, torch.Tensor) or combined_tensor.numel() == 0:

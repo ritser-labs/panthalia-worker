@@ -6,14 +6,13 @@ import logging
 from quart import request, jsonify
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from ..db.server.adapter import DBAdapterServer  # Updated import
 import time
 
 EXPIRY_TIME = 10
 
 logger = logging.getLogger(__name__)
 
-async def verify_signature(db_adapter: DBAdapterServer, message: str, signature: str, perm_db_column: int):
+async def verify_signature(db_adapter, message: str, signature: str, perm_db_column: int):
     message = encode_defunct(text=message)
     try:
         recovered_address = Account.recover_message(message, signature=signature)

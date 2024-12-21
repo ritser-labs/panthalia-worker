@@ -84,7 +84,7 @@ class PluginProxy:
         return method
 
 
-async def get_plugin(plugin_id, db_adapter):
+async def get_plugin(plugin_id, db_adapter, forwarded_port=None):
     global last_plugin_id, last_plugin_proxy
     setup_dir()
     logger.info(f'Fetching plugin "{plugin_id}"')
@@ -116,7 +116,7 @@ async def get_plugin(plugin_id, db_adapter):
 
     host_port = get_port(plugin_id)
     await ensure_docker_image()
-    plugin_proxy = await setup_docker_container(plugin_id, plugin_package_dir, host_port)
+    plugin_proxy = await setup_docker_container(plugin_id, plugin_package_dir, host_port, forwarded_port)
     last_plugin_proxy = plugin_proxy
     last_plugin_id = plugin_id
     logger.info(f'Plugin "{plugin_id}" is set up and ready to use.')
@@ -178,6 +178,7 @@ def setup_plugin_files(plugin_package_dir):
         'util': 'util',
         'db/db_adapter_client.py': 'db/db_adapter_client.py',
         'models': 'models',
+        'auth/api_auth.py': 'auth/api_auth.py',
     }
 
     for local, global_target in resources.items():
@@ -226,7 +227,7 @@ def is_gpu_available():
         # nvidia-smi not found or returns an error, assume no GPU
         return False
 
-async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
+async def setup_docker_container(plugin_id, plugin_package_dir, host_port, forwarded_port=None):
     container_name = CONTAINER_NAME_TEMPLATE.format(plugin_id=plugin_id)
 
     server_url = f"http://localhost:{host_port}/execute"
@@ -241,6 +242,11 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
     else:
         logger.info("No GPU detected. Running container with CPU only.")
 
+    port_bindings = {f'{host_port}/tcp': host_port}
+    if forwarded_port:
+        port_bindings[f'{forwarded_port}/tcp'] = forwarded_port
+        logger.info(f"Forwarding container port {forwarded_port} to the host.")
+
     try:
         container = docker_client.containers.get(container_name)
         logger.info(f"Container {container_name} already exists.")
@@ -254,7 +260,7 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
             name=container_name,
             detach=True,
             security_opt=security_options,
-            ports={f'{host_port}/tcp': host_port},
+            ports=port_bindings,
             mem_limit=mem_limit,
             pids_limit=pids_limit,
             volumes={
@@ -284,6 +290,7 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port):
     plugin_proxy = PluginProxy(host='localhost', port=host_port)
     logger.info(f"Plugin proxy created for plugin '{plugin_id}' at {server_url}")
     return plugin_proxy
+
 
 def get_port(plugin_id):
     try:

@@ -36,7 +36,7 @@ BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 LAST_FUTURE_VERSION_FILE = os.path.join(STATE_DIR, 'last_future_version_number.json')
 plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
 DOCKER_IMAGE = 'zerogoliath/magnum:latest'
-DB_HOST = '127.0.0.1'
+DB_HOST = 'localhost'
 db_url = f"http://{DB_HOST}:{DB_PORT}"
 
 GUESS_DB_PERM_ID = 1
