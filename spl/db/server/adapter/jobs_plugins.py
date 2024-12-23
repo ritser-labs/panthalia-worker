@@ -1,4 +1,6 @@
-from sqlalchemy import select
+# spl/db/server/adapter/jobs_plugins.py
+
+from sqlalchemy import select, update
 from ....models import AsyncSessionLocal, Job, Plugin, Subnet
 
 class DBAdapterJobsPluginsMixin:
@@ -80,3 +82,30 @@ class DBAdapterJobsPluginsMixin:
             result = await session.execute(stmt)
             plugins = result.scalars().all()
             return plugins
+
+    ####################################################
+    # NEW: Generic GET/UPDATE state_json for a given job
+    ####################################################
+
+    async def get_job_state(self, job_id: int) -> dict:
+        """
+        Return the dictionary stored in Job.state_json
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(Job).where(Job.id == job_id)
+            result = await session.execute(stmt)
+            job = result.scalar_one_or_none()
+            if not job:
+                return {}
+            if not job.state_json:
+                return {}
+            return job.state_json
+
+    async def update_job_state(self, job_id: int, new_state: dict):
+        """
+        Overwrite Job.state_json with new_state
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = update(Job).where(Job.id == job_id).values(state_json=new_state)
+            await session.execute(stmt)
+            await session.commit()

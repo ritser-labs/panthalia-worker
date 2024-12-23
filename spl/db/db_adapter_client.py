@@ -445,6 +445,37 @@ class DBAdapterClient:
         response = await self._authenticated_request('POST', '/create_state_update', data=payload)
         return self._extract_id(response, 'state_update_id')
 
+    @typechecked
+    async def get_state_for_job(self, job_id: int) -> dict:
+        """
+        GET /get_job_state?job_id=JOB_ID
+        Returns the dict stored in jobs.state_json
+        """
+        params = {'job_id': str(job_id)}
+        response = await self._authenticated_request('GET', '/get_job_state', params=params)
+        if 'error' in response:
+            logger.error(response['error'])
+            return {}
+        if isinstance(response, dict):
+            return response
+        return {}
+
+    @typechecked
+    async def update_state_for_job(self, job_id: int, new_state_data: dict) -> bool:
+        """
+        POST /update_job_state
+        JSON body: { "job_id": X, "new_state": {...} }
+        """
+        data = {
+            'job_id': job_id,
+            'new_state': new_state_data
+        }
+        response = await self._authenticated_request('POST', '/update_job_state', data=data)
+        if 'error' in response:
+            logger.error(response['error'])
+            return False
+        return True
+
 
     async def _fetch_entity(self, endpoint: str, model_cls: Type[T], data: Optional[dict] = None, params: Optional[dict] = None) -> Optional[T]:
         response = await self._authenticated_request('GET', endpoint, data=data, params=params)

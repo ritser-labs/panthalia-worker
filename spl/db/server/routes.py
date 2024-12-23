@@ -375,3 +375,23 @@ app.route('/update_sot', methods=['POST'], endpoint='update_sot_endpoint')(
 app.route('/finalize_sanity_check', methods=['POST'], endpoint='finalize_sanity_check_endpoint')(
     create_post_route(db_adapter_server.finalize_sanity_check, ['task_id', 'is_valid'], 'success')
 )
+
+@app.route('/get_job_state', methods=['GET'])
+@require_params('job_id')
+@handle_errors
+async def get_job_state():
+    job_id = int(request.args.get('job_id'))
+    state = await db_adapter_server.get_job_state(job_id)
+    return jsonify(state), 200
+
+@app.route('/update_job_state', methods=['POST'])
+@handle_errors
+@require_json_keys('job_id', 'new_state')
+async def update_job_state(*args, **kwargs):
+    data = kwargs['data']
+    job_id = data['job_id']
+    new_state = data['new_state']  # should be a dict
+    if not isinstance(new_state, dict):
+        return jsonify({'error': 'new_state must be a dict'}), 400
+    await db_adapter_server.update_job_state(job_id, new_state)
+    return jsonify({'success': True}), 200

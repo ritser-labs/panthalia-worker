@@ -1,3 +1,5 @@
+# spl/models/schema.py
+
 from datetime import datetime
 from pytz import UTC
 from sqlalchemy import (
@@ -8,7 +10,7 @@ from .enums import (
     ServiceType, PermType, OrderType, AccountTxnType, HoldType,
     CreditTxnType, EarningsTxnType, PlatformRevenueTxnType
 )
-from ..common import TaskStatus  # Adjust if needed, depending on your original structure
+from ..common import TaskStatus
 from . import Base
 import enum
 
@@ -53,6 +55,9 @@ class Job(TimestampMixin, Serializable):
     sot_url = Column(String, nullable=False)
     done = Column(Boolean, nullable=False, default=False)
     iteration = Column(Integer, nullable=False)
+    # NEW: A JSON column to store arbitrary dictionary for SOT/Master state
+    state_json = Column(JSON, nullable=True, default={})
+
     plugin = relationship("Plugin", back_populates="jobs")
     subnet = relationship("Subnet", back_populates="jobs")
     instances = relationship("Instance", back_populates="job")

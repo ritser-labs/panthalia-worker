@@ -91,7 +91,7 @@ class StandardModelAdapter(ModelAdapter):
     ):
         logging.info("Starting execute_task with a pre-downloaded combined input tensor")
         
-        # this is so janky bruh
+        # fix up the SOT URL if "localhost" is present
         sot_url = janky_url_replace(sot_url)
 
         # Check combined_tensor validity:
@@ -99,7 +99,7 @@ class StandardModelAdapter(ModelAdapter):
             logging.error("execute_task: combined_tensor is invalid or empty.")
             raise ValueError("Invalid or empty combined_tensor provided to execute_task.")
 
-        # Extract hyperparameters from task_params
+        # Extract hyperparameters from task_params (JSON parsed at a higher level)
         steps = task_params['steps']
         max_lr = task_params['max_lr']
         min_lr = task_params['min_lr']
@@ -120,7 +120,7 @@ class StandardModelAdapter(ModelAdapter):
             logging.error("execute_task: Batch or targets are empty after splitting.")
             raise ValueError("Empty batch or targets in combined_tensor.")
 
-        # Initialize model from the current tensor state
+        # Initialize the local model from the current tensor state on SOT
         model, version_number = await self.initialize_tensor(
             TENSOR_NAME, sot_url, tensor_version_interval, expected_worker_time
         )
@@ -134,8 +134,10 @@ class StandardModelAdapter(ModelAdapter):
             logging.error("execute_task: batch_size computed from steps is zero.")
             raise ValueError("batch_size is zero, check steps and input size.")
 
+        # Save a copy of the initial parameters
         initial_params = [param.clone().detach() for param in model.parameters()]
 
+        # Basic optimizer setup
         optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=weight_decay)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_0, eta_min=min_lr)
 
@@ -170,22 +172,15 @@ class StandardModelAdapter(ModelAdapter):
     
     def run_sanity_check(self, task_result: dict) -> bool:
         """
-        Run sanity checks on the given task result.
-
-        Args:
-            task_result (dict): The result dictionary from the solver.
-
-        Returns:
-            bool: True if the sanity check passes, False otherwise.
+        Basic sanity checks on the given task result.
+        Return True if the check passes, else False.
         """
-        # Example sanity check:
         if not isinstance(task_result, dict):
             return False
         if 'loss' not in task_result:
             return False
         if not isinstance(task_result['loss'], (int, float)):
             return False
-        # Additional checks can be added here
         return True
 
 
@@ -193,6 +188,11 @@ class StandardModelAdapter(ModelAdapter):
         self, tensor_name, sot_url, tensor_version_interval,
         expected_worker_time, retries=3, backoff=1, chunk_timeout=5
     ):
+        """
+        Polls /current_timestamp to ensure there's enough time left in the current
+        version interval, then attempts to GET /latest_state with the correct
+        ?tensor_name=...
+        """
         logging.debug(f"Starting initialization for tensor: {tensor_name}")
 
         init_start_time = time.time()
@@ -201,6 +201,7 @@ class StandardModelAdapter(ModelAdapter):
         iterations = 0
         timeout = aiohttp.ClientTimeout(total=200)
 
+        # step 1) fetch the current_timestamp repeatedly until we can proceed
         while not valid_version and iterations < max_iterations:
             iterations += 1
             logging.debug(f"Initialization loop iteration {iterations}")
@@ -218,30 +219,39 @@ class StandardModelAdapter(ModelAdapter):
                 await asyncio.sleep(backoff * iterations)
                 continue
 
-            def time_until_next_version(tensor_version_interval):
-                return get_future_version_number(tensor_version_interval) - time.time()
+            def time_until_next_version(interval):
+                return get_future_version_number(interval) - time.time()
 
             time_until_next = time_until_next_version(tensor_version_interval)
             logging.debug(f"Time until next version: {time_until_next} seconds")
 
+            # If the next version arrives too soon, we wait until it does
             if time_until_next < expected_worker_time:
-                logging.debug(f'Not enough time until next version. Waiting {time_until_next} s.')
+                logging.debug(f'Not enough time until next version. Waiting ~{time_until_next:.1f} s...')
                 await asyncio.sleep(time_until_next)
             else:
                 valid_version = True
 
         if not valid_version:
-            raise RuntimeError("initialize_tensor: failed to get a valid version")
+            raise RuntimeError("initialize_tensor: failed to get a valid version after multiple checks")
 
+        # step 2) attempt to GET the latest tensor (with correct query param)
         for attempt in range(1, retries + 1):
             try:
-                url = f"{sot_url}/latest_state"
+                # IMPORTANT: embed the `tensor_name` param directly in the URL
+                url = f"{sot_url}/latest_state?tensor_name={tensor_name}"
                 logging.debug(f"Requesting tensor {tensor_name} from URL: {url}")
                 fetch_start_time = time.time()
 
-                tensor = await download_file(url, tensor_name=tensor_name, download_type='tensor')
+                # Now call download_file WITHOUT specifying the param again
+                # because we already encoded it in the URL above
+                tensor = await download_file(
+                    url,
+                    download_type='tensor',
+                    chunk_timeout=chunk_timeout
+                )
                 download_end_time = time.time()
-                logging.debug(f"Downloaded in {download_end_time - fetch_start_time:.2f}s")
+                logging.debug(f"Downloaded in {download_end_time - fetch_start_time:.2f} s")
 
                 model = self.tensor_to_model(tensor.detach(), None)
                 model.train()
@@ -252,6 +262,9 @@ class StandardModelAdapter(ModelAdapter):
                 logging.error(f"Attempt {attempt}: Chunk download timed out.")
             except aiohttp.ClientError as e:
                 logging.error(f"Attempt {attempt}: Failed to fetch tensor {tensor_name}: {e}")
+            except Exception as e:
+                logging.error(f"Attempt {attempt}: Unexpected error: {e}")
+
             if attempt < retries:
                 await asyncio.sleep(backoff * attempt)
 
@@ -269,8 +282,6 @@ class StandardModelAdapter(ModelAdapter):
     def model_to_tensor(self, model: torch.nn.Module) -> torch.Tensor:
         return torch.cat(tuple(p.view(-1) for p in model.parameters())).to(device)
 
-
-
     def tensor_to_model(self, tensor: torch.Tensor, existing_model=None) -> torch.nn.Module:
         if existing_model is not None:
             model = existing_model
@@ -280,14 +291,18 @@ class StandardModelAdapter(ModelAdapter):
         total_params = sum(p.numel() for p in model.parameters())
 
         if tensor.numel() != total_params:
-            raise ValueError(f"Total number of parameters {total_params} does not match the size of the tensor {tensor.numel()}")
+            raise ValueError(
+                f"Total # of params {total_params} != tensor size {tensor.numel()}"
+            )
 
         for param in model.parameters():
             num_param = param.numel()
-            logging.debug(f"Pointer: {pointer}, Num param: {num_param}, Tensor size: {tensor.numel()}")
+            logging.debug(f"Pointer: {pointer}, num_param: {num_param}, tensor size: {tensor.numel()}")
 
             if pointer + num_param > tensor.numel():
-                raise ValueError(f"Pointer {pointer} with num_param {num_param} exceeds tensor size {tensor.numel()}")
+                raise ValueError(
+                    f"Pointer {pointer} with num_param {num_param} exceeds tensor size {tensor.numel()}"
+                )
 
             param.data = tensor[pointer:pointer + num_param].view(param.size()).to(device)
             pointer += num_param
@@ -295,25 +310,32 @@ class StandardModelAdapter(ModelAdapter):
         return model
 
     def init_tensor(self, zero_init: bool = False) -> torch.Tensor:
+        """
+        Creates a brand-new parameter vector or optimizer state vector,
+        with Kaiming init if zero_init=False, else zeros.
+        """
         module = self.model_config.create_model().to(device)
         
         if not zero_init:
-            # Initialize module parameters with Kaiming (He) initialization for all parameters
+            # Kaiming Uniform for weight layers, small random for 1D
             for param in module.parameters():
                 if param.requires_grad:
-                    if param.ndimension() >= 2:  # Ensure the parameter tensor has at least 2 dimensions
-                        torch.nn.init.kaiming_uniform_(param, a=0)  # He initialization (uniform)
+                    if param.ndimension() >= 2:
+                        torch.nn.init.kaiming_uniform_(param, a=0)
                     else:
-                        param.data.uniform_(-0.01, 0.01)  # Small random uniform initialization for scalars or 1D tensors
-            tensors = [param.data for param in module.parameters()]
-            tensor = torch.cat([tensor.view(-1) for tensor in tensors])
-        else:  # Zero initialization for Adam tensors
-            tensors = [param.data for param in module.parameters()]
-            tensor = torch.cat([torch.zeros_like(tensor).view(-1) for tensor in tensors])
+                        param.data.uniform_(-0.01, 0.01)
+            all_tensors = [p.data for p in module.parameters()]
+            tensor = torch.cat([t.view(-1) for t in all_tensors])
+        else:
+            # zero-init for optimizer states
+            all_tensors = [p.data for p in module.parameters()]
+            tensor = torch.cat([torch.zeros_like(t).view(-1) for t in all_tensors])
+
         return tensor
     
     def initialize_environment(self, *args, **kwargs):
         torch.set_float32_matmul_precision('high')
+
 
 class FairscaleModelAdapter(ModelAdapter):
     def initialize_environment(self, backend='nccl'):
@@ -330,6 +352,7 @@ class FairscaleModelAdapter(ModelAdapter):
         os.environ['MASTER_PORT'] = master_port
         if not dist.is_initialized():
             dist.init_process_group(backend=backend)
+
 
 class TransformerModelAdapter(StandardModelAdapter):
     def loss_fn(self, logits, targets) -> torch.Tensor:
@@ -364,16 +387,13 @@ class TransformerModelAdapter(StandardModelAdapter):
         pass
 
 
-    # Other model_to_tensor, tensor_to_model, init_tensor methods as previously implemented.
-    # ... (Assume these are defined as in your original code.)
-
 class AdderModelAdapter(StandardModelAdapter):
     def loss_fn(self, logits, targets) -> torch.Tensor:
         return F.mse_loss(logits, targets)
 
     def preprocess_for_loss(self, logits, targets):
         if logits.shape != targets.shape:
-            raise ValueError(f"Logits shape {logits.shape} does not match targets shape {targets.shape}")
+            raise ValueError(f"Logits shape {logits.shape} != targets shape {targets.shape}")
         return logits, targets
 
     def postprocess_model_after_batch(self, model):
@@ -383,11 +403,11 @@ class AdderModelAdapter(StandardModelAdapter):
         input_tensor = torch.tensor([[2.0, 3.0]]).to(device)
         return input_tensor
 
-    # model_to_tensor, tensor_to_model, init_tensor would be implemented here as needed.
 
 class LlamaModelAdapter(TransformerModelAdapter, FairscaleModelAdapter):
     def get_forward_kwargs(self):
         return {'start_pos': 0}
+
 
 class NanoGPTModelAdapter(TransformerModelAdapter):
     def forward_and_loss(self, model, inputs, targets):

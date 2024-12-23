@@ -42,7 +42,7 @@ dataset = ShakespeareDataLoader(
 ################################################################
 # 2) Create the "DefaultSOTAdapter"
 ################################################################
-TENSOR_VERSION_INTERVAL = 36
+TENSOR_VERSION_INTERVAL = 55
 sot_adapter = DefaultSOTAdapter(
     model_adapter=model_adapter,
     dataset=dataset,
@@ -65,7 +65,7 @@ exported_plugin = StandardPlugin(
     outer_min_lr=1,
     outer_weight_decay=0.0,
     tensor_version_interval=TENSOR_VERSION_INTERVAL,
-    expected_worker_time=31,
+    expected_worker_time=45,
     max_concurrent_iterations=4,
     inner_max_lr=0.001,
     inner_min_lr=0.0001,
