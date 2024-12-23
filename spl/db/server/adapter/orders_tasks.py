@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy import select, update, desc, func, or_
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.dialects.postgresql import insert
 import json
 
 from ....models import (
@@ -70,61 +71,72 @@ class DBAdapterOrdersTasksMixin:
             await session.commit()
 
     async def create_order(self, task_id: int | None, subnet_id: int, order_type: OrderType, price: float, hold_id: int | None = None):
+        """
+        Creates either a BID or an ASK order, then calls match_bid_ask_orders().
+        Now wrapped in one transaction, with a rollback if anything fails.
+        """
         async with AsyncSessionLocal() as session:
-            user_id = self.get_user_id()
-            account = await self.get_or_create_account(user_id, session)
+            try:
+                user_id = self.get_user_id()
+                account = await self.get_or_create_account(user_id, session)
 
-            stmt_subnet = select(Subnet).where(Subnet.id == subnet_id)
-            subnet_result = await session.execute(stmt_subnet)
-            subnet = subnet_result.scalar_one_or_none()
-            if not subnet:
-                raise ValueError("subnet not found")
+                stmt_subnet = select(Subnet).where(Subnet.id == subnet_id)
+                subnet_result = await session.execute(stmt_subnet)
+                subnet = subnet_result.scalar_one_or_none()
+                if not subnet:
+                    raise ValueError("subnet not found")
 
-            if order_type == OrderType.Bid:
-                if task_id is None:
-                    raise ValueError("task_id required for bid")
-                task_stmt = select(Task).where(Task.id == task_id).options(joinedload(Task.job))
-                task_result = await session.execute(task_stmt)
-                task = task_result.scalar_one_or_none()
-                if not task or task.job.user_id != user_id:
-                    raise PermissionError("only the job owner can submit bids")
+                if order_type == OrderType.Bid:
+                    if task_id is None:
+                        raise ValueError("task_id required for bid")
+                    task_stmt = select(Task).where(Task.id == task_id).options(joinedload(Task.job))
+                    task_result = await session.execute(task_stmt)
+                    task = task_result.scalar_one_or_none()
+                    if not task or task.job.user_id != user_id:
+                        raise PermissionError("only the job owner can submit bids")
 
-                hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
-                new_order = Order(
-                    order_type=order_type,
-                    price=price,
-                    subnet_id=subnet_id,
-                    user_id=user_id,
-                    account_id=account.id,
-                    bid_task_id=task_id
-                )
-                session.add(new_order)
-                await session.flush()
-                await self.reserve_funds_on_hold(session, hold, price, new_order)
-                new_order.hold_id = hold.id
+                    hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
+                    new_order = Order(
+                        order_type=order_type,
+                        price=price,
+                        subnet_id=subnet_id,
+                        user_id=user_id,
+                        account_id=account.id,
+                        bid_task_id=task_id
+                    )
+                    session.add(new_order)
+                    await session.flush()
+                    await self.reserve_funds_on_hold(session, hold, price, new_order)
+                    new_order.hold_id = hold.id
 
-            elif order_type == OrderType.Ask:
-                if task_id is not None:
-                    raise ValueError("task_id must be None for ask")
-                hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
-                new_order = Order(
-                    order_type=order_type,
-                    price=price,
-                    subnet_id=subnet_id,
-                    user_id=user_id,
-                    account_id=account.id
-                )
-                session.add(new_order)
-                await session.flush()
-                stake_amount = subnet.stake_multiplier * price
-                await self.reserve_funds_on_hold(session, hold, stake_amount, new_order)
-                new_order.hold_id = hold.id
-            else:
-                raise ValueError("invalid order type")
+                elif order_type == OrderType.Ask:
+                    if task_id is not None:
+                        raise ValueError("task_id must be None for ask")
+                    hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
+                    new_order = Order(
+                        order_type=order_type,
+                        price=price,
+                        subnet_id=subnet_id,
+                        user_id=user_id,
+                        account_id=account.id
+                    )
+                    session.add(new_order)
+                    await session.flush()
+                    stake_amount = subnet.stake_multiplier * price
+                    await self.reserve_funds_on_hold(session, hold, stake_amount, new_order)
+                    new_order.hold_id = hold.id
+                else:
+                    raise ValueError("invalid order type")
 
-            await self.match_bid_ask_orders(session, subnet_id)
-            await session.commit()
-            return new_order.id
+                # Important: match in the same transaction with row-level locking
+                await self.match_bid_ask_orders(session, subnet_id)
+
+                await session.commit()
+                return new_order.id
+
+            except Exception:
+                await session.rollback()
+                raise
 
     async def get_num_orders(self, subnet_id: int, order_type: str, matched: bool | None) -> int:
         async with AsyncSessionLocal() as session:
@@ -149,84 +161,111 @@ class DBAdapterOrdersTasksMixin:
             return {'num_orders': result.scalar_one()}
 
     async def create_bids_and_tasks(self, job_id: int, num_tasks: int, price: float, params: str, hold_id: int | None):
+        """
+        Create tasks + BIDs for each, then do a match. All in one transaction.
+        """
         async with AsyncSessionLocal() as session:
-            stmt = select(Job).filter_by(id=job_id).options(joinedload(Job.subnet))
-            result = await session.execute(stmt)
-            job = result.scalar_one_or_none()
-            if not job:
-                raise ValueError(f"Job {job_id} not found.")
+            try:
+                stmt = select(Job).filter_by(id=job_id).options(joinedload(Job.subnet))
+                result = await session.execute(stmt)
+                job = result.scalar_one_or_none()
+                if not job:
+                    raise ValueError(f"Job {job_id} not found.")
 
-            user_id = job.user_id
-            account = await self.get_or_create_account(user_id, session)
+                user_id = job.user_id
+                account = await self.get_or_create_account(user_id, session)
 
-            created_items = []
-            for i in range(num_tasks):
-                job.iteration += 1
-                new_task = Task(
-                    job_id=job_id,
-                    job_iteration=job.iteration,
-                    status=TaskStatus.SelectingSolver,
-                    params=params
-                )
-                session.add(new_task)
-                await session.flush()
+                created_items = []
+                for _ in range(num_tasks):
+                    job.iteration += 1
+                    new_task = Task(
+                        job_id=job_id,
+                        job_iteration=job.iteration,
+                        status=TaskStatus.SelectingSolver,
+                        params=params
+                    )
+                    session.add(new_task)
+                    await session.flush()
 
-                hold = await self.select_hold_for_order(session, account, job.subnet, OrderType.Bid, price, hold_id)
-                new_bid = Order(
-                    bid_task=new_task,
-                    order_type=OrderType.Bid,
-                    account_id=account.id,
-                    price=price,
-                    subnet_id=job.subnet_id,
-                    user_id=user_id,
-                )
-                session.add(new_bid)
-                await session.flush()
-                await self.reserve_funds_on_hold(session, hold, price, new_bid)
-                new_bid.hold_id = hold.id
+                    hold = await self.select_hold_for_order(session, account, job.subnet, OrderType.Bid, price, hold_id)
+                    new_bid = Order(
+                        bid_task=new_task,
+                        order_type=OrderType.Bid,
+                        account_id=account.id,
+                        price=price,
+                        subnet_id=job.subnet_id,
+                        user_id=user_id,
+                    )
+                    session.add(new_bid)
+                    await session.flush()
+                    await self.reserve_funds_on_hold(session, hold, price, new_bid)
+                    new_bid.hold_id = hold.id
 
-                created_items.append({
-                    "task_id": new_task.id,
-                    "bid_id": new_bid.id
-                })
+                    created_items.append({
+                        "task_id": new_task.id,
+                        "bid_id": new_bid.id
+                    })
 
-            await self.match_bid_ask_orders(session, job.subnet_id)
-            await session.commit()
-            return {'created_items': created_items}
+                # Attempt to match in the same transaction
+                await self.match_bid_ask_orders(session, job.subnet_id)
+                await session.commit()
+
+                return {'created_items': created_items}
+            except Exception:
+                await session.rollback()
+                raise
 
     async def delete_order(self, order_id: int):
+        """
+        Delete an order if not matched, then re-run match to fill others.
+        """
         async with AsyncSessionLocal() as session:
-            stmt = select(Order).filter_by(id=order_id)
-            result = await session.execute(stmt)
-            order = result.scalar_one_or_none()
-            if not order or order.user_id != self.get_user_id():
-                raise PermissionError("no access to delete this order.")
+            try:
+                stmt = select(Order).filter_by(id=order_id)
+                result = await session.execute(stmt)
+                order = result.scalar_one_or_none()
+                if not order or order.user_id != self.get_user_id():
+                    raise PermissionError("no access to delete this order.")
 
-            subnet_stmt = select(Subnet).filter_by(id=order.subnet_id)
-            subnet_result = await session.execute(subnet_stmt)
-            subnet = subnet_result.scalar_one_or_none()
-            if not subnet:
-                raise ValueError("Subnet not found")
+                subnet_stmt = select(Subnet).filter_by(id=order.subnet_id)
+                subnet_result = await session.execute(subnet_stmt)
+                subnet = subnet_result.scalar_one_or_none()
+                if not subnet:
+                    raise ValueError("Subnet not found")
 
-            if order.order_type == OrderType.Bid and order.bid_task and order.bid_task.ask is not None:
-                raise ValueError("Cannot delete bid order since it's matched.")
-            if order.order_type == OrderType.Ask and order.ask_task and order.ask_task.bid is not None:
-                raise ValueError("Cannot delete ask order since it's matched.")
+                if order.order_type == OrderType.Bid and order.bid_task and order.bid_task.ask is not None:
+                    raise ValueError("Cannot delete bid order since it's matched.")
+                if order.order_type == OrderType.Ask and order.ask_task and order.ask_task.bid is not None:
+                    raise ValueError("Cannot delete ask order since it's matched.")
 
-            if order.order_type == OrderType.Bid:
-                amount_to_reverse = order.price
-            else:
-                amount_to_reverse = subnet.stake_multiplier * order.price
+                if order.order_type == OrderType.Bid:
+                    amount_to_reverse = order.price
+                else:
+                    amount_to_reverse = subnet.stake_multiplier * order.price
 
-            if order.hold:
-                await self.free_funds_from_hold(session, order.hold, amount_to_reverse, order)
-            else:
-                raise ValueError("no hold found for this order")
+                if order.hold:
+                    await self.free_funds_from_hold(session, order.hold, amount_to_reverse, order)
+                else:
+                    raise ValueError("no hold found for this order")
 
-            await session.delete(order)
-            await session.commit()
+                await session.delete(order)
+
+                # Attempt to re-match in the same transaction
+                await self.match_bid_ask_orders(session, subnet.id)
+
+                await session.commit()
+
+            except Exception:
+                await session.rollback()
+                raise
 
     async def match_bid_ask_orders(self, session: AsyncSession, subnet_id: int):
+        """
+        The core matching function: now uses row-level locks (with_for_update)
+        to prevent concurrency issues. 
+        """
+        # Acquire row-level locks so no other transaction can read/modify these 
+        # same rows at the same time.
         bid_orders_stmt = (
             select(Order)
             .join(Task, Task.id == Order.bid_task_id)
@@ -235,6 +274,7 @@ class DBAdapterOrdersTasksMixin:
                 Order.order_type == OrderType.Bid,
                 Task.ask == None
             )
+            .with_for_update()   # <-- row-level lock
             .options(joinedload(Order.bid_task))
         )
 
@@ -245,6 +285,7 @@ class DBAdapterOrdersTasksMixin:
                 Order.order_type == OrderType.Ask,
                 Order.ask_task_id == None
             )
+            .with_for_update()   # <-- row-level lock
             .options(joinedload(Order.ask_task))
         )
 
@@ -254,17 +295,23 @@ class DBAdapterOrdersTasksMixin:
         bid_orders = bid_orders_result.scalars().all()
         ask_orders = ask_orders_result.scalars().all()
 
+        # Try matching
         for bid in bid_orders:
             for ask in ask_orders:
                 if bid.price >= ask.price:
                     bid_task = bid.bid_task
+                    # set relationships
                     bid_task.ask = ask
                     bid_task.status = TaskStatus.SolverSelected
                     bid_task.time_solver_selected = datetime.utcnow()
                     session.add(bid_task)
 
+                    # remove the matched ask from the local list so we don't reuse it
                     ask_orders.remove(ask)
                     break
+
+        # flush here (commit/rollback is done by the caller)
+        await session.flush()
 
     async def get_task(self, task_id: int):
         async with AsyncSessionLocal() as session:
@@ -336,6 +383,7 @@ class DBAdapterOrdersTasksMixin:
             if not task:
                 raise ValueError("Task not found")
 
+            # The key check:
             if not task.ask:
                 raise PermissionError("No solver assignment")
 
@@ -357,7 +405,6 @@ class DBAdapterOrdersTasksMixin:
             await session.commit()
             return {'success': True}
 
-
     async def finalize_check(self, task_id: int):
         # This is called after the long checking process is done
         async with AsyncSessionLocal() as session:
@@ -377,10 +424,8 @@ class DBAdapterOrdersTasksMixin:
 
             invalid = await self.check_invalid(task)
             if invalid:
-                # resolve incorrect
                 await self.resolve_task(session, task, task.result, correct=False)
             else:
-                # resolve correct
                 await self.resolve_task(session, task, task.result, correct=True)
             await session.commit()
 
@@ -401,27 +446,20 @@ class DBAdapterOrdersTasksMixin:
             await self.handle_incorrect_resolution_scenario(session, task)
 
     async def handle_incorrect_resolution_scenario(self, session: AsyncSession, task: Task):
-        # This logic previously existed in handle_dispute_scenario.
-        # "Resolving incorrect" means the solver loses their stake, and the bidder is not penalized.
-        # The original handle_dispute_scenario does exactly that, so we reuse it here.
-
         ask_order = task.ask
         if not ask_order:
             raise ValueError("No ask order for incorrect scenario")
         if not ask_order.hold:
             raise ValueError("No hold for ask order in incorrect scenario")
 
-        # Charge solver hold fully
         await self.charge_hold_fully(session, ask_order.hold, add_leftover_to_account=False)
 
         stake_amount = task.job.subnet.stake_multiplier * ask_order.price
         if stake_amount > ask_order.hold.used_amount:
             raise ValueError("data inconsistency in stake vs hold used")
 
-        # Solver loses their stake: that stake is taken by the platform as revenue
         await self.add_platform_revenue(session, stake_amount, PlatformRevenueTxnType.Add)
 
-        # If there's leftover in the solver hold after taking stake, return it to solver
         leftover = ask_order.hold.total_amount - stake_amount
         if leftover > 0:
             stmt = select(Account).where(Account.id == ask_order.hold.account_id)
@@ -430,7 +468,6 @@ class DBAdapterOrdersTasksMixin:
             if solver_account:
                 await self.add_credits_transaction(session, solver_account, leftover, CreditTxnType.Add)
 
-        # Bidder does not get penalized, so free bidder hold and return their entire amount
         bid_order = task.bid
         if bid_order and bid_order.hold:
             await self.free_funds_from_hold(session, bid_order.hold, bid_order.price, bid_order)
@@ -458,7 +495,6 @@ class DBAdapterOrdersTasksMixin:
         if not ask_order.hold.charged:
             await self.charge_hold_fully(session, ask_order.hold)
 
-        # Return solver stake to solver
         await self.free_funds_from_hold(session, ask_order.hold, stake_amount, ask_order)
 
         solver_user_id = ask_order.user_id
