@@ -16,6 +16,7 @@ async def main(sot_id, db_url, private_key, job_id, plugin_id, perm, port):
     # get the plugin
     plugin = await get_plugin(plugin_id, DBAdapterClient(db_url, private_key), port)
     # initialize the adapter; now it will start serving
+    # We do NOT impose any custom timeouts here:
     await plugin.call_submodule(
         'sot_adapter',
         'initialize',

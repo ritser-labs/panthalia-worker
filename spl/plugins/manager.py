@@ -40,7 +40,12 @@ class PluginProxy:
         self.host = host
         self.port = port
         self.base_url = f"http://{host}:{port}/execute"
-        self.session = aiohttp.ClientSession()
+
+        # ---------- ADDED: Indefinite timeout to avoid session-level timeouts ----------
+        # We simply give a None total timeout so the plugin can take as long as needed.
+        timeout = aiohttp.ClientTimeout(total=None)
+        self.session = aiohttp.ClientSession(timeout=timeout)
+        # ------------------------------------------------------------------------------
 
     async def call_remote(self, function, args=None, kwargs=None):
         payload = {
@@ -82,7 +87,6 @@ class PluginProxy:
         async def method(*args, **kwargs):
             return await self.call_remote(name, args=args, kwargs=kwargs)
         return method
-
 
 async def get_plugin(plugin_id, db_adapter, forwarded_port=None):
     global last_plugin_id, last_plugin_proxy
@@ -145,7 +149,7 @@ def copy_if_missing(src, dst):
     if os.path.exists(src) and not os.path.exists(dst):
         # Ensure the parent directories of the destination path exist
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        
+
         if os.path.isdir(src):
             shutil.copytree(src, dst)
             logger.info(f"Copied directory from {src} to {dst}")
@@ -290,7 +294,6 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port, forwa
     plugin_proxy = PluginProxy(host='localhost', port=host_port)
     logger.info(f"Plugin proxy created for plugin '{plugin_id}' at {server_url}")
     return plugin_proxy
-
 
 def get_port(plugin_id):
     try:
