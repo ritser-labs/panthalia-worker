@@ -401,6 +401,27 @@ async def get_withdrawals_for_user():
     wds = await db_adapter_server.get_withdrawals_for_user(user_id)
     return jsonify([wd.as_dict() for wd in wds]), 200
 
+
+@app.route('/get_job_state', methods=['GET'])
+@require_params('job_id')
+@handle_errors
+async def get_job_state():
+    job_id = int(request.args.get('job_id'))
+    state = await db_adapter_server.get_job_state(job_id)
+    return jsonify(state), 200
+
+@app.route('/update_job_state', methods=['POST'])
+@handle_errors
+@require_json_keys('job_id', 'new_state')
+async def update_job_state(*args, **kwargs):
+    data = kwargs['data']
+    job_id = data['job_id']
+    new_state = data['new_state']  # should be a dict
+    if not isinstance(new_state, dict):
+        return jsonify({'error': 'new_state must be a dict'}), 400
+    await db_adapter_server.update_job_state(job_id, new_state)
+    return jsonify({'success': True}), 200
+
 @app.route('/update_withdrawal_status', methods=['POST'])
 @require_json_keys('withdrawal_id', 'new_status')
 @handle_errors
@@ -415,3 +436,4 @@ async def update_withdrawal_status():
         return jsonify({'error': f"Invalid withdrawal status: {new_status_str}"}), 400
     await db_adapter_server.update_withdrawal_status(withdrawal_id, new_status)
     return jsonify({'success': True}), 200
+
