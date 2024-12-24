@@ -1,3 +1,5 @@
+# spl/db/server/routes.py
+
 import logging
 import traceback
 from functools import wraps
@@ -7,7 +9,7 @@ from inspect import signature
 from typing import get_type_hints, Dict, Any, Union, get_origin, get_args
 import types
 
-from ...models import TaskStatus, PermType, ServiceType
+from ...models import TaskStatus, PermType, ServiceType, WithdrawalStatus
 from ...auth.api_auth import requires_authentication
 from ...auth.server_auth import requires_user_auth
 from ...util.enums import str_to_enum
@@ -82,7 +84,6 @@ def convert_to_type(value, expected_type):
         return [convert_to_type(v, inner_type) for v in value]
 
     if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
-        # Try each type in the union until one succeeds.
         for sub_type in get_args(expected_type):
             try:
                 return convert_to_type(value, sub_type)
@@ -90,7 +91,6 @@ def convert_to_type(value, expected_type):
                 continue
         raise ValueError(f"Cannot convert {value} to any of {get_args(expected_type)}")
 
-    # Explicit boolean handling
     if expected_type is bool and isinstance(value, str):
         lower_val = value.lower()
         if lower_val in ['true', '1']:
@@ -376,22 +376,42 @@ app.route('/finalize_sanity_check', methods=['POST'], endpoint='finalize_sanity_
     create_post_route(db_adapter_server.finalize_sanity_check, ['task_id', 'is_valid'], 'success')
 )
 
+##
+# NEW: Pending Withdrawal endpoints
+##
+@app.route('/create_withdrawal', methods=['POST'])
+@require_json_keys('user_id', 'amount')
+@handle_errors
+async def create_withdrawal():
+    data = await request.get_json()
+    user_id = data['user_id']
+    amount = float(data['amount'])
+    try:
+        withdrawal_id = await db_adapter_server.create_withdrawal_request(user_id, amount)
+        return jsonify({'withdrawal_id': withdrawal_id}), 200
+    except Exception as e:
+        logger.error(f"create_withdrawal error: {e}")
+        return jsonify({'error': str(e)}), 400
+
 @app.route('/get_job_state', methods=['GET'])
 @require_params('job_id')
 @handle_errors
-async def get_job_state():
-    job_id = int(request.args.get('job_id'))
-    state = await db_adapter_server.get_job_state(job_id)
-    return jsonify(state), 200
+async def get_withdrawals_for_user():
+    user_id = request.args.get('user_id')
+    wds = await db_adapter_server.get_withdrawals_for_user(user_id)
+    return jsonify([wd.as_dict() for wd in wds]), 200
 
-@app.route('/update_job_state', methods=['POST'])
+@app.route('/update_withdrawal_status', methods=['POST'])
+@require_json_keys('withdrawal_id', 'new_status')
 @handle_errors
-@require_json_keys('job_id', 'new_state')
-async def update_job_state(*args, **kwargs):
-    data = kwargs['data']
-    job_id = data['job_id']
-    new_state = data['new_state']  # should be a dict
-    if not isinstance(new_state, dict):
-        return jsonify({'error': 'new_state must be a dict'}), 400
-    await db_adapter_server.update_job_state(job_id, new_state)
+async def update_withdrawal_status():
+    data = await request.get_json()
+    withdrawal_id = data['withdrawal_id']
+    new_status_str = data['new_status']
+    # Convert string -> enum
+    try:
+        new_status = WithdrawalStatus[new_status_str.upper()]
+    except KeyError:
+        return jsonify({'error': f"Invalid withdrawal status: {new_status_str}"}), 400
+    await db_adapter_server.update_withdrawal_status(withdrawal_id, new_status)
     return jsonify({'success': True}), 200

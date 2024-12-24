@@ -8,11 +8,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from .enums import (
     ServiceType, PermType, OrderType, AccountTxnType, HoldType,
-    CreditTxnType, EarningsTxnType, PlatformRevenueTxnType
+    CreditTxnType, EarningsTxnType, PlatformRevenueTxnType, WithdrawalStatus
 )
 from ..common import TaskStatus
 from . import Base
 import enum
+from ..common import device
 
 class Serializable(Base):
     __abstract__ = True
@@ -55,7 +56,6 @@ class Job(TimestampMixin, Serializable):
     sot_url = Column(String, nullable=False)
     done = Column(Boolean, nullable=False, default=False)
     iteration = Column(Integer, nullable=False)
-    # NEW: A JSON column to store arbitrary dictionary for SOT/Master state
     state_json = Column(JSON, nullable=True, default={})
 
     plugin = relationship("Plugin", back_populates="jobs")
@@ -146,6 +146,11 @@ class Account(Serializable):
     credit_transactions = relationship("CreditTransaction", back_populates="account")
     earnings_transactions = relationship("EarningsTransaction", back_populates="account")
 
+    ##
+    # NEW: Relationship for pending withdrawals
+    ##
+    withdrawals = relationship("PendingWithdrawal", back_populates="account")
+
 class AccountKey(Serializable):
     __tablename__ = 'account_keys'
     id = Column(Integer, primary_key=True, index=True)
@@ -231,3 +236,18 @@ class PlatformRevenue(Serializable):
     amount = Column(Float, nullable=False)
     txn_type = Column(Enum(PlatformRevenueTxnType), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+
+##
+# NEW: PendingWithdrawal table
+##
+class PendingWithdrawal(Serializable):
+    __tablename__ = 'pending_withdrawals'
+    id = Column(Integer, primary_key=True, index=True)
+    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
+    user_id = Column(String, nullable=False, index=True)
+    amount = Column(Float, nullable=False)
+    status = Column(Enum(WithdrawalStatus), nullable=False, default=WithdrawalStatus.PENDING)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+
+    account = relationship("Account", back_populates="withdrawals")

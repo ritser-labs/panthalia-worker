@@ -1,3 +1,5 @@
+# spl/models/enums.py
+
 import enum
 
 class ServiceType(enum.Enum):
@@ -34,3 +36,11 @@ class EarningsTxnType(enum.Enum):
 class PlatformRevenueTxnType(enum.Enum):
     Add = "add"
     Subtract = "subtract"
+
+##
+# NEW WITHDRAWAL STATUS ENUM
+##
+class WithdrawalStatus(enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"

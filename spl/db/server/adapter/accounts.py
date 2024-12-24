@@ -1,3 +1,5 @@
+# spl/db/server/adapter/accounts.py
+
 import logging
 from datetime import datetime
 from sqlalchemy import select
@@ -7,12 +9,17 @@ from eth_account import Account as EthAccount
 from ....models import (
     AsyncSessionLocal, Account, CreditTransaction, CreditTxnType,
     EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType,
-    AccountKey
+    AccountKey, PendingWithdrawal, WithdrawalStatus
 )
 
 logger = logging.getLogger(__name__)
 
 class DBAdapterAccountsMixin:
+    ##
+    # We'll define a minimum amount needed for any withdrawal
+    ##
+    MINIMUM_PAYOUT_AMOUNT = 50.0
+
     async def get_or_create_account(self, user_id: str, session: AsyncSession = None):
         own_session = False
         if session is None:
@@ -79,12 +86,10 @@ class DBAdapterAccountsMixin:
         )
         session.add(new_rev)
 
-    async def maybe_payout_earnings(self, session: AsyncSession, account: Account):
-        MINIMUM_PAYOUT_AMOUNT = 50.0
-        if account.earnings_balance >= MINIMUM_PAYOUT_AMOUNT:
-            payout_amount = account.earnings_balance
-            account.earnings_balance = 0.0
-            logger.debug(f"Payout {payout_amount} to {account.user_id}")
+    ##
+    # REMOVED maybe_payout_earnings
+    # (This system is replaced by create_withdrawal_request.)
+    ##
 
     async def admin_deposit_account(self, user_id: str, amount: float):
         async with AsyncSessionLocal() as session:
@@ -144,4 +149,72 @@ class DBAdapterAccountsMixin:
             if not account_key or account_key.user_id != user_id:
                 raise PermissionError("No access to delete this account key.")
             await session.delete(account_key)
+            await session.commit()
+
+    ##
+    # NEW WITHDRAWALS:
+    ##
+    async def create_withdrawal_request(self, user_id: str, amount: float) -> int:
+        """
+        Creates a new PendingWithdrawal for the given user with the requested amount,
+        only subtracting from earnings_balance.
+        Also enforces MINIMUM_PAYOUT_AMOUNT.
+        """
+        if amount < self.MINIMUM_PAYOUT_AMOUNT:
+            raise ValueError(f"Cannot withdraw less than the minimum {self.MINIMUM_PAYOUT_AMOUNT}")
+
+        async with AsyncSessionLocal() as session:
+            account = await self.get_or_create_account(user_id, session)
+            # Only subtract from earnings_balance:
+            if account.earnings_balance < amount:
+                raise ValueError("insufficient earnings to request withdrawal")
+
+            account.earnings_balance -= amount
+
+            new_withdrawal = PendingWithdrawal(
+                account_id=account.id,
+                user_id=user_id,
+                amount=amount,
+            )
+            session.add(new_withdrawal)
+
+            await session.commit()
+            await session.refresh(new_withdrawal)
+            return new_withdrawal.id
+
+    async def get_withdrawal(self, withdrawal_id: int) -> PendingWithdrawal | None:
+        async with AsyncSessionLocal() as session:
+            stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def get_withdrawals_for_user(self, user_id: str) -> list[PendingWithdrawal]:
+        async with AsyncSessionLocal() as session:
+            stmt = select(PendingWithdrawal).where(PendingWithdrawal.user_id == user_id)
+            result = await session.execute(stmt)
+            return result.scalars().all()
+
+    async def update_withdrawal_status(self, withdrawal_id: int, new_status: WithdrawalStatus):
+        """
+        Approve or reject a pending withdrawal. If rejected, refund user. If approved, do nothing else here
+        (you might do a real payment or queue it).
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
+            result = await session.execute(stmt)
+            withdrawal = result.scalar_one_or_none()
+            if not withdrawal:
+                raise ValueError(f"Withdrawal {withdrawal_id} not found.")
+
+            if new_status == WithdrawalStatus.REJECTED and withdrawal.status == WithdrawalStatus.PENDING:
+                # Return the funds to user (earnings_balance).
+                acct_stmt = select(Account).where(Account.id == withdrawal.account_id)
+                acct_result = await session.execute(acct_stmt)
+                account = acct_result.scalar_one_or_none()
+                if account:
+                    account.earnings_balance += withdrawal.amount
+
+            withdrawal.status = new_status
+            withdrawal.updated_at = datetime.utcnow()
+            session.add(withdrawal)
             await session.commit()

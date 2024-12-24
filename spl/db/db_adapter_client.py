@@ -12,14 +12,13 @@ from datetime import datetime, timezone
 from typeguard import typechecked
 
 from ..models import (
-    Job, Plugin, Subnet, Task, TaskStatus, Perm, Sot, Instance, ServiceType, Base, PermType
+    Job, Plugin, Subnet, Task, TaskStatus, Perm, Sot, Instance, ServiceType, Base, PermType,
+    PendingWithdrawal
 )
 
 logger = logging.getLogger(__name__)
 
-# Generic Type for SQLAlchemy models
 T = TypeVar('T', bound=Base)
-
 
 class DBAdapterClient:
     @typechecked
@@ -161,29 +160,21 @@ class DBAdapterClient:
         data = {
             'subnet_id': subnet_id
         }
-        response = await self._authenticated_request(
-            'GET', '/get_assigned_tasks', params=data,
-        )
+        response = await self._authenticated_request('GET', '/get_assigned_tasks', params=data)
         if 'assigned_tasks' not in response:
             return None
         return [self._deserialize(Task, task) for task in response.get('assigned_tasks')]
 
     @typechecked
     async def get_num_orders(self, subnet_id: int, order_type: str, matched: Optional[bool]) -> Optional[int]:
-        # Convert bool to string to avoid TypeError from yarl
         params = {
             'subnet_id': subnet_id,
             'order_type': order_type
         }
         if matched is not None:
-            # Convert the boolean to a string representation ('true'/'false')
             params['matched'] = str(matched).lower()
 
-        response = await self._authenticated_request(
-            'GET',
-            '/get_num_orders',
-            params=params,
-        )
+        response = await self._authenticated_request('GET', '/get_num_orders', params=params)
         return response.get('num_orders')
 
     @typechecked
@@ -241,7 +232,7 @@ class DBAdapterClient:
             'result': result
         }
         response = await self._authenticated_request('POST', '/submit_task_result', data=data)
-        return response['success']
+        return response.get('success', False)
 
     @typechecked
     async def create_order(self, task_id: int | None, subnet_id: int, order_type: str, price: float, hold_id: Optional[int]) -> Optional[int]:
@@ -284,7 +275,6 @@ class DBAdapterClient:
         if isinstance(response, dict) and 'account_key_id' in response and isinstance(response['account_key_id'], int):
             return response['account_key_id']
         return None
-
 
     @typechecked
     async def admin_create_account_key(self, user_id: str) -> Optional[Dict[str, Any]]:
@@ -359,7 +349,6 @@ class DBAdapterClient:
             'last_nonce': last_nonce
         }
         response = await self._authenticated_request('POST', '/set_last_nonce', data=data)
-        # If 'perm' is returned, consider it successful.
         return isinstance(response, dict) and 'perm' in response
 
     @typechecked
@@ -440,17 +429,13 @@ class DBAdapterClient:
     async def create_state_update(self, job_id: int, data: Dict[str, Any]) -> Optional[int]:
         payload = {
             'job_id': job_id,
-            'data': data  # Pass the dictionary directly
+            'data': data
         }
         response = await self._authenticated_request('POST', '/create_state_update', data=payload)
         return self._extract_id(response, 'state_update_id')
 
     @typechecked
     async def get_state_for_job(self, job_id: int) -> dict:
-        """
-        GET /get_job_state?job_id=JOB_ID
-        Returns the dict stored in jobs.state_json
-        """
         params = {'job_id': str(job_id)}
         response = await self._authenticated_request('GET', '/get_job_state', params=params)
         if 'error' in response:
@@ -462,10 +447,6 @@ class DBAdapterClient:
 
     @typechecked
     async def update_state_for_job(self, job_id: int, new_state_data: dict) -> bool:
-        """
-        POST /update_job_state
-        JSON body: { "job_id": X, "new_state": {...} }
-        """
         data = {
             'job_id': job_id,
             'new_state': new_state_data
@@ -476,7 +457,7 @@ class DBAdapterClient:
             return False
         return True
 
-
+    # Internal helper for retrieving single entity
     async def _fetch_entity(self, endpoint: str, model_cls: Type[T], data: Optional[dict] = None, params: Optional[dict] = None) -> Optional[T]:
         response = await self._authenticated_request('GET', endpoint, data=data, params=params)
         if 'error' in response:
@@ -498,9 +479,43 @@ class DBAdapterClient:
         if not date_str:
             return None
         try:
-            # parse the exact string format with timezone
+            from datetime import datetime
             dt = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
-            return dt.replace(tzinfo=timezone.utc)  # ensure it's utc
+            return dt.replace(tzinfo=timezone.utc)
         except ValueError:
             logger.error(f"failed to parse datetime string: {date_str}")
             return None
+
+    ##
+    # NEW: Withdrawals
+    ##
+    @typechecked
+    async def create_withdrawal(self, user_id: str, amount: float) -> Optional[int]:
+        data = {
+            'user_id': user_id,
+            'amount': amount
+        }
+        resp = await self._authenticated_request('POST', '/create_withdrawal', data=data)
+        return self._extract_id(resp, 'withdrawal_id')
+
+    @typechecked
+    async def get_withdrawal(self, withdrawal_id: int) -> Optional[PendingWithdrawal]:
+        return await self._fetch_entity('/get_withdrawal', PendingWithdrawal, params={'withdrawal_id': withdrawal_id})
+
+    @typechecked
+    async def get_withdrawals_for_user(self, user_id: str) -> List[PendingWithdrawal]:
+        response = await self._authenticated_request('GET', '/get_withdrawals_for_user', params={'user_id': user_id})
+        if 'error' in response:
+            logger.error(response['error'])
+            return []
+        # parse list:
+        return [self._deserialize(PendingWithdrawal, item) for item in response]
+
+    @typechecked
+    async def update_withdrawal_status(self, withdrawal_id: int, new_status: str) -> bool:
+        data = {
+            'withdrawal_id': withdrawal_id,
+            'new_status': new_status
+        }
+        resp = await self._authenticated_request('POST', '/update_withdrawal_status', data=data)
+        return 'success' in resp
