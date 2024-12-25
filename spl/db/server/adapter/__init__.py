@@ -24,6 +24,7 @@ class DBAdapterServer(
     DBAdapterStripeBillingMixin
 ):
     def __init__(self, user_id_getter=None):
+        super().__init__()
         if user_id_getter is None:
             user_id_getter = default_get_user_id
         self._user_id_getter = user_id_getter
