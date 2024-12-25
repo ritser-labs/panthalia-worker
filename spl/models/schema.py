@@ -222,6 +222,7 @@ class CreditTransaction(Serializable):
     user_id = Column(String, nullable=False, index=True)
     amount = Column(Float, nullable=False)
     txn_type = Column(Enum(CreditTxnType), nullable=False)
+    reason = Column(String, nullable=True)                  # e.g. "stripe_deposit"
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     account = relationship("Account", back_populates="credit_transactions")
 
@@ -256,3 +257,20 @@ class PendingWithdrawal(Serializable):
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     account = relationship("Account", back_populates="withdrawals")
+
+class StripeDeposit(Base):
+    __tablename__ = "stripe_deposits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    deposit_amount = Column(Float, nullable=False)
+    stripe_session_id = Column(String, nullable=False, unique=True, index=True)
+    status = Column(String, nullable=False, default="pending")
+
+    # Link to the transaction created once the deposit is actually applied
+    credit_transaction_id = Column(Integer, ForeignKey("credit_transactions.id"), nullable=True)
+    credit_transaction = relationship("CreditTransaction", backref="stripe_deposit")
+
+    # timestamps
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))

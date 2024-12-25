@@ -9,7 +9,7 @@ from eth_account import Account as EthAccount
 from ....models import (
     AsyncSessionLocal, Account, CreditTransaction, CreditTxnType,
     EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType,
-    AccountKey, PendingWithdrawal, WithdrawalStatus
+    AccountKey, PendingWithdrawal, WithdrawalStatus, StripeDeposit
 )
 
 logger = logging.getLogger(__name__)
@@ -218,3 +218,103 @@ class DBAdapterAccountsMixin:
             withdrawal.updated_at = datetime.utcnow()
             session.add(withdrawal)
             await session.commit()
+
+    async def create_stripe_deposit(self, user_id: str, deposit_amount: float, session_id: str) -> int:
+        """
+        Insert a row in stripe_deposits with status='pending'.
+        Returns the deposit ID.
+        """
+        async with AsyncSessionLocal() as session:
+            new_dep = StripeDeposit(
+                user_id=user_id,
+                deposit_amount=deposit_amount,
+                stripe_session_id=session_id,
+                status='pending'
+            )
+            session.add(new_dep)
+            await session.commit()
+            await session.refresh(new_dep)
+            logger.info(f"[create_stripe_deposit] Created deposit id={new_dep.id} for user={user_id}, amt={deposit_amount}")
+            return new_dep.id
+
+    async def mark_stripe_deposit_completed(self, stripe_session_id: str) -> StripeDeposit | None:
+        """
+        Mark the deposit row as 'completed' if it's pending.
+        Returns the StripeDeposit object or None if not found.
+        If already completed, returns the deposit object unchanged.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(StripeDeposit).where(StripeDeposit.stripe_session_id == stripe_session_id)
+            result = await session.execute(stmt)
+            dep_obj = result.scalar_one_or_none()
+            if not dep_obj:
+                return None
+
+            if dep_obj.status == 'completed':
+                # Already done
+                return dep_obj
+
+            dep_obj.status = 'completed'
+            await session.commit()
+            await session.refresh(dep_obj)
+            logger.info(f"[mark_stripe_deposit_completed] Deposit {dep_obj.id} marked completed.")
+            return dep_obj
+
+    async def create_credit_transaction_for_user(
+        self, user_id: str, amount: float, reason: str, txn_type: CreditTxnType
+    ) -> CreditTransaction:
+        """
+        Creates a new credit transaction row (with given txn_type),
+        and increments (or decrements) the user's account balance accordingly.
+        Returns the newly created CreditTransaction object.
+        """
+        async with AsyncSessionLocal() as session:
+            # fetch or create the account row
+            stmt_acc = select(Account).where(Account.user_id == user_id)
+            res_acc = await session.execute(stmt_acc)
+            acc_obj = res_acc.scalar_one_or_none()
+            if not acc_obj:
+                raise ValueError(f"No Account found for user_id={user_id}")
+
+            # adjust balance
+            if txn_type == CreditTxnType.Add:
+                acc_obj.credits_balance += amount
+            elif txn_type == CreditTxnType.Subtract:
+                if acc_obj.credits_balance < amount:
+                    raise ValueError(
+                        f"Insufficient balance to subtract {amount} for user {user_id}"
+                    )
+                acc_obj.credits_balance -= amount
+
+            new_tx = CreditTransaction(
+                user_id=user_id,
+                amount=amount,
+                txn_type=txn_type,
+                reason=reason
+            )
+            session.add(new_tx)
+
+            # commit both account update + transaction
+            await session.commit()
+            await session.refresh(new_tx)
+            logger.info(f"[create_credit_transaction_for_user] user={user_id}, type={txn_type}, amount={amount}, tx_id={new_tx.id}")
+
+            return new_tx
+
+    async def link_deposit_to_transaction(self, deposit_id: int, credit_tx_id: int) -> StripeDeposit:
+        """
+        Store credit_transaction_id in the StripeDeposit row.
+        Returns the updated deposit object.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(StripeDeposit).where(StripeDeposit.id == deposit_id)
+            result = await session.execute(stmt)
+            dep_obj = result.scalar_one_or_none()
+            if not dep_obj:
+                raise ValueError(f"No StripeDeposit found with id={deposit_id}")
+
+            dep_obj.credit_transaction_id = credit_tx_id
+            await session.commit()
+            await session.refresh(dep_obj)
+            logger.info(f"[link_deposit_to_transaction] deposit {deposit_id} linked to credit_tx {credit_tx_id}")
+            return dep_obj

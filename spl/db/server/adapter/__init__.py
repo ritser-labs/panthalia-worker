@@ -8,6 +8,7 @@ from .jobs_plugins import DBAdapterJobsPluginsMixin
 from .permissions import DBAdapterPermissionsMixin
 from .instances import DBAdapterInstancesMixin
 from .state_updates import DBAdapterStateUpdatesMixin
+from .billing.stripe import DBAdapterStripeBillingMixin
 
 # Import the original get_user_id here
 from ....auth.view import get_user_id as default_get_user_id
@@ -19,7 +20,8 @@ class DBAdapterServer(
     DBAdapterJobsPluginsMixin,
     DBAdapterPermissionsMixin,
     DBAdapterInstancesMixin,
-    DBAdapterStateUpdatesMixin
+    DBAdapterStateUpdatesMixin,
+    DBAdapterStripeBillingMixin
 ):
     def __init__(self, user_id_getter=None):
         if user_id_getter is None:
