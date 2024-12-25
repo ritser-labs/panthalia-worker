@@ -5,22 +5,18 @@ import shutil
 import torch
 import asyncio
 import logging
-import psutil
 import tracemalloc
-import time
-from .nag import nag_update
-from .json import load_json, save_json
+
 from ..device import device
 from ..common import (
     get_current_version_number,
     get_future_version_number,
     TENSOR_NAME
 )
+from .nag import nag_update
+from .json import load_json, save_json
 
 def ensure_file_locks(file_locks: dict) -> dict:
-    """
-    Ensure that all the keys needed by this module exist in file_locks.
-    """
     required_keys = [
         "block_timestamps",
         "last_future_version_number",
@@ -32,11 +28,23 @@ def ensure_file_locks(file_locks: dict) -> dict:
             file_locks[key] = asyncio.Lock()
     return file_locks
 
+def get_local_file_path(url: str, request, state_dir: str) -> str | None:
+    expected_prefix = f"http://{request.host}/data/state/"
+    if not url.startswith(expected_prefix):
+        logging.error(f"[get_local_file_path] Invalid or unexpected URL: {url}")
+        return None
+    relative_path = url.replace(expected_prefix, '')
+    return os.path.join(state_dir, relative_path)
+
+def version_number_exists(version_number: int, tensor_name: str, state_dir: str) -> bool:
+    path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
+    return os.path.exists(path)
+
 def log_memory_usage(note='', enabled=False):
     if not enabled:
         return
     import psutil
-    process = psutil.Process(os.getpid())
+    process = psutil.Process()
     mem_info = process.memory_info()
     logging.debug(
         f"Memory usage ({note}): RSS={mem_info.rss / 1024**2:.2f} MB, "
@@ -52,19 +60,15 @@ def log_memory_diff(snapshot1, snapshot2, note='', enabled=False):
         logging.debug(stat)
 
 async def initialize_tensor(
-    name,
-    state_dir,
-    tensor_version_interval,
+    name: str,
+    state_dir: str,
+    tensor_version_interval: int,
     init_tensor_func,
     zero_init=False,
     memory_logging=False,
     file_locks=None
 ):
-    """
-    Initialize a single tensor's file if none exists. 
-    If missing, create e.g. 'model_0.pt'.
-    """
-    logging.info(f"Initializing tensor {name}")
+    logging.info(f"[initialize_tensor] Checking existence of tensor {name}")
     log_memory_usage('Before init', enabled=memory_logging)
 
     if file_locks is None:
@@ -79,7 +83,6 @@ async def initialize_tensor(
     block_timestamps = await load_json(block_timestamps_file, {}, file_locks['block_timestamps'])
     last_future_version_number = await load_json(last_future_version_file, {}, file_locks['last_future_version_number'])
 
-    # default to version 0
     sync_version_number = block_timestamps.get(name, 0)
     file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
 
@@ -87,13 +90,16 @@ async def initialize_tensor(
         logging.info(f"{file_path} is missing; creating from init_tensor(...)")
         tensor = init_tensor_func(zero_init)
         torch.save(tensor, file_path)
+
         block_timestamps[name] = sync_version_number
         await save_json(block_timestamps_file, block_timestamps, file_locks['block_timestamps'])
+
         last_future_version_number[name] = sync_version_number
         await save_json(last_future_version_file, last_future_version_number, file_locks['last_future_version_number'])
+
         logging.info(f"Tensor {name} created at version {sync_version_number}")
     else:
-        logging.info(f"{file_path} exists; no need to re-initialize.")
+        logging.info(f"{file_path} exists; no need to re-initialize {name}.")
 
     if memory_logging:
         snapshot_after = tracemalloc.take_snapshot()
@@ -101,16 +107,13 @@ async def initialize_tensor(
     log_memory_usage('After init', enabled=memory_logging)
 
 async def initialize_all_tensors(
-    state_dir,
-    tensor_version_interval,
+    state_dir: str,
+    tensor_version_interval: int,
     init_tensor_func,
     memory_logging=False,
     file_locks=None
 ):
-    """
-    Initialize both the primary model tensor (model_0.pt) and its momentum (model_adam_m_0.pt).
-    """
-    logging.info("Initializing all tensors")
+    logging.info("Initializing all relevant tensors if they do not exist.")
     if file_locks is None:
         file_locks = {}
     ensure_file_locks(file_locks)
@@ -124,6 +127,7 @@ async def initialize_all_tensors(
         memory_logging=memory_logging,
         file_locks=file_locks
     )
+
     await initialize_tensor(
         f'{TENSOR_NAME}_adam_m',
         state_dir,
@@ -134,193 +138,176 @@ async def initialize_all_tensors(
         file_locks=file_locks
     )
 
-def version_number_exists(version_number, tensor_name, state_dir):
-    """
-    Return True if e.g. 'model_1734.pt' exists.
-    """
-    path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
-    return os.path.exists(path)
-
-async def fix_outdated_last_future_version_number(tensor_name, last_future_version_number, state_dir, interval):
-    """
-    If last_future_version < current_version, rename old files up to current version.
-    """
-    # This part is optional or rarely used, left as-is
-    pass
-
 async def apply_optimizer(
-    version_number,
-    tensor_name,
-    grads_flat,
-    learning_rate,
-    beta1,
-    beta2,
-    epsilon,
-    weight_decay,
-    t,
-    state_dir
+    version_number: int,
+    tensor_name: str,
+    grads_flat: torch.Tensor,
+    learning_rate: float,
+    beta1: float,
+    beta2: float,
+    epsilon: float,
+    weight_decay: float,
+    t: float,
+    state_dir: str
 ):
-    """
-    Load the old param file e.g. 'model_<version>.pt', do the NAG update, return new param+momentum.
-    """
     old_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
     if not os.path.exists(old_path):
         raise FileNotFoundError(f"Tensor file not found at {old_path}")
-    param_vector = torch.load(old_path, map_location=device).to(device)
 
+    param_vector = torch.load(old_path, map_location=device).to(device)
     if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
-        raise ValueError(f"NaN/Inf in grads for {tensor_name}")
+        raise ValueError(f"NaN/Inf in grads for {tensor_name} -- aborting update.")
 
     adam_m_old = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
     if os.path.exists(adam_m_old):
         m_vector = torch.load(adam_m_old, map_location=device).to(device)
     else:
-        logging.info(f"No momentum file found for {tensor_name} at version {version_number}; using zeros.")
+        logging.info(f"No momentum file found for {tensor_name} v{version_number}, using zeros.")
         m_vector = torch.zeros_like(param_vector, device=device)
 
-    # call nag_update
     from .nag import nag_update
-    new_params, new_m = nag_update(param_vector, grads_flat, m_vector,
-                                   lr=learning_rate, weight_decay=weight_decay,
-                                   beta1=beta1, eps=epsilon, step=t)
+    new_params, new_m = nag_update(
+        param_vector,
+        grads_flat,
+        m_vector,
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        beta1=beta1,
+        eps=epsilon,
+        step=t
+    )
+
     return new_params.view(-1), new_m.view(-1)
 
 async def update_block_timestamps(
-    tensor_name,
-    block_timestamps,
-    num_updates,
-    iteration_number,
-    last_future_version_number,
-    state_dir,
+    tensor_name: str,
+    block_timestamps: dict,
+    num_updates: dict,
+    iteration_number: dict,
+    last_future_version_number: dict,
+    state_dir: str,
+    interval: int,
     db_adapter,
-    job_id,
-    interval,
-    update_timestamp_lock,
-    file_locks
+    job_id: int
 ):
-    """
-    If time advanced, copy old -> new. We'll ensure 'model_0.pt' is physically on disk first.
-    """
-    ensure_file_locks(file_locks)
-    async with update_timestamp_lock:
-        # 1) Guarantee that 0-pt file is physically there
-        old_ts = block_timestamps.get(tensor_name, 0)
-        old_file = os.path.join(state_dir, f'{tensor_name}_{old_ts}.pt')
-        if not os.path.exists(old_file):
-            # Recreate from init if missing
-            logging.warning(f"File {old_file} was missing. Re-creating from init_tensor(...)!")
-            from ..adapters.model_adapter import StandardModelAdapter  # or whichever
-            # Instead of importing your model_adapter, just do a warn. 
-            # You can do a real re-init with the same logic as initialize_tensor(...) if needed.
-            # Example (if you can get a reference to the init func):
-            # new_tensor = model_adapter.init_tensor(...)
-            # torch.save(new_tensor, old_file)
-            pass
+    old_ts = block_timestamps.get(tensor_name, 0)
+    future_ts = get_future_version_number(interval)
+    if old_ts < future_ts:
+        src = os.path.join(state_dir, f'{tensor_name}_{old_ts}.pt')
+        dst = os.path.join(state_dir, f'{tensor_name}_{future_ts}.pt')
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy(src, dst)
+            logging.info(f"[update_block_timestamps] Copied {src} -> {dst}")
 
-        # 2) Possibly do your "advance to future" logic
-        future_version_number = get_future_version_number(interval)
-        current_known = block_timestamps.get(tensor_name, 0)
-        if current_known < future_version_number:
-            # do the copy from old to new
-            src = os.path.join(state_dir, f'{tensor_name}_{current_known}.pt')
-            dst = os.path.join(state_dir, f'{tensor_name}_{future_version_number}.pt')
-
-            if not os.path.exists(src):
-                logging.warning(f"update_block_timestamps: Source {src} not found, cannot copy forward.")
-            else:
-                if not os.path.exists(dst):
-                    shutil.copy(src, dst)
-                    if not os.path.exists(dst):
-                        raise RuntimeError(f"Failed to copy {src} -> {dst}??")
-
-            # same for momentum
-            src_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{current_known}.pt')
-            dst_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{future_version_number}.pt')
+            src_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_ts}.pt')
+            dst_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{future_ts}.pt')
             if os.path.exists(src_m) and not os.path.exists(dst_m):
                 shutil.copy(src_m, dst_m)
+                logging.info(f"[update_block_timestamps] Copied {src_m} -> {dst_m}")
 
-            # Now update block_timestamps[tensor_name] = future_version_number
-            block_timestamps[tensor_name] = future_version_number
-            # reset counters, etc. 
+        block_timestamps[tensor_name] = future_ts
+        num_updates[tensor_name] = 0
+        iteration_val = iteration_number.get(tensor_name, 0) + 1
+        iteration_number[tensor_name] = iteration_val
+        last_future_version_number[tensor_name] = future_ts
+
+        state_data = await db_adapter.get_state_for_job(job_id)
+        state_data["block_timestamps"] = block_timestamps
+        state_data["num_updates"] = num_updates
+        state_data["iteration_number"] = iteration_number
+        state_data["last_future_version_number"] = last_future_version_number
+        await db_adapter.update_state_for_job(job_id, state_data)
+
+async def cleanup_old_timestamp(
+    tensor_name: str,
+    old_block_timestamp: int,
+    block_timestamps: dict,
+    state_dir: str
+):
+    new_block_ts = block_timestamps.get(tensor_name, 0)
+    if old_block_timestamp == new_block_ts:
+        logging.debug("[cleanup_old_timestamp] No timestamp change; skipping old cleanup.")
+        return
+
+    new_file = os.path.join(state_dir, f'{tensor_name}_{new_block_ts}.pt')
+    if not os.path.exists(new_file):
+        logging.warning(f"[cleanup_old_timestamp] Skipping removal of old block {old_block_timestamp} because {new_file} doesn't exist.")
+        return
+
+    old_file = os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt')
+    if os.path.exists(old_file):
+        logging.info(f"[cleanup_old_timestamp] Removing old file {old_file}")
+        os.remove(old_file)
+
+    old_mom = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt')
+    if os.path.exists(old_mom):
+        logging.info(f"[cleanup_old_timestamp] Removing old momentum {old_mom}")
+        os.remove(old_mom)
+
+async def update_cleanup_timestamps(
+    tensor_name: str,
+    block_timestamps: dict,
+    num_updates: dict,
+    iteration_number: dict,
+    last_future_version_number: dict,
+    state_dir: str,
+    db_adapter,
+    job_id: int,
+    interval: int,
+    update_timestamp_lock: asyncio.Lock,
+    file_locks: dict
+):
+    ensure_file_locks(file_locks)
+    async with update_timestamp_lock:
+        old_ts = block_timestamps.get(tensor_name, 0)
+        current_version = get_current_version_number(interval)
+
+        logging.debug(
+            f"[update_cleanup_timestamps] Called for {tensor_name}. old_ts={old_ts}, "
+            f"current_version={current_version}"
+        )
+
+        # no short-circuit skip for current_version==0, just proceed
+        if old_ts < current_version:
+            # Attempt to copy old_ts => current_version
+            src = os.path.join(state_dir, f'{tensor_name}_{old_ts}.pt')
+            dst = os.path.join(state_dir, f'{tensor_name}_{current_version}.pt')
+            if os.path.exists(src) and not os.path.exists(dst):
+                shutil.copy(src, dst)
+                logging.info(f"[update_cleanup_timestamps] Copied {src} -> {dst}")
+                src_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_ts}.pt')
+                dst_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{current_version}.pt')
+                if os.path.exists(src_m) and not os.path.exists(dst_m):
+                    shutil.copy(src_m, dst_m)
+                    logging.info(f"[update_cleanup_timestamps] Copied {src_m} -> {dst_m}")
+
+            block_timestamps[tensor_name] = current_version
             num_updates[tensor_name] = 0
             iteration_val = iteration_number.get(tensor_name, 0) + 1
             iteration_number[tensor_name] = iteration_val
+            last_future_version_number[tensor_name] = current_version
 
-            # Save to DB state
             state_data = await db_adapter.get_state_for_job(job_id)
             state_data["block_timestamps"] = block_timestamps
             state_data["num_updates"] = num_updates
             state_data["iteration_number"] = iteration_number
             state_data["last_future_version_number"] = last_future_version_number
-            await db_adapter.update_state_for_job(job_id, state_data)
 
-        return old_ts
+            logging.debug(
+                f"[update_cleanup_timestamps] Saving block_timestamps[{tensor_name}]={current_version} to DB..."
+            )
 
-async def cleanup_old_timestamp(tensor_name, old_block_timestamp, block_timestamps, state_dir):
-    """
-    If we advanced from e.g. 0 to 1734, remove the old file only if the new file physically exists.
-    """
-    new_block_ts = block_timestamps.get(tensor_name, 0)
-    if old_block_timestamp == new_block_ts:
-        logging.debug("No timestamp change; skipping old cleanup.")
-        return
+            try:
+                await db_adapter.update_state_for_job(job_id, state_data)
+                logging.debug("[update_cleanup_timestamps] Successfully updated job state in DB.")
+            except Exception as e:
+                logging.error("[update_cleanup_timestamps] update_state_for_job crashed: ", exc_info=True)
+                return
 
-    # e.g. "model_1734.pt"
-    new_file = os.path.join(state_dir, f'{tensor_name}_{new_block_ts}.pt')
-    if not os.path.exists(new_file):
-        logging.warning(f"Skipping removal of old block {old_block_timestamp} because {new_file} does not exist.")
-        return
-
-    old_file = os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt')
-    if os.path.exists(old_file):
-        logging.info(f"Removing old file {old_file}")
-        os.remove(old_file)
-
-    old_mom = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt')
-    if os.path.exists(old_mom):
-        logging.info(f"Removing old momentum {old_mom}")
-        os.remove(old_mom)
-
-async def update_cleanup_timestamps(
-    tensor_name,
-    block_timestamps,
-    num_updates,
-    iteration_number,
-    last_future_version_number,
-    state_dir,
-    db_adapter,
-    job_id,
-    interval,
-    update_timestamp_lock,
-    file_locks
-):
-    """
-    Runs update_block_timestamps + cleanup_old_timestamp in one call.
-    """
-    ensure_file_locks(file_locks)
-    old_ts = await update_block_timestamps(
-        tensor_name,
-        block_timestamps,
-        num_updates,
-        iteration_number,
-        last_future_version_number,
-        state_dir,
-        db_adapter,
-        job_id,
-        interval,
-        update_timestamp_lock,
-        file_locks
-    )
-    await cleanup_old_timestamp(tensor_name, old_ts, block_timestamps, state_dir)
-
-def get_local_file_path(url, request, state_dir):
-    """
-    Convert a local URL like http://host:port/data/state/temp/foo.pt to a local file path
-    relative to your `state_dir`.
-    """
-    if not url.startswith(f"http://{request.host}/data/state/"):
-        import logging
-        logging.error(f"Invalid URL: {url}")
-        return None
-    path_relative_to_state = url.replace(f"http://{request.host}/data/state/", '')
-    return os.path.join(state_dir, path_relative_to_state)
+            # Now remove the old version if new_file definitely exists
+            await cleanup_old_timestamp(tensor_name, old_ts, block_timestamps, state_dir)
+        else:
+            logging.debug(
+                f"[update_cleanup_timestamps] old_ts >= current_version => no changes. "
+                f"(old_ts={old_ts}, current_version={current_version})"
+            )

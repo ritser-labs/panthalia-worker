@@ -1,7 +1,10 @@
 # spl/db/server/adapter/jobs_plugins.py
 
+import logging
 from sqlalchemy import select, update
 from ....models import AsyncSessionLocal, Job, Plugin, Subnet
+
+logger = logging.getLogger(__name__)
 
 class DBAdapterJobsPluginsMixin:
     async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int):
@@ -84,28 +87,38 @@ class DBAdapterJobsPluginsMixin:
             return plugins
 
     ####################################################
-    # NEW: Generic GET/UPDATE state_json for a given job
+    # *** CHANGED ***: New debug logs in get_job_state
     ####################################################
-
     async def get_job_state(self, job_id: int) -> dict:
         """
         Return the dictionary stored in Job.state_json
         """
+        logger.debug(f"[jobs_plugins] get_job_state called with job_id={job_id}")
         async with AsyncSessionLocal() as session:
             stmt = select(Job).where(Job.id == job_id)
             result = await session.execute(stmt)
             job = result.scalar_one_or_none()
             if not job:
+                logger.debug(f"[jobs_plugins] get_job_state => no job found for job_id={job_id}, returning {{}}")
                 return {}
             if not job.state_json:
+                logger.debug(f"[jobs_plugins] get_job_state => job found but state_json is None, returning {{}}")
                 return {}
+            logger.debug(f"[jobs_plugins] get_job_state => returning: {job.state_json}")
             return job.state_json
 
+    ####################################################
+    # *** CHANGED ***: New debug logs in update_job_state
+    ####################################################
     async def update_job_state(self, job_id: int, new_state: dict):
         """
         Overwrite Job.state_json with new_state
         """
+        logger.debug(f"[jobs_plugins] update_job_state called with job_id={job_id}, new_state={new_state}")
         async with AsyncSessionLocal() as session:
             stmt = update(Job).where(Job.id == job_id).values(state_json=new_state)
-            await session.execute(stmt)
+            result = await session.execute(stmt)
             await session.commit()
+            rows_updated = result.rowcount
+            logger.debug(f"[jobs_plugins] update_job_state => rows_updated={rows_updated}")
+            logger.debug(f"[jobs_plugins] update_job_state => done for job_id={job_id}")

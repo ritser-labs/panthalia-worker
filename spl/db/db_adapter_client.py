@@ -1,4 +1,4 @@
-# db_adapter_client.py
+# spl/db/db_adapter_client.py
 
 import logging
 import aiohttp
@@ -436,24 +436,35 @@ class DBAdapterClient:
 
     @typechecked
     async def get_state_for_job(self, job_id: int) -> dict:
+        """
+        Return the 'state_json' for this job from the DB.
+        """
+        logger.debug(f"[DBAdapterClient] get_state_for_job called with job_id={job_id}")
         params = {'job_id': str(job_id)}
         response = await self._authenticated_request('GET', '/get_job_state', params=params)
+        logger.debug(f"[DBAdapterClient] get_state_for_job => raw server response: {response}")
         if 'error' in response:
-            logger.error(response['error'])
+            logger.error(f"[DBAdapterClient] get_state_for_job => error: {response['error']}")
             return {}
         if isinstance(response, dict):
+            logger.debug(f"[DBAdapterClient] get_state_for_job => final: {response}")
             return response
         return {}
 
     @typechecked
     async def update_state_for_job(self, job_id: int, new_state_data: dict) -> bool:
+        """
+        Overwrite the job's state_json with new_state_data
+        """
+        logger.debug(f"[DBAdapterClient] update_state_for_job called with job_id={job_id}, new_state_data={new_state_data}")
         data = {
             'job_id': job_id,
             'new_state': new_state_data
         }
         response = await self._authenticated_request('POST', '/update_job_state', data=data)
+        logger.debug(f"[DBAdapterClient] update_state_for_job => server response: {response}")
         if 'error' in response:
-            logger.error(response['error'])
+            logger.error(f"[DBAdapterClient] update_state_for_job => error: {response['error']}")
             return False
         return True
 
