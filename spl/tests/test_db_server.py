@@ -1,5 +1,6 @@
 import pytest
 import pytest_asyncio
+import json
 from datetime import datetime, timedelta
 from sqlalchemy import select
 
@@ -12,6 +13,7 @@ from spl.models import (
 from spl.db.server.app import original_app
 from spl.db.server.adapter import DBAdapterServer
 
+
 @pytest_asyncio.fixture(autouse=True)
 async def clear_database():
     """
@@ -22,6 +24,7 @@ async def clear_database():
             await session.execute(table.delete())
         await session.commit()
     yield
+
 
 @pytest.mark.asyncio
 async def test_basic_setup(db_adapter_server_fixture):
@@ -43,6 +46,7 @@ async def test_basic_setup(db_adapter_server_fixture):
         assert job.plugin_id == plugin_id
         assert job.subnet_id == subnet_id
 
+
 @pytest.mark.asyncio
 async def test_admin_deposit_credits(db_adapter_server_fixture):
     async with original_app.test_request_context('/'):
@@ -51,6 +55,7 @@ async def test_admin_deposit_credits(db_adapter_server_fixture):
         async with AsyncSessionLocal() as session:
             account = await server.get_or_create_account("testuser", session=session)
             assert account.credits_balance == 300.0
+
 
 @pytest.mark.asyncio
 async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
@@ -108,6 +113,7 @@ async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
             hold = await session.execute(select(Hold).where(Hold.id == cc_hold.id))
             hold = hold.scalar_one_or_none()
             assert hold.used_amount == 50.0
+
 
 @pytest.mark.asyncio
 async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture):
@@ -192,10 +198,11 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
         )
 
         # By default, should_check returns False, so this resolves correct immediately
-        await solver_server.submit_task_result(task_id, result={"output": "success"})
+        # Pass a JSON string so the code can do json.loads(result) successfully:
+        await solver_server.submit_task_result(task_id, result=json.dumps({"output": "success"}))
 
         async with AsyncSessionLocal() as session:
-            task = await server.get_task(task_id)  # task belongs to testuser's job, but it's the same DB
+            task = await server.get_task(task_id)  # same DB, different user
             assert task.status == TaskStatus.ResolvedCorrect
 
             buyer_account = await server.get_or_create_account("testuser", session=session)
@@ -207,6 +214,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             assert solver_account.earnings_balance == 90.0
             # Solver stake returned (1.5 * 100 = 150)
             assert solver_account.credits_balance == 150.0
+
 
 @pytest.mark.asyncio
 async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
@@ -291,8 +299,8 @@ async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
         server.should_check = mock_should_check
         server.check_invalid = mock_check_invalid
 
-        # Submit result that will fail after checking
-        await server.submit_task_result(task_id, result={"output": "fail"})
+        # Submit result that will fail after checking, passing it as a JSON string
+        await server.submit_task_result(task_id, result=json.dumps({"output": "fail"}))
         task = await server.get_task(task_id)
         assert task.status == TaskStatus.Checking
 
@@ -309,8 +317,9 @@ async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
             solver_account = await server.get_or_create_account("testuser", session=session)
             # Solver had a total hold of 300.0, 80.0 taken as stake to platform
             # Leftover 220.0 returned to solver
-            # Initially solver had 500.0 credits, after leftover return = 720.0
+            # Initially solver had 500.0 credits, after leftover return => 720.0
             assert solver_account.credits_balance == 720.0
+
 
 @pytest.mark.asyncio
 async def test_dispute_can_only_happen_while_result_uploaded(db_adapter_server_fixture):
@@ -379,14 +388,15 @@ async def test_dispute_can_only_happen_while_result_uploaded(db_adapter_server_f
         )
 
         # By default, should_check returns False, so direct resolution correct
-        await server.submit_task_result(task_id, result={"output": "success"})
+        await server.submit_task_result(task_id, result=json.dumps({"output": "success"}))
         task = await server.get_task(task_id)
         assert task.status == TaskStatus.ResolvedCorrect
 
         # Trying another result after it was already resolved should fail
         with pytest.raises(ValueError) as excinfo:
-            await server.submit_task_result(task_id, result={"output": "fail"})
+            await server.submit_task_result(task_id, result=json.dumps({"output": "fail"}))
         assert "Task not in SolverSelected status" in str(excinfo.value)
+
 
 @pytest.mark.asyncio
 async def test_hold_expiry_prevents_usage(db_adapter_server_fixture):
@@ -436,6 +446,7 @@ async def test_hold_expiry_prevents_usage(db_adapter_server_fixture):
             )
         assert "hold expires too soon" in str(excinfo.value)
 
+
 @pytest.mark.asyncio
 async def test_create_bids_and_tasks_with_hold(db_adapter_server_fixture):
     async with original_app.test_request_context('/'):
@@ -483,6 +494,7 @@ async def test_create_bids_and_tasks_with_hold(db_adapter_server_fixture):
             updated_hold = updated_hold.scalar_one_or_none()
             assert updated_hold.used_amount == 150.0
 
+
 @pytest.mark.asyncio
 async def test_no_direct_withdraws_deposits_just_admin_deposit(db_adapter_server_fixture):
     async with original_app.test_request_context('/'):
@@ -492,6 +504,7 @@ async def test_no_direct_withdraws_deposits_just_admin_deposit(db_adapter_server
         async with AsyncSessionLocal() as session:
             account = await server.get_or_create_account("testuser", session=session)
             assert account.credits_balance == 1000.0
+
 
 @pytest.mark.asyncio
 async def test_create_plugin_fetch_plugins(db_adapter_server_fixture):
