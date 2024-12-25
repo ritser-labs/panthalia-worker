@@ -3,7 +3,7 @@
 import os
 import logging
 import stripe
-from ....models.enums import CreditTxnType
+from .....models.enums import CreditTxnType
 
 class DBAdapterStripeBillingMixin:
     """
