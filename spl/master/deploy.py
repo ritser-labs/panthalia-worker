@@ -7,6 +7,7 @@ from eth_account import Account
 from ..models import ServiceType
 from ..common import generate_wallets, SOT_PRIVATE_PORT, wait_for_health
 from .config import args
+from .main_logic import Master
 
 logger = logging.getLogger(__name__)
 
@@ -105,14 +106,37 @@ async def launch_workers(db_adapter, job, deploy_type, subnet, db_url: str, sot_
         worker_key = key_result['private_key']
         await launch_worker(db_adapter, job, deploy_type, subnet, db_url, sot_url, worker_key)
 
-async def run_master_task(*master_args):
-    from .main_logic import Master
+async def run_master_task(
+    sot_url: str,
+    job_id: int,
+    subnet_id: int,
+    db_adapter,
+    max_iterations: float,
+    detailed_logs: bool,
+    max_concurrent_iterations: int = 4
+):
+    """
+    Create a Master object, run .run_main() until complete or canceled.
+    If the job toggles inactive but still has tasks, .run_main() will keep
+    them going until resolved.
+    """
+    master_obj = Master(
+        sot_url=sot_url,
+        job_id=job_id,
+        subnet_id=subnet_id,
+        db_adapter=db_adapter,
+        max_iterations=max_iterations,
+        detailed_logs=detailed_logs,
+        max_concurrent_iterations=max_concurrent_iterations
+    )
     try:
-        logging.info("run_master_task")
-        obj = Master(*master_args)
-        await obj.run_main()
+        await master_obj.initialize()
+        await master_obj.run_main()
+        logger.info(f"[run_master_task] Master for job {job_id} ended normally.")
+    except asyncio.CancelledError:
+        logger.warning(f"[run_master_task] Master for job {job_id} canceled.")
     except Exception as e:
-        import traceback
-        logging.error(f"Error in run_master_task: {e}")
-        traceback_str = traceback.format_exc()
-        logging.error(f"Traceback:\n{traceback_str}")
+        logger.error(f"[run_master_task] Master for job {job_id} crashed: {e}", exc_info=True)
+    finally:
+        master_obj.done = True
+        logger.info(f"[run_master_task] Master for job {job_id} fully finished.")

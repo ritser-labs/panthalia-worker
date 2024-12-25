@@ -48,6 +48,7 @@ class Subnet(Serializable):
 
 class Job(TimestampMixin, Serializable):
     __tablename__ = 'jobs'
+    
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True, nullable=False)
     plugin_id = Column(Integer, ForeignKey('plugins.id'), nullable=False)
@@ -58,12 +59,16 @@ class Job(TimestampMixin, Serializable):
     iteration = Column(Integer, nullable=False)
     state_json = Column(JSON, nullable=True, default={})
 
+    # **NEW**: Add the `active` column
+    active = Column(Boolean, nullable=False, default=True)
+
     plugin = relationship("Plugin", back_populates="jobs")
     subnet = relationship("Subnet", back_populates="jobs")
     instances = relationship("Instance", back_populates="job")
     tasks = relationship("Task", back_populates="job")
     state_updates = relationship("StateUpdate", back_populates="job")
     sots = relationship("Sot", back_populates="job")
+
 
 class Task(TimestampMixin, Serializable):
     __tablename__ = 'tasks'

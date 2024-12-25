@@ -6,6 +6,7 @@ from sqlalchemy import select, update, desc, func, or_
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
+from typing import Optional
 import json
 
 from ....models import (
@@ -49,7 +50,11 @@ class DBAdapterOrdersTasksMixin:
             result = await session.execute(stmt)
             job = result.scalar_one_or_none()
             if not job or job.user_id != self.get_user_id():
-                raise PermissionError("no access to create a task for this job.")
+                raise PermissionError("No access to create a task for this job.")
+            
+            # **NEW**: Forbid if the job is not active
+            if not job.active:
+                raise ValueError(f"Cannot create a task for an inactive job (job_id={job_id}).")
 
             new_task = Task(
                 job_id=job_id,
@@ -175,11 +180,8 @@ class DBAdapterOrdersTasksMixin:
         num_tasks: int,
         price: float,
         params: str,
-        hold_id: int | None
+        hold_id: Optional[int]
     ):
-        """
-        Create tasks + BIDs for each, then do a match. All in one transaction.
-        """
         async with AsyncSessionLocal() as session:
             try:
                 stmt = select(Job).filter_by(id=job_id).options(joinedload(Job.subnet))
@@ -187,11 +189,15 @@ class DBAdapterOrdersTasksMixin:
                 job = result.scalar_one_or_none()
                 if not job:
                     raise ValueError(f"Job {job_id} not found.")
-
                 user_id = job.user_id
                 account = await self.get_or_create_account(user_id, session)
 
+                # **NEW**: Forbid if job is inactive
+                if not job.active:
+                    raise ValueError(f"Cannot create tasks for an inactive job (job_id={job_id}).")
+
                 created_items = []
+
                 for _ in range(num_tasks):
                     job.iteration += 1
                     new_task = Task(

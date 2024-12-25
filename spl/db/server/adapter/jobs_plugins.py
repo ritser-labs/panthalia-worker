@@ -2,7 +2,8 @@
 
 import logging
 from sqlalchemy import select, update
-from ....models import AsyncSessionLocal, Job, Plugin, Subnet
+from ....models import AsyncSessionLocal, Job, Plugin, Subnet, Task, TaskStatus
+from sqlalchemy.orm import joinedload
 
 logger = logging.getLogger(__name__)
 
@@ -122,3 +123,53 @@ class DBAdapterJobsPluginsMixin:
             rows_updated = result.rowcount
             logger.debug(f"[jobs_plugins] update_job_state => rows_updated={rows_updated}")
             logger.debug(f"[jobs_plugins] update_job_state => done for job_id={job_id}")
+
+    async def update_job_active(self, job_id: int, new_active: bool):
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                update(Job)
+                .where(Job.id == job_id)
+                .values(active=new_active)
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+        # If we set the job to inactive, also set any SOT for that job to inactive:
+        if new_active is False:
+            sot = await self.get_sot_by_job_id(job_id)
+            if sot and sot.active:  # Only if it's currently active
+                await self.update_sot_active(sot.id, False)
+    
+    async def get_jobs_in_progress(self):
+        """
+        Returns all jobs that are EITHER:
+          - active == True, OR
+          - have any task that is not resolved (i.e. statuses not in [ResolvedCorrect, ResolvedIncorrect]).
+        This ensures we keep finishing tasks even if the owner toggles job.active==False.
+        """
+        async with AsyncSessionLocal() as session:
+            # We'll define which statuses are considered 'unresolved'
+            unresolved_statuses = [
+                TaskStatus.SelectingSolver,
+                TaskStatus.SolverSelected,
+                TaskStatus.Checking,
+                TaskStatus.SanityCheckPending
+            ]
+            
+            # We do a LEFT JOIN on Task. If job is active OR there's at least one unresolved task => included
+            # Note: Using a subquery or a distinct approach is typical. Example below is fairly direct:
+            
+            stmt = (
+                select(Job)
+                .outerjoin(Task, Task.job_id == Job.id)
+                .options(joinedload(Job.tasks))  # optional, if you want tasks preloaded
+                .where(
+                    # job.active==True OR (some tasks with 'unresolved' statuses)
+                    (Job.active == True) |
+                    (Task.status.in_(unresolved_statuses))
+                )
+                .distinct()
+            )
+            result = await session.execute(stmt)
+            jobs = result.scalars().unique().all()
+            return jobs

@@ -341,14 +341,23 @@ async def get_last_task_with_status():
     else:
         return jsonify({'error': 'No task found'}), 404
 
+@app.route('/get_jobs_in_progress', methods=['GET'])
+async def get_jobs_in_progress():
+    """
+    Returns JSON list of jobs that are either active or have unresolved tasks.
+    """
+    try:
+        jobs = await db_adapter_server.get_jobs_in_progress()
+        return jsonify([job.as_dict() for job in jobs]), 200
+    except Exception as e:
+        app.logger.error(f"Error in /get_jobs_in_progress: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/health', methods=['GET'], endpoint='health_endpoint')
 @handle_errors
 async def health_check():
     return jsonify({'status': 'healthy'}), 200
 
-################################################################
-# The critical FIX: get_job_state route
-################################################################
 @app.route('/get_job_state', methods=['GET'])
 @require_params('job_id')
 @handle_errors
@@ -530,3 +539,14 @@ app.route('/update_sot', methods=['POST'], endpoint='update_sot_endpoint')(
 app.route('/finalize_sanity_check', methods=['POST'], endpoint='finalize_sanity_check_endpoint')(
     create_post_route(db_adapter_server.finalize_sanity_check, ['task_id', 'is_valid'], 'success')
 )
+
+@app.route('/update_job_active', methods=['POST'], endpoint='update_job_active_endpoint')
+@require_json_keys('job_id', 'new_active')
+@handle_errors
+async def update_job_active():
+    data = await request.get_json()
+    job_id = data['job_id']
+    new_active = bool(data['new_active'])
+    await db_adapter_server.update_job_active(job_id, new_active)
+    return jsonify({'success': True}), 200
+

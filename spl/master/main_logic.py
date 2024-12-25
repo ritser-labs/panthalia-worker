@@ -20,43 +20,38 @@ from ..common import (
 
 logging.getLogger(__name__)
 
-
 class Master:
     def __init__(
         self,
-        sot_url,
-        job_id,
-        subnet_id,
+        sot_url: str,
+        job_id: int,
+        subnet_id: int,
         db_adapter,
-        max_iterations,
-        detailed_logs
+        max_iterations: float,
+        detailed_logs: bool,
+        max_concurrent_iterations: int = 4
     ):
-        """
-        A "stateful" Master that can persist its iteration progress to the DB. If it crashes
-        mid-iteration, on next startup we look up the last stage in the DB and resume from there.
-
-        In this version, we *remove* each iteration’s entry from state_json["master_iteration_state"]
-        once it completes, so we never keep finished states around.
-        """
-        logging.info("Initializing Master")
         self.sot_url = sot_url
         self.job_id = job_id
         self.subnet_id = subnet_id
         self.db_adapter = db_adapter
         self.max_iterations = max_iterations
+        self.detailed_logs = detailed_logs
+        self.max_concurrent_iterations = max_concurrent_iterations
+
+        self.logger = logging.getLogger(__name__)
         self.done = False
+        self.iteration_count = 0
+        self.tasks = []
+
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
 
         # We'll track iteration in code, but also store in DB
         self.iteration = None
-        # We'll store concurrency tasks
-        self.tasks = []
-        # We'll keep losses in memory but also store them in DB's job.state_json
-        self.losses = []
+        self.losses = []  # store running losses in memory & DB
 
-        # We'll store iteration sub-states in DB under:
-        #    job.state_json["master_iteration_state"][str(iter_number)]
+        # We'll store iteration sub-states in DB under key = "master_iteration_state"
         self.state_key = "master_iteration_state"
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -67,9 +62,9 @@ class Master:
     async def initialize(self):
         """
         Load iteration tracking from DB:
-          - job.iteration (int)
+          - job.iteration
           - master_losses
-          - any incomplete iteration in state_json["master_iteration_state"]
+          - any incomplete iteration in job.state_json["master_iteration_state"]
         """
         self.plugin = await get_plugin(
             (await self.db_adapter.get_job(self.job_id)).plugin_id,
@@ -85,13 +80,12 @@ class Master:
         state_data = await self.db_adapter.get_state_for_job(self.job_id)
         self.losses = state_data.get("master_losses", [])
 
-        # See if there's any iteration "in progress"
+        # Possibly resume an unfinished iteration from the DB
         iteration_state_obj = state_data.get(self.state_key, {})
         last_unfinished_iteration = None
         for it_str, stage_info in iteration_state_obj.items():
             try:
                 it_num = int(it_str)
-                # We consider it "unfinished" if it doesn't have stage == "done"
                 if stage_info.get("stage") != "done":
                     last_unfinished_iteration = (it_num, stage_info)
             except:
@@ -103,40 +97,65 @@ class Master:
                 self.iteration = it_num
             logging.info(f"Resuming iteration {it_num} from stage {stage_info.get('stage')}")
 
-        # Also read concurrency from the plugin
-        self.max_concurrent_iterations = await self.plugin.get("max_concurrent_iterations")
+        # Also read concurrency from the plugin if you like
+        # But you already set self.max_concurrent_iterations in constructor or from plugin
+        # self.max_concurrent_iterations = await self.plugin.get("max_concurrent_iterations")
         logging.info(f"Master init complete. iteration={self.iteration}, losses={self.losses}")
 
     async def run_main(self):
         """
-        Main loop for spawning training iteration tasks until done.
+        Keep spawning iteration tasks if job is "in-progress".
+        If job toggles inactive & has no tasks => Master stops.
         """
-        logging.info("Starting main process")
-        await self.initialize()
-
-        if self.iteration >= self.max_iterations:
-            self.done = True
-            return
-
-        # Launch concurrency
-        for _ in range(self.max_concurrent_iterations):
-            task = asyncio.create_task(self.main_iteration(self.iteration))
-            self.tasks.append(task)
-
         while not self.done:
+            # 1) Possibly check if job is still "active" for new tasks
+            job_obj = await self.db_adapter.get_job(self.job_id)
+            if not job_obj:
+                self.logger.info(f"[Master.run_main] job {self.job_id} no longer in DB? Stopping.")
+                self.done = True
+                break
+            if not job_obj.active:
+                self.logger.debug(f"Job {self.job_id} inactive => no new iteration tasks, just finishing existing.")
+
+            # 2) concurrency logic
+            if job_obj.active and (len(self.tasks) < self.max_concurrent_iterations):
+                new_task = asyncio.create_task(self.main_iteration(self.iteration))
+                self.tasks.append(new_task)
+                self.iteration += 1  # increment iteration index
+
+            # 3) Wait for at least one task to finish or short timeout
             if self.tasks:
-                done, pending = await asyncio.wait(
-                    self.tasks, return_when=asyncio.FIRST_COMPLETED
+                done_set, pending_set = await asyncio.wait(
+                    self.tasks,
+                    timeout=1.0,
+                    return_when=asyncio.FIRST_COMPLETED
                 )
-                self.tasks = [t for t in self.tasks if not t.done()]
-                if self.iteration >= self.max_iterations:
-                    self.done = True
+                for t in done_set:
+                    self.tasks.remove(t)
             else:
                 await asyncio.sleep(1)
 
+            # 4) If job is inactive & no tasks => done
+            if not job_obj.active and not self.tasks:
+                self.logger.info(f"[Master.run_main] job {self.job_id} inactive, no tasks => done.")
+                self.done = True
+
+            # 5) If iteration >= max_iterations => finish tasks, stop
+            if self.iteration >= self.max_iterations:
+                self.logger.info(f"[Master.run_main] job {self.job_id} reached max_iterations => finishing tasks.")
+                if self.tasks:
+                    await asyncio.wait(self.tasks)
+                self.done = True
+        
+        # final wait if tasks remain
+        if self.tasks:
+            self.logger.info(f"[Master.run_main] loop ended => waiting for {len(self.tasks)} tasks to finish.")
+            await asyncio.wait(self.tasks)
+        self.logger.info(f"[Master.run_main] All done for job {self.job_id}.")
+
     async def main_iteration(self, iteration_number):
         """
-        A single iteration of the training process, with multiple stages:
+        Single iteration: states are:
           - pending_get_input
           - pending_submit_task
           - pending_wait_for_result
@@ -172,7 +191,15 @@ class Master:
                         "input_url": input_url,
                         **learning_params,
                     })
+                    # Create tasks
                     task_id_info = await self._submit_task_with_persist(params_json, iteration_number)
+
+                    # *** FIX #1: ensure task_id_info is valid before continuing ***
+                    if not task_id_info or len(task_id_info) < 1:
+                        self.logger.error(f"[main_iteration] Could not create tasks. `task_id_info` is empty. Aborting iteration.")
+                        iteration_state["stage"] = "done"
+                        await self._save_iteration_state(iteration_number, iteration_state)
+                        break  # or return
 
                 iteration_state["task_id_info"] = task_id_info
                 iteration_state["stage"] = "pending_wait_for_result"
@@ -181,7 +208,21 @@ class Master:
 
             elif stage == "pending_wait_for_result":
                 logging.info(f"Iteration {iteration_number}: waiting for result.")
-                task_id = iteration_state["task_id_info"][0]["task_id"]
+                # *** FIX #2: double-check the structure before indexing [0]["task_id"] ***
+                task_id_info = iteration_state.get("task_id_info")
+                if not task_id_info or len(task_id_info) < 1:
+                    self.logger.error("[main_iteration] No `task_id_info` found, cannot wait for result. Aborting iteration.")
+                    iteration_state["stage"] = "done"
+                    await self._save_iteration_state(iteration_number, iteration_state)
+                    break
+
+                if not isinstance(task_id_info[0], dict) or "task_id" not in task_id_info[0]:
+                    self.logger.error("[main_iteration] Unexpected `task_id_info` structure, aborting iteration.")
+                    iteration_state["stage"] = "done"
+                    await self._save_iteration_state(iteration_number, iteration_state)
+                    break
+
+                task_id = task_id_info[0]["task_id"]
                 result = iteration_state.get("result")
                 if not result:
                     result = await self.wait_for_result(task_id)
@@ -194,12 +235,12 @@ class Master:
                 # Bump the job iteration
                 await self.db_adapter.update_job_iteration(self.job_id, iteration_number + 1)
 
-                # Update state_json with new master_losses
+                # Update DB with new master_losses
                 state_data = await self.db_adapter.get_state_for_job(self.job_id)
                 state_data["master_losses"] = self.losses
                 await self.db_adapter.update_state_for_job(self.job_id, state_data)
 
-                # Possibly update the SOT with the new gradient data
+                # Possibly update SOT with new gradient data
                 learning_params = iteration_state.get("learning_params", {})
                 input_url = iteration_state["input_url"]
                 await self.update_sot(learning_params, TENSOR_NAME, result, input_url)
@@ -208,22 +249,14 @@ class Master:
                 iteration_state["stage"] = "done"
                 await self._save_iteration_state(iteration_number, iteration_state)
 
-                # Now remove the iteration entirely from the DB so we keep no finished states
+                # Remove iteration from DB so we keep no finished states
                 await self._remove_iteration_entry(iteration_number)
 
                 stage = "done"
 
-        # Move on
-        self.iteration += 1
-        if self.iteration < self.max_iterations:
-            task = asyncio.create_task(self.main_iteration(self.iteration))
-            self.tasks.append(task)
-        else:
-            self.done = True
-
     async def _get_input_url_with_persist(self, iteration_number):
         """
-        Retrieve input_url from the SOT's /get_batch endpoint, with retries.
+        Retrieve input_url from SOT's /get_batch endpoint, with retries.
         """
         url = os.path.join(self.sot_url, "get_batch")
         retry_delay = 1
@@ -253,7 +286,7 @@ class Master:
 
     async def _submit_task_with_persist(self, params_str, iteration_number):
         """
-        Create a DB task + Bid. If we crash, we can pick up from the same task_id next time.
+        Create a DB task + Bid. If we crash, we can pick up from the same info next time.
         """
         max_duration = datetime.timedelta(seconds=MAX_SUBMIT_TASK_RETRY_DURATION)
         start_time = datetime.datetime.now()
@@ -270,6 +303,10 @@ class Master:
                 bid_info = await self.db_adapter.create_bids_and_tasks(
                     self.job_id, 1, price, params_str, None
                 )
+                # If create_bids_and_tasks returns None or an empty list => something failed
+                if not bid_info or len(bid_info) == 0:
+                    logging.error(f"[submit_task_with_persist] create_bids_and_tasks returned empty. iteration={iteration_number}")
+                    return None
                 return bid_info
             except Exception as e:
                 logging.error(f"Failure creating Bids/Tasks (attempt #{attempt}): {e}")
@@ -279,8 +316,7 @@ class Master:
 
     async def wait_for_result(self, task_id):
         """
-        Keep polling the DB for the final result. If we see SanityCheckPending, we run
-        a local model-based sanity check and finalize it with /finalize_sanity_check.
+        Keep polling the DB for final result. If we see SanityCheckPending, do local check, finalize.
         """
         while True:
             task = await self.db_adapter.get_task(task_id)
@@ -290,9 +326,7 @@ class Master:
 
             if task.status == TaskStatus.SanityCheckPending.name:
                 if task.result:
-                    is_valid = await self.plugin.call_submodule(
-                        "model_adapter", "run_sanity_check", task.result
-                    )
+                    is_valid = await self.plugin.call_submodule("model_adapter", "run_sanity_check", task.result)
                     await self.finalize_sanity_check(task_id, is_valid)
 
             if task.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
@@ -302,7 +336,7 @@ class Master:
 
     async def finalize_sanity_check(self, task_id: int, is_valid: bool):
         """
-        POST to the DB's /finalize_sanity_check to finalize a pending solution.
+        POST to /finalize_sanity_check to finalize a pending solution.
         """
         url = f"{self.db_adapter.base_url}/finalize_sanity_check"
         payload = {"task_id": task_id, "is_valid": is_valid}
@@ -314,7 +348,7 @@ class Master:
 
     async def update_sot(self, learning_params, tensor_name, result, input_url):
         """
-        Upload the new gradient updates to SOT via /update_state.
+        Upload new gradient updates to SOT via /update_state.
         """
         params = {
             "result_url": result["grads_url"],
@@ -347,7 +381,7 @@ class Master:
 
     async def _remove_iteration_entry(self, iteration_num: int):
         """
-        Remove the iteration entry from state_json["master_iteration_state"] entirely once it's done.
+        Remove iteration sub-dict from state_json["master_iteration_state"] after finishing.
         """
         state_data = await self.db_adapter.get_state_for_job(self.job_id)
         iteration_state_obj = state_data.get(self.state_key, {})
@@ -361,7 +395,7 @@ class Master:
 
     async def get_bid_price(self):
         """
-        Return the price for your training tasks. 
+        Return price for your tasks. (Hard-coded to 1 for now.)
         """
         return 1
 
@@ -377,7 +411,7 @@ class Master:
 
     def sign_message(self, message):
         """
-        Sign a message with our private key for authentication with SOT.
+        Sign a message with our private key for SOT authentication.
         """
         from eth_account.messages import encode_defunct
         msg_defunct = encode_defunct(text=message)
@@ -387,7 +421,7 @@ class Master:
 
     async def _get_iteration_state(self, iteration_number):
         """
-        Retrieve or initialize the sub-dict in job.state_json["master_iteration_state"][str(iteration_number)].
+        Retrieve or initialize job.state_json["master_iteration_state"][str(iteration_number)].
         """
         state_data = await self.db_adapter.get_state_for_job(self.job_id)
         iteration_state_obj = state_data.get(self.state_key, {})
@@ -399,7 +433,7 @@ class Master:
 
     async def _save_iteration_state(self, iteration_number, iteration_state):
         """
-        Save the iteration sub-dict for iteration_number back into the DB.
+        Save iteration sub-dict in DB so we can resume on crash.
         """
         state_data = await self.db_adapter.get_state_for_job(self.job_id)
         iteration_state_obj = state_data.get(self.state_key, {})

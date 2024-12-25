@@ -119,6 +119,15 @@ class DBAdapterClient:
             logger.error(response['error'])
             return None
         return [self._deserialize(Job, job) for job in response]
+    
+    @typechecked
+    async def get_jobs_in_progress(self) -> Optional[List[Job]]:
+        response = await self._authenticated_request('GET', '/get_jobs_in_progress')
+        if 'error' in response:
+            logger.error(response['error'])
+            return None
+        # each item is a job dict => deserialize
+        return [self._deserialize(Job, job_dict) for job_dict in response]
 
     @typechecked
     async def get_plugin(self, plugin_id: int) -> Optional[Plugin]:
