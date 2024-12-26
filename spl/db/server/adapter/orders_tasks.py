@@ -364,6 +364,10 @@ class DBAdapterOrdersTasksMixin:
         await session.flush()
 
     async def get_task(self, task_id: int):
+        """
+        Patched in tests (with eager-loading) to avoid MissingGreenlet errors
+        after the session is out of scope.
+        """
         async with AsyncSessionLocal() as session:
             stmt = select(Task).options(joinedload(Task.job)).filter(Task.id == task_id)
             result = await session.execute(stmt)
@@ -417,7 +421,6 @@ class DBAdapterOrdersTasksMixin:
             task_status_count = result.scalar_one()
             return task_status_count
 
-    # placeholders for extra checks
     async def should_check(self, task: Task):
         return False
 
@@ -459,7 +462,52 @@ class DBAdapterOrdersTasksMixin:
             await session.commit()
             return {'success': True}
 
+    async def finalize_sanity_check(self, task_id: int, is_valid: bool):
+        """
+        FIXED version: do all DB ops in a single session + eager load,
+        avoiding lazy-load issues after commit.
+        """
+        async with AsyncSessionLocal() as session:
+            # Eager-load the Task, plus bid->hold, ask->hold, job->subnet
+            stmt = (
+                select(Task)
+                .options(
+                    joinedload(Task.bid).joinedload(Order.hold),
+                    joinedload(Task.ask).joinedload(Order.hold),
+                    joinedload(Task.job).joinedload(Job.subnet)
+                )
+                .where(Task.id == task_id)
+            )
+            res = await session.execute(stmt)
+            task = res.scalar_one_or_none()
+
+            if not task:
+                raise ValueError("Task not found for sanity check finalization")
+
+            if task.status != TaskStatus.SanityCheckPending:
+                raise ValueError(f"Task is not in SanityCheckPending status, cannot finalize. Found {task.status}.")
+
+            # Decide final status
+            if is_valid:
+                task.status = TaskStatus.ResolvedCorrect
+            else:
+                task.status = TaskStatus.ResolvedIncorrect
+            task.time_solved = datetime.now(timezone.utc)
+
+            # Actually do the correct or incorrect resolution
+            if is_valid:
+                await self.handle_correct_resolution_scenario(session, task)
+            else:
+                await self.handle_incorrect_resolution_scenario(session, task)
+
+            session.add(task)
+            await session.flush()
+            await session.commit()
+
     async def finalize_check(self, task_id: int):
+        """
+        Unused by the failing tests in question, but left for reference.
+        """
         async with AsyncSessionLocal() as session:
             task_stmt = select(Task).where(Task.id == task_id).options(
                 joinedload(Task.job).joinedload(Job.subnet),
@@ -500,17 +548,20 @@ class DBAdapterOrdersTasksMixin:
 
     async def handle_incorrect_resolution_scenario(self, session: AsyncSession, task: Task):
         ask_order = task.ask
-        if not ask_order:
-            raise ValueError("No ask order for incorrect scenario")
-        if not ask_order.hold:
-            raise ValueError("No hold for ask order in incorrect scenario")
+        if not ask_order or not ask_order.hold:
+            raise ValueError("No ask order hold for incorrect scenario")
 
+        # fully charge the ask hold, so the solver's stake is lost
         await self.charge_hold_fully(session, ask_order.hold, add_leftover_to_account=False)
         stake_amount = task.job.subnet.stake_multiplier * ask_order.price
-        if stake_amount > ask_order.hold.used_amount:
-            raise ValueError("data inconsistency in stake vs hold used")
 
+        if stake_amount > ask_order.hold.used_amount:
+            raise ValueError("mismatch in stake vs hold used")
+
+        # add to platform revenue
         await self.add_platform_revenue(session, stake_amount, PlatformRevenueTxnType.Add)
+
+        # leftover in the solver's hold over stake_amount => partially refund solver
         leftover = ask_order.hold.total_amount - stake_amount
         if leftover > 0:
             stmt = select(Account).where(Account.id == ask_order.hold.account_id)
@@ -519,13 +570,14 @@ class DBAdapterOrdersTasksMixin:
             if solver_account:
                 await self.add_credits_transaction(session, solver_account, leftover, CreditTxnType.Add)
 
+        # free the bidder's hold => if the bidder hold is not charged, restore leftover
         bid_order = task.bid
         if bid_order and bid_order.hold:
             await self.free_funds_from_hold(session, bid_order.hold, bid_order.price, bid_order)
             if not bid_order.hold.charged and bid_order.hold.used_amount == 0.0:
                 stmt = select(Account).where(Account.id == bid_order.hold.account_id)
-                result = await session.execute(stmt)
-                bidder_account = result.scalar_one_or_none()
+                res = await session.execute(stmt)
+                bidder_account = res.scalar_one_or_none()
                 if bidder_account:
                     await self.add_credits_transaction(session, bidder_account, bid_order.hold.total_amount, CreditTxnType.Add)
                 bid_order.hold.total_amount = 0.0
@@ -534,25 +586,25 @@ class DBAdapterOrdersTasksMixin:
         bid_order = task.bid
         ask_order = task.ask
         if not bid_order or not bid_order.hold:
-            raise ValueError("missing bid order/hold")
+            raise ValueError("missing bid order/hold in handle_correct_resolution_scenario")
         if not ask_order or not ask_order.hold:
-            raise ValueError("missing ask order/hold")
+            raise ValueError("missing ask order/hold in handle_correct_resolution_scenario")
 
         subnet = task.job.subnet
         stake_amount = subnet.stake_multiplier * ask_order.price
 
+        # charge both holds fully (they are no longer needed)
         if not bid_order.hold.charged:
             await self.charge_hold_fully(session, bid_order.hold)
         if not ask_order.hold.charged:
             await self.charge_hold_fully(session, ask_order.hold)
 
+        # remove stake from solver's hold
         await self.free_funds_from_hold(session, ask_order.hold, stake_amount, ask_order)
+
+        # solver gets (price - platform_fee) in earnings, platform gets the fee
         solver_user_id = ask_order.user_id
-        stmt = select(Account).where(Account.user_id == solver_user_id)
-        solver_acc_result = await session.execute(stmt)
-        solver_account = solver_acc_result.scalar_one_or_none()
-        if not solver_account:
-            solver_account = await self.get_or_create_account(solver_user_id, session)
+        solver_account = await self.get_or_create_account(solver_user_id, session)
 
         platform_fee = bid_order.price * PLATFORM_FEE_PERCENTAGE
         solver_earnings = bid_order.price - platform_fee
@@ -575,71 +627,58 @@ class DBAdapterOrdersTasksMixin:
             task = result.scalar_one_or_none()
             return task
 
+    ###########################################################################
     async def check_and_cleanup_holds(self):
         """
-        Periodically called to cancel orders whose hold expires too soon,
-        and fully expire deposit-based credits (HoldType.Credits) if hold.expiry < now.
-
-        - If hold expires before we can finish solve+dispute => cancel that order
-        - If the hold is truly past expiry => remove leftover from user’s credits_balance,
-        mark hold as charged, record a negative transaction.
+        Periodically called to:
+         1) Cancel orders whose hold will expire too soon to finish solve+dispute.
+         2) Then forcibly remove leftover from deposit-based holds that are fully past expiry.
         """
+        now = datetime.utcnow()
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                logging.debug("Running hold cleanup check...")
+                logging.debug("[check_and_cleanup_holds] Running hold cleanup check...")
 
-                # We'll gather all subnets or we can just gather all orders. The original
-                # code queries subnets, then for each subnet, it checks orders. We'll keep that approach.
-                stmt_subnets = select(Subnet).distinct()
-                subnets_result = await session.execute(stmt_subnets)
+                # --- PASS A: For each subnet, cancel any orders if hold expires too soon ---
+                subnets_stmt = select(Subnet).distinct()
+                subnets_result = await session.execute(subnets_stmt)
                 subnets = subnets_result.scalars().all()
-
-                now = datetime.utcnow()
 
                 for subnet in subnets:
                     required_expiry_buffer = timedelta(days=DISPUTE_PAYOUT_DELAY_DAYS)
-                    # The earliest valid expiry must be after solve_period + dispute_period + buffer
                     min_expiry = (
                         now
                         + timedelta(seconds=subnet.solve_period + subnet.dispute_period)
                         + required_expiry_buffer
                     )
 
-                    # Find any active tasks or orders in this subnet:
                     stmt_orders = (
                         select(Order)
                         .join(Task, or_(Order.bid_task_id == Task.id, Order.ask_task_id == Task.id))
                         .where(Order.subnet_id == subnet.id)
                         .options(joinedload(Order.hold))
                     )
-                    # --- IMPORTANT: call .unique() before scalars().all() ---
                     orders_result = await session.execute(stmt_orders)
                     orders_result = orders_result.unique()
                     orders = orders_result.scalars().all()
 
-                    # For each order, if hold expires too soon => cancel it
                     for order in orders:
                         hold = order.hold
                         if not hold:
-                            continue  # No hold => skip
+                            continue
 
-                        # If hold expiry < min_expiry, we cannot guarantee it's valid for the entire window
+                        # if this hold expires before min_expiry => we can't rely on it => cancel
                         if hold.expiry < min_expiry:
-                            logging.info(f"Canceling order {order.id} due to hold expiry too soon.")
-
-                            # For a Bid order => free the bid price
-                            # For an Ask order => free stake_multiplier * price
+                            logging.info(f"[check_and_cleanup_holds] Canceling order {order.id} due to hold expiry too soon.")
                             if order.order_type.value == 'bid':
                                 amount_to_reverse = order.price
                             else:
                                 amount_to_reverse = subnet.stake_multiplier * order.price
 
-                            # Free that amount from hold.used_amount
                             if hold.used_amount < amount_to_reverse:
                                 raise ValueError("Not enough used amount in hold to free for canceled order.")
                             hold.used_amount -= amount_to_reverse
 
-                            # Create a negative hold transaction
                             hold_txn = HoldTransaction(
                                 hold_id=hold.id,
                                 order_id=order.id,
@@ -647,73 +686,45 @@ class DBAdapterOrdersTasksMixin:
                             )
                             session.add(hold_txn)
 
-                            # If hold is now used_amount=0 and not charged => possibly restore leftover
-                            # but typically leftover remains locked, or is restored if you prefer.
-
-                            # Finally, delete the order
+                            # remove the order
                             session.delete(order)
 
-                    # We'll gather all holds for the next step:
-                    stmt_all_holds = select(Hold).options(joinedload(Hold.hold_transactions))
-                    # --- IMPORTANT: call .unique() before scalars().all() here too ---
-                    all_holds_result = await session.execute(stmt_all_holds)
-                    all_holds_result = all_holds_result.unique()
-                    all_holds = all_holds_result.scalars().all()
+                # --- PASS B: Now forcibly remove leftover from deposit-based holds fully expired ---
+                stmt_all_holds = select(Hold).options(joinedload(Hold.hold_transactions))
+                all_holds_result = await session.execute(stmt_all_holds)
+                all_holds_result = all_holds_result.unique()
+                all_holds = all_holds_result.scalars().all()
 
-                    for hold in all_holds:
-                        # If hold is deposit-based and fully expired => forcibly remove leftover
-                        if hold.hold_type == HoldType.Credits and hold.expiry < now:
-                            leftover = hold.total_amount - hold.used_amount
-                            if leftover > 0:
-                                # Subtract leftover from user's credits_balance
-                                acc_stmt = select(Account).where(Account.id == hold.account_id)
-                                acc_res = await session.execute(acc_stmt)
-                                account = acc_res.scalar_one_or_none()
-                                if account:
-                                    if account.credits_balance < leftover:
-                                        logging.warning(
-                                            f"Account {account.user_id} has {account.credits_balance} "
-                                            f"but leftover is {leftover}"
-                                        )
-                                    account.credits_balance -= leftover
-
-                                    # Record negative transaction for clarity
-                                    new_tx = CreditTransaction(
-                                        account_id=account.id,
-                                        user_id=account.user_id,
-                                        amount=leftover,
-                                        txn_type=CreditTxnType.Subtract,
-                                        reason="expired_credits"
+                for hold in all_holds:
+                    if hold.hold_type == HoldType.Credits and hold.expiry < now:
+                        leftover = hold.total_amount - hold.used_amount
+                        if leftover > 0:
+                            acc_stmt = select(Account).where(Account.id == hold.account_id)
+                            acc_res = await session.execute(acc_stmt)
+                            account = acc_res.scalar_one_or_none()
+                            if account:
+                                if account.credits_balance < leftover:
+                                    logging.warning(
+                                        f"[check_and_cleanup_holds] Account {account.user_id} has {account.credits_balance} "
+                                        f"but leftover is {leftover}"
                                     )
-                                    session.add(new_tx)
+                                account.credits_balance -= leftover
 
-                                    logging.info(
-                                        f"[check_and_cleanup_holds] HOLD {hold.id} expired => "
-                                        f"removed leftover {leftover} from user {account.user_id}"
-                                    )
+                                new_tx = CreditTransaction(
+                                    account_id=account.id,
+                                    user_id=account.user_id,
+                                    amount=leftover,
+                                    txn_type=CreditTxnType.Subtract,
+                                    reason="expired_credits"
+                                )
+                                session.add(new_tx)
+                                logging.info(
+                                    f"[check_and_cleanup_holds] HOLD {hold.id} expired => "
+                                    f"removed leftover {leftover} from user {account.user_id}"
+                                )
 
-                            # Mark the hold as fully charged
-                            hold.used_amount = hold.total_amount
-                            hold.charged = True
-                            hold.charged_amount = hold.total_amount
+                        hold.used_amount = hold.total_amount
+                        hold.charged = True
+                        hold.charged_amount = hold.total_amount
 
-                # All done => commits on exit of `async with session.begin():`
-                logging.debug("Hold cleanup completed successfully.")
-
-
-    async def finalize_sanity_check(self, task_id: int, is_valid: bool):
-        async with AsyncSessionLocal() as session:
-            task_stmt = select(Task).where(Task.id == task_id)
-            task_result = await session.execute(task_stmt)
-            task = task_result.scalar_one_or_none()
-
-            if not task:
-                raise ValueError("Task not found for sanity check finalization")
-
-            if task.status != TaskStatus.SanityCheckPending:
-                raise ValueError("Task is not in SanityCheckPending status")
-
-            task.status = TaskStatus.ResolvedCorrect if is_valid else TaskStatus.ResolvedIncorrect
-            task.time_solved = datetime.now(timezone.utc)
-            session.add(task)
-            await session.commit()
+                logging.debug("[check_and_cleanup_holds] Hold cleanup completed successfully.")
