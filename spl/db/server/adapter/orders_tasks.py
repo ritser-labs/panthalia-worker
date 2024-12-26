@@ -583,6 +583,14 @@ class DBAdapterOrdersTasksMixin:
                 bid_order.hold.total_amount = 0.0
 
     async def handle_correct_resolution_scenario(self, session: AsyncSession, task: Task):
+        """
+        Called when finalize_sanity_check deems the solution correct.
+        We'll:
+        - fully charge the bidder's hold,
+        - *NOT* fully charge the solver's hold,
+        - instead free the solver's stake usage,
+        - pay solver (minus fee), etc.
+        """
         bid_order = task.bid
         ask_order = task.ask
         if not bid_order or not bid_order.hold:
@@ -593,24 +601,34 @@ class DBAdapterOrdersTasksMixin:
         subnet = task.job.subnet
         stake_amount = subnet.stake_multiplier * ask_order.price
 
-        # charge both holds fully (they are no longer needed)
+        # 1) fully charge the *bidder's hold*
         if not bid_order.hold.charged:
             await self.charge_hold_fully(session, bid_order.hold)
+
+        # 2) For the solver’s hold, do NOT fully charge in a correct scenario
+        #    Instead, we keep it “uncharged” and just free the ‘stake_amount’ usage.
+        #    If (for some reason) the solver’s hold was already “charged”, we skip.
         if not ask_order.hold.charged:
-            await self.charge_hold_fully(session, ask_order.hold)
+            # Freed the stake usage from solver’s hold => used_amount = used_amount - stake_amount
+            await self.free_funds_from_hold(session, ask_order.hold, stake_amount, ask_order)
+            # Now the solver’s hold ends up with used_amount=0 if it was exactly stake_amount used.
+            # And remain .charged=False => can be reused.
 
-        # remove stake from solver's hold
-        await self.free_funds_from_hold(session, ask_order.hold, stake_amount, ask_order)
-
-        # solver gets (price - platform_fee) in earnings, platform gets the fee
-        solver_user_id = ask_order.user_id
-        solver_account = await self.get_or_create_account(solver_user_id, session)
-
+        # 3) Pay solver => (bid_price - platform_fee) => solver_earnings,
+        #    plus we add the stake (which was locked) back to solver’s credits
         platform_fee = bid_order.price * PLATFORM_FEE_PERCENTAGE
         solver_earnings = bid_order.price - platform_fee
 
+        solver_user_id = ask_order.user_id
+        solver_account = await self.get_or_create_account(solver_user_id, session=session)
+
+        # add solver_earnings
         await self.add_earnings_transaction(session, solver_account, solver_earnings, EarningsTxnType.Add)
         await self.add_platform_revenue(session, platform_fee, PlatformRevenueTxnType.Add)
+
+        # add the stake to solver’s credits
+        await self.add_credits_transaction(session, solver_account, stake_amount, CreditTxnType.Add)
+
 
     async def get_last_task_with_status(self, job_id: int, statuses: list[TaskStatus]):
         async with AsyncSessionLocal() as session:
