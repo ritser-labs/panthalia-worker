@@ -9,72 +9,78 @@ from ....models import (
 DISPUTE_PAYOUT_DELAY_DAYS = 1
 
 class DBAdapterHoldsMixin:
-    async def select_hold_for_order(self, session: AsyncSession, account: Account, subnet, order_type, price: float, specified_hold_id: int = None):
-        required_expiry_buffer = timedelta(days=DISPUTE_PAYOUT_DELAY_DAYS)
-        min_expiry = datetime.utcnow() + timedelta(seconds=subnet.solve_period + subnet.dispute_period) + required_expiry_buffer
+    async def select_hold_for_order(
+        self,
+        session: AsyncSession,
+        account: Account,
+        subnet,
+        order_type,
+        price: float,
+        specified_hold_id: int = None
+    ):
+        """
+        Looks up an existing uncharged hold for the given account that has enough leftover
+        amount, does not expire too soon, and matches the needed 'required_amount'.
+        If 'specified_hold_id' is given, it must refer to a suitable hold.
+        Otherwise, we search for any suitable hold. If none found, we raise an error.
 
+        NOTE: This version removes the old fallback that created a brand-new hold from leftover credits.
+        """
+        # Dispute buffer for the entire solve+dispute window
+        required_expiry_buffer = timedelta(days=DISPUTE_PAYOUT_DELAY_DAYS)
+        # Must remain valid for solve_period + dispute_period + buffer
+        min_expiry = (
+            datetime.utcnow()
+            + timedelta(seconds=subnet.solve_period + subnet.dispute_period)
+            + required_expiry_buffer
+        )
+
+        # For a 'bid' we need exactly 'price' credits
+        # For an 'ask' we need 'stake_multiplier * price'
         if order_type.value == 'bid':
             required_amount = price
         else:
             required_amount = subnet.stake_multiplier * price
 
+        # If user explicitly specified a hold, check that hold only
         if specified_hold_id is not None:
-            stmt = select(Hold).where(Hold.id == specified_hold_id, Hold.account_id == account.id).options(selectinload(Hold.hold_transactions))
-            result = await session.execute(stmt)
-            hold = result.scalar_one_or_none()
-            if not hold:
-                raise ValueError("specified hold not found or not yours")
-            if hold.charged:
-                raise ValueError("this hold is already charged, cannot use")
-            if hold.expiry < min_expiry:
-                raise ValueError("hold expires too soon")
-            if (hold.total_amount - hold.used_amount) < required_amount:
-                raise ValueError("not enough hold amount")
-            if hold.hold_type == HoldType.Credits and not hold.charged:
-                used_before = any(ht.amount > 0 for ht in hold.hold_transactions)
-                if not used_before:
-                    if account.credits_balance < hold.total_amount:
-                        raise ValueError("insufficient credits to back this externally created credits hold")
-                    await self.add_credits_transaction(session, account, hold.total_amount, CreditTxnType.Subtract)
-                    await session.flush()
-            return hold
-        else:
             stmt = select(Hold).where(
-                Hold.account_id == account.id,
-                Hold.charged == False,
-                Hold.expiry > min_expiry,
-                (Hold.total_amount - Hold.used_amount) >= required_amount
+                Hold.id == specified_hold_id,
+                Hold.account_id == account.id
             ).options(selectinload(Hold.hold_transactions))
             result = await session.execute(stmt)
-            hold = result.scalars().first()
-            if hold:
-                if hold.hold_type == HoldType.Credits and not hold.charged:
-                    used_before = any(ht.amount > 0 for ht in hold.hold_transactions)
-                    if not used_before:
-                        if account.credits_balance < hold.total_amount:
-                            raise ValueError("insufficient credits to back this externally created credits hold")
-                        await self.add_credits_transaction(session, account, hold.total_amount, CreditTxnType.Subtract)
-                        await session.flush()
-                return hold
+            hold = result.scalar_one_or_none()
 
-            if account.credits_balance >= required_amount:
-                new_hold = Hold(
-                    account_id=account.id,
-                    user_id=account.user_id,
-                    hold_type=HoldType.Credits,
-                    total_amount=required_amount,
-                    used_amount=0.0,
-                    expiry=min_expiry,
-                    charged=False,
-                    charged_amount=0.0
-                )
-                session.add(new_hold)
-                account.credits_balance -= required_amount
-                await session.flush()
-                return new_hold
+            if not hold:
+                raise ValueError("Specified hold not found or does not belong to you.")
+            if hold.charged:
+                raise ValueError("This hold is already fully charged (cannot reuse).")
+            if hold.expiry < min_expiry:
+                raise ValueError("Specified hold expires too soon for this order.")
+            if (hold.total_amount - hold.used_amount) < required_amount:
+                raise ValueError("Not enough leftover amount on the specified hold.")
 
-            raise ValueError("no suitable hold found, please specify a hold or create one")
+            return hold
 
+        # Otherwise, search for any suitable uncharged hold with enough leftover
+        # that isn't expiring too soon.
+        stmt = select(Hold).where(
+            Hold.account_id == account.id,
+            Hold.charged == False,
+            Hold.expiry > min_expiry,
+            (Hold.total_amount - Hold.used_amount) >= required_amount
+        ).options(selectinload(Hold.hold_transactions))
+
+        result = await session.execute(stmt)
+        hold = result.scalars().first()
+        if hold:
+            # Found a suitable hold
+            return hold
+
+        # If nothing found, raise error. We do NOT create a brand-new hold.
+        raise ValueError("No suitable hold found. The deposit-based hold might be expired or used up.")
+
+    
     async def reserve_funds_on_hold(self, session: AsyncSession, hold: Hold, amount: float, order):
         if hold.total_amount - hold.used_amount < amount:
             raise ValueError("not enough hold funds")

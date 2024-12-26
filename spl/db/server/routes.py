@@ -550,3 +550,37 @@ async def update_job_active():
     await db_adapter_server.update_job_active(job_id, new_active)
     return jsonify({'success': True}), 200
 
+
+@app.route("/create_stripe_session", methods=["POST"])
+async def create_stripe_session_route():
+    data = await request.get_json() or {}
+    user_id = data.get("user_id")
+    raw_amt = data.get("amount")
+    if not user_id or raw_amt is None:
+        return jsonify({"error": "Missing user_id or amount"}), 400
+
+    try:
+        amount = float(raw_amt)
+    except ValueError:
+        return jsonify({"error": "Invalid amount"}), 400
+
+    db_adapter = get_db_adapter()
+    result = await db_adapter.create_stripe_session(user_id, amount)
+
+    if "error" in result:
+        status_code = result.get("status_code", 400)
+        return jsonify({"error": result["error"]}), status_code
+
+    return jsonify(result), 200
+
+
+@app.route("/stripe/webhook", methods=["POST"])
+async def stripe_webhook_route():
+    payload = await request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    db_adapter = get_db_adapter()
+    response = await db_adapter.handle_stripe_webhook(payload, sig_header)
+    if "error" in response:
+        return jsonify({"error": response["error"]}), response.get("status_code", 400)
+    return jsonify(response), 200

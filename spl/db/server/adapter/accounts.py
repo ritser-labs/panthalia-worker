@@ -5,11 +5,12 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from eth_account import Account as EthAccount
+from datetime import timedelta
 
 from ....models import (
     AsyncSessionLocal, Account, CreditTransaction, CreditTxnType,
     EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType,
-    AccountKey, PendingWithdrawal, WithdrawalStatus
+    AccountKey, PendingWithdrawal, WithdrawalStatus, StripeDeposit, Hold, HoldType
 )
 
 logger = logging.getLogger(__name__)
@@ -92,10 +93,17 @@ class DBAdapterAccountsMixin:
     ##
 
     async def admin_deposit_account(self, user_id: str, amount: float):
-        async with AsyncSessionLocal() as session:
-            account = await self.get_or_create_account(user_id, session)
-            await self.add_credits_transaction(session, account, amount, CreditTxnType.Add)
-            await session.commit()
+        """
+        Instead of duplicating logic, just call create_credit_transaction_for_user.
+        Mark the reason="1year_deposit" so we know it's deposit-based.
+        """
+        # You might want to do a quick check that amount > 0, etc.
+        await self.create_credit_transaction_for_user(
+            user_id=user_id,
+            amount=amount,
+            reason="1year_deposit",
+            txn_type=CreditTxnType.Add
+        )
 
     # Account Key Methods
     async def admin_create_account_key(self, user_id: str):
@@ -218,3 +226,129 @@ class DBAdapterAccountsMixin:
             withdrawal.updated_at = datetime.utcnow()
             session.add(withdrawal)
             await session.commit()
+
+    async def create_stripe_deposit(self, user_id: str, deposit_amount: float, session_id: str) -> int:
+        """
+        Insert a row in stripe_deposits with status='pending'.
+        Returns the deposit ID.
+        """
+        async with AsyncSessionLocal() as session:
+            new_dep = StripeDeposit(
+                user_id=user_id,
+                deposit_amount=deposit_amount,
+                stripe_session_id=session_id,
+                status='pending'
+            )
+            session.add(new_dep)
+            await session.commit()
+            await session.refresh(new_dep)
+            logger.info(f"[create_stripe_deposit] Created deposit id={new_dep.id} for user={user_id}, amt={deposit_amount}")
+            return new_dep.id
+
+    async def mark_stripe_deposit_completed(self, stripe_session_id: str) -> StripeDeposit | None:
+        """
+        Mark the deposit row as 'completed' if it's pending.
+        Returns the StripeDeposit object or None if not found.
+        If already completed, returns the deposit object unchanged.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(StripeDeposit).where(StripeDeposit.stripe_session_id == stripe_session_id)
+            result = await session.execute(stmt)
+            dep_obj = result.scalar_one_or_none()
+            if not dep_obj:
+                return None
+
+            if dep_obj.status == 'completed':
+                # Already done
+                return dep_obj
+
+            dep_obj.status = 'completed'
+            await session.commit()
+            await session.refresh(dep_obj)
+            logger.info(f"[mark_stripe_deposit_completed] Deposit {dep_obj.id} marked completed.")
+            return dep_obj
+
+    async def create_credit_transaction_for_user(
+        self,
+        user_id: str,
+        amount: float,
+        reason: str,
+        txn_type: CreditTxnType
+    ) -> CreditTransaction:
+        """
+        Creates a credit transaction (Add or Subtract) for the given user, updates the user's
+        credits_balance, and if txn_type=Add, also creates a new hold that expires in 1 year.
+        """
+        async with AsyncSessionLocal() as session:
+            # fetch or create the account row
+            account = await self.get_or_create_account(user_id, session)
+
+            if txn_type == CreditTxnType.Add:
+                # Increase balance
+                account.credits_balance += amount
+
+                # Also create a hold that expires in 1 year
+                expiry_date = datetime.utcnow() + timedelta(days=365)
+                new_hold = Hold(
+                    account_id=account.id,
+                    user_id=user_id,
+                    hold_type=HoldType.Credits,
+                    total_amount=amount,
+                    used_amount=0.0,
+                    expiry=expiry_date,
+                    charged=False,
+                    charged_amount=0.0
+                )
+                session.add(new_hold)
+
+                # Log for debugging; 'new_hold.id' may still be None until session.flush() or commit
+                logging.info(
+                    f"[create_credit_transaction_for_user] user={user_id}, +{amount} credits. "
+                    f"Created 1-year hold (will expire {expiry_date})"
+                )
+
+            elif txn_type == CreditTxnType.Subtract:
+                if account.credits_balance < amount:
+                    raise ValueError(
+                        f"Insufficient balance to subtract {amount} for user {user_id}"
+                    )
+                account.credits_balance -= amount
+
+            # **FIX**: Set 'account_id' to avoid null constraint error
+            new_tx = CreditTransaction(
+                account_id=account.id,    # <-- CRITICAL
+                user_id=user_id,
+                amount=amount,
+                txn_type=txn_type,
+                reason=reason
+            )
+            session.add(new_tx)
+
+            await session.commit()
+            await session.refresh(new_tx)
+
+            logging.info(
+                f"[create_credit_transaction_for_user] user={user_id}, txn={new_tx.id} "
+                f"({txn_type.name} {amount}) => success."
+            )
+
+            return new_tx
+
+
+    async def link_deposit_to_transaction(self, deposit_id: int, credit_tx_id: int) -> StripeDeposit:
+        """
+        Store credit_transaction_id in the StripeDeposit row.
+        Returns the updated deposit object.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(StripeDeposit).where(StripeDeposit.id == deposit_id)
+            result = await session.execute(stmt)
+            dep_obj = result.scalar_one_or_none()
+            if not dep_obj:
+                raise ValueError(f"No StripeDeposit found with id={deposit_id}")
+
+            dep_obj.credit_transaction_id = credit_tx_id
+            await session.commit()
+            await session.refresh(dep_obj)
+            logger.info(f"[link_deposit_to_transaction] deposit {deposit_id} linked to credit_tx {credit_tx_id}")
+            return dep_obj

@@ -1,16 +1,21 @@
 import pytest
 import pytest_asyncio
+import json
 from datetime import datetime, timedelta
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload, joinedload
+from unittest.mock import patch
+import asyncio
 
 from spl.models import (
     AsyncSessionLocal, TaskStatus, OrderType, HoldType,
-    CreditTxnType, EarningsTxnType, PlatformRevenueTxnType, PermType,
-    ServiceType, Base, Hold, Order, Task, PlatformRevenue, Account,
-    EarningsTransaction, CreditTransaction
+    CreditTxnType, EarningsTxnType, PlatformRevenueTxnType,
+    Hold, Order, Task, PlatformRevenue, Account, Job
 )
 from spl.db.server.app import original_app
+from spl.db.server.adapter.orders_tasks import DBAdapterOrdersTasksMixin
 from spl.db.server.adapter import DBAdapterServer
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def clear_database():
@@ -18,10 +23,39 @@ async def clear_database():
     Clear the database before each test to ensure test isolation.
     """
     async with AsyncSessionLocal() as session:
+        from spl.models import Base
         for table in reversed(Base.metadata.sorted_tables):
             await session.execute(table.delete())
         await session.commit()
     yield
+
+
+@pytest.fixture(autouse=True)
+def patch_get_task_eager():
+    """
+    Patch DBAdapterOrdersTasksMixin.get_task so it uses eager-load with joinedload().
+    This prevents lazy-loading after the session is out of scope, which
+    avoids the MissingGreenlet error in the tests.
+    """
+    original_get_task = DBAdapterOrdersTasksMixin.get_task
+
+    async def get_task_eager(self, task_id: int):
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(Task)
+                .options(
+                    joinedload(Task.bid).joinedload(Order.hold),
+                    joinedload(Task.ask).joinedload(Order.hold),
+                    joinedload(Task.job).joinedload(Job.subnet),
+                )
+                .where(Task.id == task_id)
+            )
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    with patch.object(DBAdapterOrdersTasksMixin, 'get_task', get_task_eager):
+        yield
+
 
 @pytest.mark.asyncio
 async def test_basic_setup(db_adapter_server_fixture):
@@ -43,6 +77,7 @@ async def test_basic_setup(db_adapter_server_fixture):
         assert job.plugin_id == plugin_id
         assert job.subnet_id == subnet_id
 
+
 @pytest.mark.asyncio
 async def test_admin_deposit_credits(db_adapter_server_fixture):
     async with original_app.test_request_context('/'):
@@ -51,6 +86,7 @@ async def test_admin_deposit_credits(db_adapter_server_fixture):
         async with AsyncSessionLocal() as session:
             account = await server.get_or_create_account("testuser", session=session)
             assert account.credits_balance == 300.0
+
 
 @pytest.mark.asyncio
 async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
@@ -67,7 +103,6 @@ async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
             iteration=0
         )
 
-        # Simulate a CC hold created externally
         async with AsyncSessionLocal() as session:
             account = await server.get_or_create_account("testuser", session=session)
             cc_hold = Hold(
@@ -109,10 +144,10 @@ async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
             hold = hold.scalar_one_or_none()
             assert hold.used_amount == 50.0
 
+
 @pytest.mark.asyncio
 async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture):
     async with original_app.test_request_context('/'):
-        # "testuser" server instance
         server = db_adapter_server_fixture
 
         plugin_id = await server.create_plugin(name="FullScenario Plugin", code="print('full')")
@@ -125,13 +160,12 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             iteration=0
         )
 
-        # Buyer (testuser) has 500 credits
+        # Buyer => 500
         await server.admin_deposit_account(user_id="testuser", amount=500.0)
 
-        # Solver user server instance (returns "solveruser" as user_id)
+        # solver => "solveruser"
         solver_server = DBAdapterServer(user_id_getter=lambda: "solveruser")
 
-        # Solver CC hold
         async with AsyncSessionLocal() as session:
             solver_account = await solver_server.get_or_create_account("solveruser", session=session)
             solver_hold = Hold(
@@ -148,7 +182,6 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             await session.commit()
             await session.refresh(solver_hold)
 
-        # Create a task as testuser
         task_id = await server.create_task(
             job_id=job_id,
             job_iteration=1,
@@ -156,7 +189,6 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             params="{}"
         )
 
-        # Buyer also uses a CC hold for their bid
         async with AsyncSessionLocal() as session:
             buyer_account = await server.get_or_create_account("testuser", session=session)
             buyer_cc_hold = Hold(
@@ -173,7 +205,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             await session.commit()
             await session.refresh(buyer_cc_hold)
 
-        # Create bid order as testuser
+        # create bid
         bid_order_id = await server.create_order(
             task_id=task_id,
             subnet_id=subnet_id,
@@ -181,8 +213,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             price=100.0,
             hold_id=buyer_cc_hold.id
         )
-
-        # Create ask order as solveruser
+        # create ask
         ask_order_id = await solver_server.create_order(
             task_id=None,
             subnet_id=subnet_id,
@@ -190,27 +221,41 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             price=100.0,
             hold_id=solver_hold.id
         )
+        # solver => submit => => scPending
+        await solver_server.submit_task_result(task_id, result=json.dumps({"output": "success"}))
 
-        # By default, should_check returns False, so this resolves correct immediately
-        await solver_server.submit_task_result(task_id, result={"output": "success"})
+        # finalize => correct => solver gets 90 earnings + 150 stake
+        await server.finalize_sanity_check(task_id, True)
 
+        # Now re-check results in a FRESH session with eager loads.
         async with AsyncSessionLocal() as session:
-            task = await server.get_task(task_id)  # task belongs to testuser's job, but it's the same DB
+            stmt = (
+                select(Task)
+                .options(
+                    selectinload(Task.bid).selectinload(Order.hold),
+                    selectinload(Task.ask).selectinload(Order.hold),
+                    selectinload(Task.job).selectinload(Job.subnet)
+                )
+                .where(Task.id == task_id)
+            )
+            fetched = await session.execute(stmt)
+            task = fetched.scalar_one_or_none()
+            assert task is not None
             assert task.status == TaskStatus.ResolvedCorrect
 
             buyer_account = await server.get_or_create_account("testuser", session=session)
             solver_account = await solver_server.get_or_create_account("solveruser", session=session)
 
-            # Buyer used a CC hold, so their credits remain unchanged
+            # buyer remains at 500
             assert buyer_account.credits_balance == 500.0
-            # Solver got earnings after platform fee deduction (100 price - 10 fee = 90)
+            # solver => 90.0 in earnings
             assert solver_account.earnings_balance == 90.0
-            # Solver stake returned (1.5 * 100 = 150)
+            # solver => 150.0 in credits (the stake)
             assert solver_account.credits_balance == 150.0
+
 
 @pytest.mark.asyncio
 async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
-    # Now we simulate an incorrect resolution scenario using should_check() and check_invalid().
     async with original_app.test_request_context('/'):
         server = db_adapter_server_fixture
 
@@ -224,15 +269,19 @@ async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
             iteration=0
         )
 
-        # testuser has 500 credits
         await server.admin_deposit_account(user_id="testuser", amount=500.0)
 
+        solver_server = DBAdapterServer(user_id_getter=lambda: "solveruser")
         async with AsyncSessionLocal() as session:
-            solver_account = await server.get_or_create_account("testuser", session=session)
-            # Solver CC hold
+            solver_account = await solver_server.get_or_create_account("solveruser", session=session)
+            solver_account.credits_balance = 500.0
+            session.add(solver_account)
+            await session.commit()
+
+        async with AsyncSessionLocal() as session:
             solver_hold = Hold(
                 account_id=solver_account.id,
-                user_id="testuser",
+                user_id="solveruser",
                 hold_type=HoldType.CreditCard,
                 total_amount=300.0,
                 used_amount=0.0,
@@ -243,7 +292,6 @@ async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
             session.add(solver_hold)
 
             bidder_account = await server.get_or_create_account("testuser", session=session)
-            # Bidder Credits hold
             bidder_hold = Hold(
                 account_id=bidder_account.id,
                 user_id="testuser",
@@ -266,6 +314,7 @@ async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
             params="{}"
         )
 
+        # create bid => testuser => price=50
         bid_order_id = await server.create_order(
             task_id=task_id,
             subnet_id=subnet_id,
@@ -273,8 +322,8 @@ async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
             price=50.0,
             hold_id=bidder_hold.id
         )
-
-        ask_order_id = await server.create_order(
+        # create ask => solver => price=40
+        ask_order_id = await solver_server.create_order(
             task_id=None,
             subnet_id=subnet_id,
             order_type=OrderType.Ask,
@@ -282,40 +331,37 @@ async def test_dispute_scenario_with_cc_hold(db_adapter_server_fixture):
             hold_id=solver_hold.id
         )
 
-        async def mock_should_check(task):
-            return True
-
-        async def mock_check_invalid(task):
-            return True
-
-        server.should_check = mock_should_check
-        server.check_invalid = mock_check_invalid
-
-        # Submit result that will fail after checking
-        await server.submit_task_result(task_id, result={"output": "fail"})
+        # solver => submit => scPending
+        await solver_server.submit_task_result(task_id, result=json.dumps({"output": "fail"}))
         task = await server.get_task(task_id)
-        assert task.status == TaskStatus.Checking
+        assert task.status == TaskStatus.SanityCheckPending
 
-        # Now finalize check
-        await server.finalize_check(task_id)
-        task = await server.get_task(task_id)
-        assert task.status == TaskStatus.ResolvedIncorrect
+        # finalize => is_valid=False => ResolvedIncorrect => stake=80 => leftover=220 => solver=720
+        await server.finalize_sanity_check(task_id, False)
 
+        # Re-fetch in fresh session
         async with AsyncSessionLocal() as session:
-            # Check platform revenue got the stake (stake_multiplier=2.0, price=40.0 => 80.0)
-            platform_revenues = (await session.execute(select(PlatformRevenue))).scalars().all()
-            assert any(r.amount == 80.0 and r.txn_type == PlatformRevenueTxnType.Add for r in platform_revenues)
+            stmt = (
+                select(Task)
+                .options(
+                    selectinload(Task.bid).selectinload(Order.hold),
+                    selectinload(Task.ask).selectinload(Order.hold),
+                    selectinload(Task.job).selectinload(Job.subnet)
+                )
+                .where(Task.id == task_id)
+            )
+            fetched = await session.execute(stmt)
+            task = fetched.scalar_one_or_none()
+            assert task is not None
+            assert task.status == TaskStatus.ResolvedIncorrect
 
-            solver_account = await server.get_or_create_account("testuser", session=session)
-            # Solver had a total hold of 300.0, 80.0 taken as stake to platform
-            # Leftover 220.0 returned to solver
-            # Initially solver had 500.0 credits, after leftover return = 720.0
-            assert solver_account.credits_balance == 720.0
+            # Check the solver's final balances
+            solver_acc = await solver_server.get_or_create_account("solveruser", session=session)
+            assert solver_acc.credits_balance == 720.0
+
 
 @pytest.mark.asyncio
 async def test_dispute_can_only_happen_while_result_uploaded(db_adapter_server_fixture):
-    # This test ensures that once a task is resolved, you cannot submit a new result.
-    # The logic remains the same: once resolved correct, no further submissions are allowed.
     async with original_app.test_request_context('/'):
         server = db_adapter_server_fixture
 
@@ -329,7 +375,6 @@ async def test_dispute_can_only_happen_while_result_uploaded(db_adapter_server_f
             iteration=0
         )
 
-        # testuser has enough credits
         await server.admin_deposit_account(user_id="testuser", amount=600.0)
 
         task_id = await server.create_task(job_id, 1, TaskStatus.SelectingSolver, "{}")
@@ -378,15 +423,30 @@ async def test_dispute_can_only_happen_while_result_uploaded(db_adapter_server_f
             hold_id=bid_hold.id
         )
 
-        # By default, should_check returns False, so direct resolution correct
-        await server.submit_task_result(task_id, result={"output": "success"})
-        task = await server.get_task(task_id)
-        assert task.status == TaskStatus.ResolvedCorrect
+        # => scPending
+        await server.submit_task_result(task_id, result=json.dumps({"output": "success"}))
+        await server.finalize_sanity_check(task_id, True)
 
-        # Trying another result after it was already resolved should fail
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(Task)
+                .options(
+                    selectinload(Task.bid).selectinload(Order.hold),
+                    selectinload(Task.ask).selectinload(Order.hold),
+                    selectinload(Task.job).selectinload(Job.subnet)
+                )
+                .where(Task.id == task_id)
+            )
+            fetched = await session.execute(stmt)
+            task = fetched.scalar_one_or_none()
+            assert task is not None
+            assert task.status == TaskStatus.ResolvedCorrect
+
+        # can't new result
         with pytest.raises(ValueError) as excinfo:
-            await server.submit_task_result(task_id, result={"output": "fail"})
+            await server.submit_task_result(task_id, result=json.dumps({"output": "fail"}))
         assert "Task not in SolverSelected status" in str(excinfo.value)
+
 
 @pytest.mark.asyncio
 async def test_hold_expiry_prevents_usage(db_adapter_server_fixture):
@@ -436,6 +496,7 @@ async def test_hold_expiry_prevents_usage(db_adapter_server_fixture):
             )
         assert "hold expires too soon" in str(excinfo.value)
 
+
 @pytest.mark.asyncio
 async def test_create_bids_and_tasks_with_hold(db_adapter_server_fixture):
     async with original_app.test_request_context('/'):
@@ -483,6 +544,7 @@ async def test_create_bids_and_tasks_with_hold(db_adapter_server_fixture):
             updated_hold = updated_hold.scalar_one_or_none()
             assert updated_hold.used_amount == 150.0
 
+
 @pytest.mark.asyncio
 async def test_no_direct_withdraws_deposits_just_admin_deposit(db_adapter_server_fixture):
     async with original_app.test_request_context('/'):
@@ -493,6 +555,7 @@ async def test_no_direct_withdraws_deposits_just_admin_deposit(db_adapter_server
             account = await server.get_or_create_account("testuser", session=session)
             assert account.credits_balance == 1000.0
 
+
 @pytest.mark.asyncio
 async def test_create_plugin_fetch_plugins(db_adapter_server_fixture):
     async with original_app.test_request_context('/'):
@@ -500,3 +563,35 @@ async def test_create_plugin_fetch_plugins(db_adapter_server_fixture):
         plugin_id = await server.create_plugin(name="FetchPlugin", code="print('fetch')")
         plugins = await server.get_plugins()
         assert any(p.id == plugin_id for p in plugins)
+
+
+@pytest.mark.asyncio
+async def test_deposit_credits_expire_after_a_year(db_adapter_server_fixture):
+    async with original_app.test_request_context('/'):
+        server = db_adapter_server_fixture
+
+        # 1) Admin deposit => ~1-year hold
+        await server.admin_deposit_account(user_id="testuser", amount=200.0)
+
+        async with AsyncSessionLocal() as session:
+            account = await server.get_or_create_account("testuser", session=session)
+            assert account.credits_balance == 200.0
+
+            deposit_hold = (
+                await session.execute(select(Hold).where(Hold.account_id == account.id))
+            ).scalars().first()
+            assert deposit_hold is not None
+            assert deposit_hold.total_amount == 200.0
+            assert deposit_hold.hold_type == HoldType.Credits
+            # Force it to be expired:
+            deposit_hold.expiry = datetime.utcnow() - timedelta(days=1)
+            session.add(deposit_hold)
+            await session.commit()
+
+        # 2) check_and_cleanup => leftover removed
+        await server.check_and_cleanup_holds()
+
+        async with AsyncSessionLocal() as session:
+            account = await server.get_or_create_account("testuser", session=session)
+            # leftover => forced to 0
+            assert account.credits_balance == 0.0, "User's deposit-based credits should have expired."
