@@ -9,14 +9,12 @@ from .adapter import db_adapter_server, init_db  # Import init_db
 
 async def background_tasks():
     # Run a periodic background loop to ensure open orders still meet hold expiry criteria
-    # For demonstration, run it every 3600 seconds (1 hour)
-    # In production, choose an appropriate interval.
     while True:
         try:
             await db_adapter_server.check_and_cleanup_holds()
         except Exception as e:
             logger.error(f"Error in check_and_cleanup_holds: {e}")
-        await asyncio.sleep(3600)  # Wait 1 hour before next check
+        await asyncio.sleep(5)  # Wait 5 seconds
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Database Server")

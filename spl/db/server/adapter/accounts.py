@@ -5,11 +5,12 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from eth_account import Account as EthAccount
+from datetime import timedelta
 
 from ....models import (
     AsyncSessionLocal, Account, CreditTransaction, CreditTxnType,
     EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType,
-    AccountKey, PendingWithdrawal, WithdrawalStatus, StripeDeposit
+    AccountKey, PendingWithdrawal, WithdrawalStatus, StripeDeposit, Hold, HoldType
 )
 
 logger = logging.getLogger(__name__)
@@ -92,10 +93,17 @@ class DBAdapterAccountsMixin:
     ##
 
     async def admin_deposit_account(self, user_id: str, amount: float):
-        async with AsyncSessionLocal() as session:
-            account = await self.get_or_create_account(user_id, session)
-            await self.add_credits_transaction(session, account, amount, CreditTxnType.Add)
-            await session.commit()
+        """
+        Instead of duplicating logic, just call create_credit_transaction_for_user.
+        Mark the reason="1year_deposit" so we know it's deposit-based.
+        """
+        # You might want to do a quick check that amount > 0, etc.
+        await self.create_credit_transaction_for_user(
+            user_id=user_id,
+            amount=amount,
+            reason="1year_deposit",
+            txn_type=CreditTxnType.Add
+        )
 
     # Account Key Methods
     async def admin_create_account_key(self, user_id: str):
@@ -261,32 +269,54 @@ class DBAdapterAccountsMixin:
             return dep_obj
 
     async def create_credit_transaction_for_user(
-        self, user_id: str, amount: float, reason: str, txn_type: CreditTxnType
+        self,
+        user_id: str,
+        amount: float,
+        reason: str,
+        txn_type: CreditTxnType
     ) -> CreditTransaction:
         """
-        Creates a new credit transaction row (with given txn_type),
-        and increments (or decrements) the user's account balance accordingly.
-        Returns the newly created CreditTransaction object.
+        Creates a credit transaction (Add or Subtract) for the given user, updates the user's
+        credits_balance, and if txn_type=Add, also creates a new hold that expires in 1 year.
         """
         async with AsyncSessionLocal() as session:
             # fetch or create the account row
-            stmt_acc = select(Account).where(Account.user_id == user_id)
-            res_acc = await session.execute(stmt_acc)
-            acc_obj = res_acc.scalar_one_or_none()
-            if not acc_obj:
-                raise ValueError(f"No Account found for user_id={user_id}")
+            account = await self.get_or_create_account(user_id, session)
 
-            # adjust balance
             if txn_type == CreditTxnType.Add:
-                acc_obj.credits_balance += amount
+                # Increase balance
+                account.credits_balance += amount
+
+                # Also create a hold that expires in 1 year
+                expiry_date = datetime.utcnow() + timedelta(days=365)
+                new_hold = Hold(
+                    account_id=account.id,
+                    user_id=user_id,
+                    hold_type=HoldType.Credits,
+                    total_amount=amount,
+                    used_amount=0.0,
+                    expiry=expiry_date,
+                    charged=False,
+                    charged_amount=0.0
+                )
+                session.add(new_hold)
+
+                # Log for debugging; 'new_hold.id' may still be None until session.flush() or commit
+                logging.info(
+                    f"[create_credit_transaction_for_user] user={user_id}, +{amount} credits. "
+                    f"Created 1-year hold (will expire {expiry_date})"
+                )
+
             elif txn_type == CreditTxnType.Subtract:
-                if acc_obj.credits_balance < amount:
+                if account.credits_balance < amount:
                     raise ValueError(
                         f"Insufficient balance to subtract {amount} for user {user_id}"
                     )
-                acc_obj.credits_balance -= amount
+                account.credits_balance -= amount
 
+            # **FIX**: Set 'account_id' to avoid null constraint error
             new_tx = CreditTransaction(
+                account_id=account.id,    # <-- CRITICAL
                 user_id=user_id,
                 amount=amount,
                 txn_type=txn_type,
@@ -294,12 +324,16 @@ class DBAdapterAccountsMixin:
             )
             session.add(new_tx)
 
-            # commit both account update + transaction
             await session.commit()
             await session.refresh(new_tx)
-            logger.info(f"[create_credit_transaction_for_user] user={user_id}, type={txn_type}, amount={amount}, tx_id={new_tx.id}")
+
+            logging.info(
+                f"[create_credit_transaction_for_user] user={user_id}, txn={new_tx.id} "
+                f"({txn_type.name} {amount}) => success."
+            )
 
             return new_tx
+
 
     async def link_deposit_to_transaction(self, deposit_id: int, credit_tx_id: int) -> StripeDeposit:
         """

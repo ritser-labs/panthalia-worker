@@ -11,7 +11,8 @@ import json
 
 from ....models import (
     AsyncSessionLocal, Job, Task, TaskStatus, Subnet,
-    Order, Account, OrderType, HoldType, CreditTxnType, EarningsTxnType, PlatformRevenueTxnType, Hold
+    Order, Account, OrderType, HoldType, CreditTxnType, EarningsTxnType, PlatformRevenueTxnType,
+    CreditTransaction, HoldTransaction, Hold
 )
 
 logger = logging.getLogger(__name__)
@@ -575,55 +576,130 @@ class DBAdapterOrdersTasksMixin:
             return task
 
     async def check_and_cleanup_holds(self):
+        """
+        Periodically called to cancel orders whose hold expires too soon,
+        and fully expire deposit-based credits (HoldType.Credits) if hold.expiry < now.
+
+        - If hold expires before we can finish solve+dispute => cancel that order
+        - If the hold is truly past expiry => remove leftover from user’s credits_balance,
+        mark hold as charged, record a negative transaction.
+        """
         async with AsyncSessionLocal() as session:
-            logger.debug("Running hold cleanup check...")
-            stmt_subnets = select(Subnet).distinct()
-            subnets = (await session.execute(stmt_subnets)).scalars().all()
-            now = datetime.utcnow()
+            async with session.begin():
+                logging.debug("Running hold cleanup check...")
 
-            for subnet in subnets:
-                required_expiry_buffer = timedelta(days=DISPUTE_PAYOUT_DELAY_DAYS)
-                min_expiry = (
-                    now
-                    + timedelta(seconds=subnet.solve_period + subnet.dispute_period)
-                    + required_expiry_buffer
-                )
+                # We'll gather all subnets or we can just gather all orders. The original
+                # code queries subnets, then for each subnet, it checks orders. We'll keep that approach.
+                stmt_subnets = select(Subnet).distinct()
+                subnets_result = await session.execute(stmt_subnets)
+                subnets = subnets_result.scalars().all()
 
-                stmt_orders = (
-                    select(Order)
-                    .join(Task, or_(Order.bid_task_id == Task.id, Order.ask_task_id == Task.id))
-                    .where(
-                        Order.subnet_id == subnet.id,
-                        Task.status.in_([TaskStatus.SelectingSolver, TaskStatus.SolverSelected])
+                now = datetime.utcnow()
+
+                for subnet in subnets:
+                    required_expiry_buffer = timedelta(days=DISPUTE_PAYOUT_DELAY_DAYS)
+                    # The earliest valid expiry must be after solve_period + dispute_period + buffer
+                    min_expiry = (
+                        now
+                        + timedelta(seconds=subnet.solve_period + subnet.dispute_period)
+                        + required_expiry_buffer
                     )
-                    .options(joinedload(Order.hold))
-                )
-                orders = (await session.execute(stmt_orders)).scalars().all()
 
-                for order in orders:
-                    if order.hold and order.hold.expiry < min_expiry:
-                        logger.info(f"Canceling order {order.id} due to hold expiry too soon.")
-                        if order.order_type == OrderType.Bid:
-                            amount_to_reverse = order.price
-                        else:
-                            amount_to_reverse = subnet.stake_multiplier * order.price
+                    # Find any active tasks or orders in this subnet:
+                    stmt_orders = (
+                        select(Order)
+                        .join(Task, or_(Order.bid_task_id == Task.id, Order.ask_task_id == Task.id))
+                        .where(Order.subnet_id == subnet.id)
+                        .options(joinedload(Order.hold))
+                    )
+                    # --- IMPORTANT: call .unique() before scalars().all() ---
+                    orders_result = await session.execute(stmt_orders)
+                    orders_result = orders_result.unique()
+                    orders = orders_result.scalars().all()
 
-                        await self.free_funds_from_hold(session, order.hold, amount_to_reverse, order)
-                        if not order.hold.charged and order.hold.used_amount == 0:
-                            stmt_acc = select(Account).where(Account.id == order.hold.account_id)
-                            acc_res = await session.execute(stmt_acc)
-                            hold_account = acc_res.scalar_one_or_none()
-                            if hold_account and order.hold.hold_type == HoldType.Credits:
-                                await self.add_credits_transaction(
-                                    session,
-                                    hold_account,
-                                    order.hold.total_amount,
-                                    CreditTxnType.Add
-                                )
-                            order.hold.total_amount = 0.0
+                    # For each order, if hold expires too soon => cancel it
+                    for order in orders:
+                        hold = order.hold
+                        if not hold:
+                            continue  # No hold => skip
 
-                        await session.delete(order)
-            await session.commit()
+                        # If hold expiry < min_expiry, we cannot guarantee it's valid for the entire window
+                        if hold.expiry < min_expiry:
+                            logging.info(f"Canceling order {order.id} due to hold expiry too soon.")
+
+                            # For a Bid order => free the bid price
+                            # For an Ask order => free stake_multiplier * price
+                            if order.order_type.value == 'bid':
+                                amount_to_reverse = order.price
+                            else:
+                                amount_to_reverse = subnet.stake_multiplier * order.price
+
+                            # Free that amount from hold.used_amount
+                            if hold.used_amount < amount_to_reverse:
+                                raise ValueError("Not enough used amount in hold to free for canceled order.")
+                            hold.used_amount -= amount_to_reverse
+
+                            # Create a negative hold transaction
+                            hold_txn = HoldTransaction(
+                                hold_id=hold.id,
+                                order_id=order.id,
+                                amount=-amount_to_reverse
+                            )
+                            session.add(hold_txn)
+
+                            # If hold is now used_amount=0 and not charged => possibly restore leftover
+                            # but typically leftover remains locked, or is restored if you prefer.
+
+                            # Finally, delete the order
+                            session.delete(order)
+
+                    # We'll gather all holds for the next step:
+                    stmt_all_holds = select(Hold).options(joinedload(Hold.hold_transactions))
+                    # --- IMPORTANT: call .unique() before scalars().all() here too ---
+                    all_holds_result = await session.execute(stmt_all_holds)
+                    all_holds_result = all_holds_result.unique()
+                    all_holds = all_holds_result.scalars().all()
+
+                    for hold in all_holds:
+                        # If hold is deposit-based and fully expired => forcibly remove leftover
+                        if hold.hold_type == HoldType.Credits and hold.expiry < now:
+                            leftover = hold.total_amount - hold.used_amount
+                            if leftover > 0:
+                                # Subtract leftover from user's credits_balance
+                                acc_stmt = select(Account).where(Account.id == hold.account_id)
+                                acc_res = await session.execute(acc_stmt)
+                                account = acc_res.scalar_one_or_none()
+                                if account:
+                                    if account.credits_balance < leftover:
+                                        logging.warning(
+                                            f"Account {account.user_id} has {account.credits_balance} "
+                                            f"but leftover is {leftover}"
+                                        )
+                                    account.credits_balance -= leftover
+
+                                    # Record negative transaction for clarity
+                                    new_tx = CreditTransaction(
+                                        account_id=account.id,
+                                        user_id=account.user_id,
+                                        amount=leftover,
+                                        txn_type=CreditTxnType.Subtract,
+                                        reason="expired_credits"
+                                    )
+                                    session.add(new_tx)
+
+                                    logging.info(
+                                        f"[check_and_cleanup_holds] HOLD {hold.id} expired => "
+                                        f"removed leftover {leftover} from user {account.user_id}"
+                                    )
+
+                            # Mark the hold as fully charged
+                            hold.used_amount = hold.total_amount
+                            hold.charged = True
+                            hold.charged_amount = hold.total_amount
+
+                # All done => commits on exit of `async with session.begin():`
+                logging.debug("Hold cleanup completed successfully.")
+
 
     async def finalize_sanity_check(self, task_id: int, is_valid: bool):
         async with AsyncSessionLocal() as session:
