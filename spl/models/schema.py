@@ -205,6 +205,11 @@ class Hold(Serializable):
     account = relationship("Account", back_populates="holds")
     hold_transactions = relationship("HoldTransaction", back_populates="hold")
     orders = relationship("Order", back_populates="hold")
+    
+    # NEW: parent_hold_id for leftover chain
+    parent_hold_id = Column(Integer, ForeignKey('holds.id'), nullable=True)
+    # We define a self-referential relationship so that each leftover hold can point to its parent
+    parent_hold = relationship("Hold", remote_side=[id], backref="child_holds")
 
 class HoldTransaction(Serializable):
     __tablename__ = 'hold_transactions'

@@ -546,88 +546,87 @@ class DBAdapterOrdersTasksMixin:
         else:
             await self.handle_incorrect_resolution_scenario(session, task)
 
-    async def handle_incorrect_resolution_scenario(self, session: AsyncSession, task: Task):
-        ask_order = task.ask
-        if not ask_order or not ask_order.hold:
-            raise ValueError("No ask order hold for incorrect scenario")
-
-        # fully charge the ask hold, so the solver's stake is lost
-        await self.charge_hold_fully(session, ask_order.hold, add_leftover_to_account=False)
-        stake_amount = task.job.subnet.stake_multiplier * ask_order.price
-
-        if stake_amount > ask_order.hold.used_amount:
-            raise ValueError("mismatch in stake vs hold used")
-
-        # add to platform revenue
-        await self.add_platform_revenue(session, stake_amount, PlatformRevenueTxnType.Add)
-
-        # leftover in the solver's hold over stake_amount => partially refund solver
-        leftover = ask_order.hold.total_amount - stake_amount
-        if leftover > 0:
-            stmt = select(Account).where(Account.id == ask_order.hold.account_id)
-            result = await session.execute(stmt)
-            solver_account = result.scalar_one_or_none()
-            if solver_account:
-                await self.add_credits_transaction(session, solver_account, leftover, CreditTxnType.Add)
-
-        # free the bidder's hold => if the bidder hold is not charged, restore leftover
-        bid_order = task.bid
-        if bid_order and bid_order.hold:
-            await self.free_funds_from_hold(session, bid_order.hold, bid_order.price, bid_order)
-            if not bid_order.hold.charged and bid_order.hold.used_amount == 0.0:
-                stmt = select(Account).where(Account.id == bid_order.hold.account_id)
-                res = await session.execute(stmt)
-                bidder_account = res.scalar_one_or_none()
-                if bidder_account:
-                    await self.add_credits_transaction(session, bidder_account, bid_order.hold.total_amount, CreditTxnType.Add)
-                bid_order.hold.total_amount = 0.0
-
     async def handle_correct_resolution_scenario(self, session: AsyncSession, task: Task):
         """
-        Called when finalize_sanity_check deems the solution correct.
-        We'll:
-        - fully charge the bidder's hold,
-        - *NOT* fully charge the solver's hold,
-        - instead free the solver's stake usage,
-        - pay solver (minus fee), etc.
+        A correct solver solution => buyer pays, solver staked funds freed, 
+        solver's 'earnings' => a new hold with 1-year expiry, no indefinite credits.
         """
         bid_order = task.bid
         ask_order = task.ask
         if not bid_order or not bid_order.hold:
-            raise ValueError("missing bid order/hold in handle_correct_resolution_scenario")
+            raise ValueError("Missing buyer hold in correct scenario.")
         if not ask_order or not ask_order.hold:
-            raise ValueError("missing ask order/hold in handle_correct_resolution_scenario")
+            raise ValueError("Missing solver hold in correct scenario.")
 
         subnet = task.job.subnet
         stake_amount = subnet.stake_multiplier * ask_order.price
 
-        # 1) fully charge the *bidder's hold*
+        # 1) Buyer => fully charge => leftover => new hold
         if not bid_order.hold.charged:
             await self.charge_hold_fully(session, bid_order.hold)
 
-        # 2) For the solver’s hold, do NOT fully charge in a correct scenario
-        #    Instead, we keep it “uncharged” and just free the ‘stake_amount’ usage.
-        #    If (for some reason) the solver’s hold was already “charged”, we skip.
+        # 2) Solver => free the stake usage, so solver hold reverts to used=0, remain uncharged
         if not ask_order.hold.charged:
-            # Freed the stake usage from solver’s hold => used_amount = used_amount - stake_amount
             await self.free_funds_from_hold(session, ask_order.hold, stake_amount, ask_order)
-            # Now the solver’s hold ends up with used_amount=0 if it was exactly stake_amount used.
-            # And remain .charged=False => can be reused.
 
-        # 3) Pay solver => (bid_price - platform_fee) => solver_earnings,
-        #    plus we add the stake (which was locked) back to solver’s credits
-        platform_fee = bid_order.price * PLATFORM_FEE_PERCENTAGE
-        solver_earnings = bid_order.price - platform_fee
+        # 3) solver's "earnings" => create a new hold
+        buyer_price = bid_order.price
+        platform_fee = buyer_price * PLATFORM_FEE_PERCENTAGE
+        solver_earnings = buyer_price - platform_fee
 
         solver_user_id = ask_order.user_id
         solver_account = await self.get_or_create_account(solver_user_id, session=session)
 
-        # add solver_earnings
-        await self.add_earnings_transaction(session, solver_account, solver_earnings, EarningsTxnType.Add)
+        if solver_earnings > 0:
+            # place solver_earnings in a new hold => e.g. 1-year expiry
+            new_earnings_hold = Hold(
+                account_id=solver_account.id,
+                user_id=solver_user_id,
+                hold_type="Credits",  # or whatever type you prefer
+                total_amount=solver_earnings,
+                used_amount=0.0,
+                expiry=datetime.utcnow() + timedelta(days=365),
+                charged=False,
+                charged_amount=0.0,
+                parent_hold_id=None  # no parent, since these are newly minted funds
+            )
+            session.add(new_earnings_hold)
+
+        # platform gets the fee => if you want that in a hold too, do so. 
+        # Or use your existing approach:
         await self.add_platform_revenue(session, platform_fee, PlatformRevenueTxnType.Add)
 
-        # add the stake to solver’s credits
-        await self.add_credits_transaction(session, solver_account, stake_amount, CreditTxnType.Add)
+    async def handle_incorrect_resolution_scenario(self, session: AsyncSession, task: Task):
+        """
+        Incorrect solver solution => solver is penalized => solver hold fully charged => leftover => new hold
+        Buyer hold is freed => leftover remains in the same hold uncharged.
+        Solver's staked portion => platform revenue.
+        """
+        ask_order = task.ask
+        if not ask_order or not ask_order.hold:
+            raise ValueError("Missing solver hold in incorrect scenario.")
+        solver_hold = ask_order.hold
+
+        # 1) fully charge solver hold => leftover => new hold
+        if not solver_hold.charged:
+            await self.charge_hold_fully(session, solver_hold)
+
+        # 2) buyer => free usage => if any
+        bid_order = task.bid
+        if bid_order and bid_order.hold:
+            price = bid_order.price
+            # free the buyer's usage => leftover remains in that hold
+            await self.free_funds_from_hold(session, bid_order.hold, price, bid_order)
+
+        # 3) solver staked portion => platform revenue
+        subnet = task.job.subnet
+        stake_amount = ask_order.price * subnet.stake_multiplier
+        # We effectively consider stake_amount "lost" by the solver. So let's record it:
+        await self.add_platform_revenue(session, stake_amount, PlatformRevenueTxnType.Add)
+
+        # If the leftover hold created by charge_hold_fully => that leftover still belongs to solver, 
+        # but "used_amount" portion is staked + burned => i.e. platform got it. 
+        # No indefinite credits to solver => leftover is in the new leftover hold with same expiry.
 
 
     async def get_last_task_with_status(self, job_id: int, statuses: list[TaskStatus]):

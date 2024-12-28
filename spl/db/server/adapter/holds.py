@@ -82,6 +82,9 @@ class DBAdapterHoldsMixin:
 
     
     async def reserve_funds_on_hold(self, session: AsyncSession, hold: Hold, amount: float, order):
+        """
+        Increases hold.used_amount by 'amount', ensuring leftover can cover it.
+        """
         if hold.total_amount - hold.used_amount < amount:
             raise ValueError("not enough hold funds")
         hold.used_amount += amount
@@ -93,6 +96,9 @@ class DBAdapterHoldsMixin:
         session.add(hold_txn)
 
     async def free_funds_from_hold(self, session: AsyncSession, hold: Hold, amount: float, order):
+        """
+        Decreases hold.used_amount by 'amount'.
+        """
         if hold.used_amount < amount:
             raise ValueError("not enough used amount in hold to free")
         hold.used_amount -= amount
@@ -103,17 +109,32 @@ class DBAdapterHoldsMixin:
         )
         session.add(hold_txn)
 
-    async def charge_hold_fully(self, session: AsyncSession, hold: Hold, add_leftover_to_account: bool = True):
+    async def charge_hold_fully(self, session: AsyncSession, hold: Hold):
+        """
+        Mark hold as fully charged. 
+        If leftover > 0 => create a new hold with the same expiry, same user, etc. 
+        We also link it by leftover_hold.parent_hold_id = hold.id
+        """
         if hold.charged:
             raise ValueError("hold already charged")
         hold.charged = True
         hold.charged_amount = hold.total_amount
 
-        if add_leftover_to_account:
-            leftover = hold.total_amount - hold.used_amount
-            if leftover > 0:
-                stmt = select(Account).where(Account.id == hold.account_id)
-                result = await session.execute(stmt)
-                account = result.scalar_one_or_none()
-                if account:
-                    await self.add_credits_transaction(session, account, leftover, CreditTxnType.Add)
+        leftover = hold.total_amount - hold.used_amount
+        if leftover > 0:
+            leftover_hold = Hold(
+                account_id=hold.account_id,
+                user_id=hold.user_id,
+                hold_type=hold.hold_type,
+                total_amount=leftover,
+                used_amount=0.0,
+                expiry=hold.expiry,  # same expiry
+                charged=False,
+                charged_amount=0.0,
+                parent_hold_id=hold.id  # link them
+            )
+            session.add(leftover_hold)
+
+            hold.used_amount = hold.total_amount
+        else:
+            hold.used_amount = hold.total_amount

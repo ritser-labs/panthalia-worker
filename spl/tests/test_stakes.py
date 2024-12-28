@@ -75,7 +75,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
     Full scenario:
      - testuser => buyer with some credits
      - solveruser => solver, has a CC hold
-     - They place matching orders => finalize => solver’s deposit partially returned, gets paid, etc.
+     - They place matching orders => finalize => solver's deposit not charged, solver's reward => new hold, etc.
     """
     async with original_app.test_request_context('/'):
         server = db_adapter_server_fixture
@@ -113,7 +113,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             session.add(solver_hold)
             await session.commit()
 
-        # Create a task => testuser’s job
+        # create a task => testuser's job
         task_id = await server.create_task(
             job_id=job_id,
             job_iteration=1,
@@ -141,7 +141,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
         bid_order_id = await server.create_order(
             task_id=task_id,
             subnet_id=subnet_id,
-            order_type=OrderType.Bid,  # fix
+            order_type=OrderType.Bid,
             price=100.0,
             hold_id=buyer_cc_hold.id
         )
@@ -150,22 +150,39 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
         ask_order_id = await solver_server.create_order(
             task_id=None,
             subnet_id=subnet_id,
-            order_type=OrderType.Ask,  # fix
+            order_type=OrderType.Ask,
             price=100.0,
             hold_id=solver_hold.id
         )
 
-        # solver => submit => scPending
+        # solver => scPending
         await solver_server.submit_task_result(task_id, result='{"output": "success"}')
-        # finalize => correct => solver gets (100 - 10% fee=90) + stake(1.5*100=150 if needed)
+        # finalize => correct => ~ solver gets 90 in new hold, stake freed
         await server.finalize_sanity_check(task_id, True)
 
         # confirm
         async with AsyncSessionLocal() as session:
-            # solver => check final balances
+            # check solver indefinite remains 0 (since no indefinite credit)
             solver_acc = await solver_server.get_or_create_account("solveruser", session=session)
-            assert solver_acc.earnings_balance == 90.0, f"Expected 90 earnings, got {solver_acc.earnings_balance}"
-            assert solver_acc.credits_balance == 150.0, f"Expected 150 credits (the stake), got {solver_acc.credits_balance}"
+            assert solver_acc.credits_balance == 0.0, f"Expected solver indefinite=0, got {solver_acc.credits_balance}"
+
+            # solver's original hold => uncharged => used_amount=0
+            updated_solver_hold = await session.execute(
+                select(Hold).where(Hold.account_id == solver_acc.id, Hold.total_amount == 300.0)
+            )
+            updated_solver_hold = updated_solver_hold.scalars().first()
+            assert updated_solver_hold is not None
+            assert not updated_solver_hold.charged
+            assert updated_solver_hold.used_amount == 0.0
+
+            # find a new hold with total_amount=90.0 for solver's earnings
+            earn_hold = await session.execute(
+                select(Hold).where(Hold.user_id=="solveruser", Hold.total_amount==90.0)
+            )
+            earn_hold = earn_hold.scalars().first()
+            assert earn_hold is not None, "Expected new hold for solver's 90.0 earnings"
+            assert earn_hold.charged is False
+            assert earn_hold.used_amount == 0.0
 
 
 @pytest.mark.asyncio
