@@ -512,6 +512,15 @@ app.route('/create_sot', methods=['POST'], endpoint='create_sot_endpoint')(
     create_post_route_return_id(db_adapter_server.create_sot, ['job_id', 'url'], 'sot_id')
 )
 
+app.route('/get_balance', methods=['GET'], endpoint='get_balance_endpoint')(
+    create_get_route(
+        'Balance',
+        db_adapter_server.get_balance,
+        [],
+        auth_method=AuthMethod.USER
+    )
+)
+
 ################################################################
 # Updating / last nonce / iteration, etc.
 ################################################################
