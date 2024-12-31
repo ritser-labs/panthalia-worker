@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ....models import (
     CreditTransaction, Hold, HoldTransaction, Account, CreditTxnType, HoldType
 )
+import logging
 
 DISPUTE_PAYOUT_DELAY_DAYS = 1
 
@@ -153,30 +154,50 @@ class DBAdapterHoldsMixin:
 
     async def charge_hold_fully(self, session: AsyncSession, hold: Hold):
         """
-        Mark hold as fully charged. 
-        If leftover > 0 => create a new hold with the same expiry, same user, etc. 
-        We also link it by leftover_hold.parent_hold_id = hold.id
+        Mark 'hold' as fully charged. If leftover > 0 => create a new hold.
+        The new leftover hold's type and expiry may differ from the original:
+        - If the original hold is CC => leftover becomes deposit-based Credits
+        with a 1-year expiry, so the solver can re-use it more flexibly.
+        - If leftover == 0 => do nothing special.
         """
         if hold.charged:
             raise ValueError("hold already charged")
+
         hold.charged = True
         hold.charged_amount = hold.total_amount
 
         leftover = hold.total_amount - hold.used_amount
         if leftover > 0:
+            # Decide the new hold type + expiry based on the original hold type
+            if hold.hold_type == HoldType.CreditCard:
+                new_hold_type = HoldType.Credits
+                new_expiry = datetime.utcnow() + timedelta(days=365)
+            else:
+                # For other hold types (Credits, Earnings, etc.), you can keep the same type/expiry
+                # or adapt logic to your preference. Example:
+                new_hold_type = hold.hold_type
+                new_expiry = hold.expiry
+
             leftover_hold = Hold(
                 account_id=hold.account_id,
                 user_id=hold.user_id,
-                hold_type=hold.hold_type,
+                hold_type=new_hold_type,
                 total_amount=leftover,
                 used_amount=0.0,
-                expiry=hold.expiry,  # same expiry
+                expiry=new_expiry,
                 charged=False,
                 charged_amount=0.0,
-                parent_hold_id=hold.id  # link them
+                parent_hold_id=hold.id
             )
             session.add(leftover_hold)
 
+            # Mark the original hold's used_amount = total_amount
             hold.used_amount = hold.total_amount
         else:
+            # No leftover
             hold.used_amount = hold.total_amount
+
+        logging.info(
+            f"[charge_hold_fully] hold.id={hold.id} fully charged. leftover={leftover:.2f}. "
+            f"Created leftover hold => type={new_hold_type if leftover > 0 else None}"
+        )
