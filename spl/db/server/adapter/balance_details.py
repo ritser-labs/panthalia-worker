@@ -21,9 +21,8 @@ class DBAdapterBalanceDetailsMixin:
         """
         user_id = self.get_user_id()
 
-        # We open a new session to load Account and its 'holds' in one query:
         async with AsyncSessionLocal() as session:
-            # 1) either re-query the account using joinedload
+            # 1) Load the account + holds
             stmt = (
                 select(Account)
                 .where(Account.user_id == user_id)
@@ -32,36 +31,39 @@ class DBAdapterBalanceDetailsMixin:
             result = await session.execute(stmt)
             account = result.scalars().unique().one_or_none()
 
-            # 2) If the account does not exist, optionally create it, or raise error.
             if not account:
-                # If you want "create" behavior, do that here. Otherwise, raise:
-                #   raise ValueError(f"No account found for user_id={user_id}")
-                # Example "auto-create" logic (comment out if not wanted):
-                account = Account(
-                    user_id=user_id,
-                    credits_balance=0.0,
-                    earnings_balance=0.0,
-                )
-                session.add(account)
-                await session.commit()
-                await session.refresh(account, ["holds"])  # ensure holds is loaded
+                # If you want an auto-create behavior, you'd do it here.
+                raise ValueError(f"No account found for user_id={user_id}")
 
-            # Now 'account.holds' is attached to this session, so we can iterate safely.
             credits_balance = account.credits_balance
             earnings_balance = account.earnings_balance
-            holds = account.holds  # no DetachedInstanceError now!
+            holds = account.holds
 
             locked_hold_amounts = {}
             detailed_holds = []
 
             for hold in holds:
-                locked_amount = hold.used_amount
                 hold_type = (
                     hold.hold_type.value
                     if hasattr(hold.hold_type, "value")
                     else str(hold.hold_type)
                 )
-                locked_hold_amounts[hold_type] = locked_hold_amounts.get(hold_type, 0.0) + locked_amount
+
+                # -----------------------------------------
+                # CHANGE: skip fully charged holds entirely
+                # -----------------------------------------
+                if hold.charged:
+                    # If the hold is fully charged, it no longer
+                    # contributes to "locked" amounts at all.
+                    locked_amount = 0.0
+                else:
+                    # The "locked" portion is hold.used_amount for uncharged holds
+                    locked_amount = hold.used_amount
+
+                    # Accumulate by hold type
+                    locked_hold_amounts[hold_type] = (
+                        locked_hold_amounts.get(hold_type, 0.0) + locked_amount
+                    )
 
                 leftover = hold.total_amount - hold.used_amount
                 hold_data = {
@@ -76,6 +78,9 @@ class DBAdapterBalanceDetailsMixin:
                     "status": "charged" if hold.charged else "active",
                 }
                 detailed_holds.append(hold_data)
+
+        # Sum all locked amounts
+        total_locked = sum(locked_hold_amounts.values())
 
         return {
             "credits_balance": credits_balance,
