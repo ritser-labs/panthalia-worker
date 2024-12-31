@@ -303,7 +303,7 @@ app.route('/get_orders_for_user', methods=['GET'], endpoint='get_orders_for_user
 )
 
 # global stats
-@app.route('/global_stats', methods=['GET'], endpoint='global_stats_endpoint')(
+app.route('/global_stats', methods=['GET'], endpoint='global_stats_endpoint')(
     create_get_route('GlobalStats', db_adapter_server.get_global_stats, [], auth_method=AuthMethod.USER)
 )
 
