@@ -883,3 +883,16 @@ class DBAdapterOrdersTasksMixin:
                 "num_completed_tasks": int(num_completed_tasks),
                 "volume": float(volume)
             }
+
+    async def get_orders_for_user(self):
+        async with AsyncSessionLocal() as session:
+            user_id = self.get_user_id()  # use the session-based user
+            stmt = (
+                select(Order)
+                .where(Order.user_id == user_id)
+                .order_by(Order.id.desc())
+            )
+            result = await session.execute(stmt)
+            orders = result.scalars().all()
+            # convert each to as_dict if you want to return it directly
+            return [o.as_dict() for o in orders]

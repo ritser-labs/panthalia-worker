@@ -298,6 +298,9 @@ app.route('/account_key_from_public_key', methods=['GET'], endpoint='account_key
 app.route('/get_account_keys', methods=['GET'], endpoint='get_account_keys_endpoint')(
     create_get_route('AccountKey', db_adapter_server.get_account_keys, [], auth_method=AuthMethod.USER)
 )
+app.route('/get_orders_for_user', methods=['GET'], endpoint='get_orders_for_user_endpoint')(
+    create_get_route('Order', db_adapter_server.get_orders_for_user, [], auth_method=AuthMethod.USER)
+)
 
 # global stats
 @app.route('/global_stats', methods=['GET'], endpoint='global_stats_endpoint')(
