@@ -299,6 +299,11 @@ app.route('/get_account_keys', methods=['GET'], endpoint='get_account_keys_endpo
     create_get_route('AccountKey', db_adapter_server.get_account_keys, [], auth_method=AuthMethod.USER)
 )
 
+# global stats
+@app.route('/global_stats', methods=['GET'], endpoint='global_stats_endpoint')(
+    create_get_route('GlobalStats', db_adapter_server.get_global_stats, [], auth_method=AuthMethod.USER)
+)
+
 ################################################################
 # Additional GET endpoints with custom logic
 ################################################################
