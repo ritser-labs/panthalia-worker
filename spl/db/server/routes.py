@@ -523,7 +523,7 @@ app.route('/create_sot', methods=['POST'], endpoint='create_sot_endpoint')(
 app.route('/get_balance', methods=['GET'], endpoint='get_balance_endpoint')(
     create_get_route(
         'Balance',
-        db_adapter_server.get_balance,
+        db_adapter_server.get_balance_details_for_user,
         [],
         auth_method=AuthMethod.USER
     )

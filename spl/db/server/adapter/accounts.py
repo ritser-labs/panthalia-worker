@@ -353,17 +353,3 @@ class DBAdapterAccountsMixin:
             logger.info(f"[link_deposit_to_transaction] deposit {deposit_id} linked to credit_tx {credit_tx_id}")
             return dep_obj
 
-    async def get_balance(self) -> dict:
-        """
-        Returns a dict with credits_balance and earnings_balance
-        for the given user_id, or an error.
-        """
-        user_id = self.get_user_id()
-        account = await self.get_or_create_account(user_id)
-        if not account:
-            # Return a dict containing an "error" key if no account
-            return {'error': f"No account found for user_id={user_id}"}
-        return {
-            'credits_balance': account.credits_balance,
-            'earnings_balance': account.earnings_balance
-        }

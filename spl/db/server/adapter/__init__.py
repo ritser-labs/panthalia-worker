@@ -10,7 +10,9 @@ from .instances import DBAdapterInstancesMixin
 from .state_updates import DBAdapterStateUpdatesMixin
 from .billing.stripe import DBAdapterStripeBillingMixin
 
-# Import the original get_user_id here
+# import the new one
+from .balance_details import DBAdapterBalanceDetailsMixin
+
 from ....auth.view import get_user_id as default_get_user_id
 
 class DBAdapterServer(
@@ -21,7 +23,8 @@ class DBAdapterServer(
     DBAdapterPermissionsMixin,
     DBAdapterInstancesMixin,
     DBAdapterStateUpdatesMixin,
-    DBAdapterStripeBillingMixin
+    DBAdapterStripeBillingMixin,
+    DBAdapterBalanceDetailsMixin,    # <= add the new mixin
 ):
     def __init__(self, user_id_getter=None):
         super().__init__()
