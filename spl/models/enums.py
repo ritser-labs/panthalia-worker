@@ -24,6 +24,7 @@ class AccountTxnType(enum.Enum):
 class HoldType(enum.Enum):
     CreditCard = "cc"
     Credits = "credits"
+    Earnings = "earnings"
 
 class CreditTxnType(enum.Enum):
     Add = "add"

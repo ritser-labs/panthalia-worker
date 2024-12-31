@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from ....models import (
-    AsyncSessionLocal, Hold, HoldTransaction, Account, CreditTxnType, HoldType
+    CreditTransaction, Hold, HoldTransaction, Account, CreditTxnType, HoldType
 )
 
 DISPUTE_PAYOUT_DELAY_DAYS = 1
@@ -82,11 +82,9 @@ class DBAdapterHoldsMixin:
 
     
     async def reserve_funds_on_hold(self, session: AsyncSession, hold: Hold, amount: float, order):
-        """
-        Increases hold.used_amount by 'amount', ensuring leftover can cover it.
-        """
         if hold.total_amount - hold.used_amount < amount:
             raise ValueError("not enough hold funds")
+
         hold.used_amount += amount
         hold_txn = HoldTransaction(
             hold_id=hold.id,
@@ -95,10 +93,32 @@ class DBAdapterHoldsMixin:
         )
         session.add(hold_txn)
 
+        # NEW: If this is a deposit-based (credits) hold, also subtract from the account’s credits_balance
+        if hold.hold_type == HoldType.Credits:
+            account_stmt = select(Account).where(Account.id == hold.account_id)
+            acc_res = await session.execute(account_stmt)
+            account = acc_res.scalar_one_or_none()
+            if not account:
+                raise ValueError("No account found for hold")
+
+            if account.credits_balance < amount:
+                raise ValueError("Not enough credits in the account to reserve on this hold")
+
+            # Deduct from the account's main credits balance
+            account.credits_balance -= amount
+
+            # Also, record a credit-transaction for auditing
+            credit_tx = CreditTransaction(
+                account_id=account.id,
+                user_id=account.user_id,
+                amount=amount,
+                txn_type=CreditTxnType.Subtract,
+                reason="reserve_on_hold"
+            )
+            session.add(credit_tx)
+
+
     async def free_funds_from_hold(self, session: AsyncSession, hold: Hold, amount: float, order):
-        """
-        Decreases hold.used_amount by 'amount'.
-        """
         if hold.used_amount < amount:
             raise ValueError("not enough used amount in hold to free")
         hold.used_amount -= amount
@@ -108,6 +128,28 @@ class DBAdapterHoldsMixin:
             amount=-amount
         )
         session.add(hold_txn)
+
+        # NEW: If this is a deposit-based hold, increment the user’s credits_balance
+        if hold.hold_type == HoldType.Credits:
+            account_stmt = select(Account).where(Account.id == hold.account_id)
+            acc_res = await session.execute(account_stmt)
+            account = acc_res.scalar_one_or_none()
+            if not account:
+                raise ValueError("No account found for hold")
+
+            # Return that freed portion back to the account balance
+            account.credits_balance += amount
+
+            # Record a credit transaction for clarity
+            credit_tx = CreditTransaction(
+                account_id=account.id,
+                user_id=account.user_id,
+                amount=amount,
+                txn_type=CreditTxnType.Add,
+                reason="free_from_hold"
+            )
+            session.add(credit_tx)
+
 
     async def charge_hold_fully(self, session: AsyncSession, hold: Hold):
         """
