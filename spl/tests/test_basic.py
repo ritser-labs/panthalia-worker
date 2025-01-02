@@ -1,7 +1,6 @@
 import pytest
 from spl.db.server.app import original_app
 
-
 @pytest.mark.asyncio
 async def test_basic_setup(db_adapter_server_fixture):
     """

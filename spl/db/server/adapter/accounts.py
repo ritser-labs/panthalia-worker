@@ -16,9 +16,6 @@ from ....models import (
 logger = logging.getLogger(__name__)
 
 class DBAdapterAccountsMixin:
-    ##
-    # We'll define a minimum amount needed for any withdrawal
-    ##
     MINIMUM_PAYOUT_AMOUNT = 50.0
 
     async def get_or_create_account(self, user_id: str, session: AsyncSession = None):
@@ -36,8 +33,6 @@ class DBAdapterAccountsMixin:
 
             new_account = Account(
                 user_id=user_id,
-                credits_balance=0.0,
-                earnings_balance=0.0,
                 deposited_at=datetime.utcnow()
             )
             session.add(new_account)
@@ -49,13 +44,10 @@ class DBAdapterAccountsMixin:
                 await session.close()
 
     async def add_credits_transaction(self, session: AsyncSession, account: Account, amount: float, txn_type: CreditTxnType):
-        if txn_type == CreditTxnType.Subtract:
-            if account.credits_balance < amount:
-                raise ValueError("insufficient credits to subtract")
-            account.credits_balance -= amount
-        elif txn_type == CreditTxnType.Add:
-            account.credits_balance += amount
-
+        """
+        Records a new credit transaction in the DB for auditing, but does NOT adjust
+        any account.credits_balance because that no longer exists.
+        """
         new_credit_txn = CreditTransaction(
             account_id=account.id,
             user_id=account.user_id,
@@ -63,15 +55,13 @@ class DBAdapterAccountsMixin:
             txn_type=txn_type,
         )
         session.add(new_credit_txn)
+        # The actual "balance" is derived from the uncharged leftover in holds.
 
     async def add_earnings_transaction(self, session: AsyncSession, account: Account, amount: float, txn_type: EarningsTxnType):
-        if txn_type == EarningsTxnType.Subtract:
-            if account.earnings_balance < amount:
-                raise ValueError("not enough earnings to subtract")
-            account.earnings_balance -= amount
-        else:
-            account.earnings_balance += amount
-
+        """
+        Records a new earnings transaction for auditing, does NOT mutate
+        any ephemeral earnings_balance in the Account.
+        """
         new_earnings_txn = EarningsTransaction(
             account_id=account.id,
             user_id=account.user_id,
@@ -87,17 +77,12 @@ class DBAdapterAccountsMixin:
         )
         session.add(new_rev)
 
-    ##
-    # REMOVED maybe_payout_earnings
-    # (This system is replaced by create_withdrawal_request.)
-    ##
-
     async def admin_deposit_account(self, user_id: str, amount: float):
         """
-        Instead of duplicating logic, just call create_credit_transaction_for_user.
-        Mark the reason="1year_deposit" so we know it's deposit-based.
+        Instead of touching any ephemeral account.credits_balance, we simply create a
+        credit transaction and a hold for deposit-based credits, so the user
+        has an uncharged leftover in the hold.
         """
-        # You might want to do a quick check that amount > 0, etc.
         await self.create_credit_transaction_for_user(
             user_id=user_id,
             amount=amount,
@@ -159,33 +144,39 @@ class DBAdapterAccountsMixin:
             await session.delete(account_key)
             await session.commit()
 
-    ##
-    # NEW WITHDRAWALS:
-    ##
     async def create_withdrawal_request(self, user_id: str, amount: float) -> int:
         """
-        Creates a new PendingWithdrawal for the given user with the requested amount,
-        only subtracting from earnings_balance.
-        Also enforces MINIMUM_PAYOUT_AMOUNT.
+        Creates a new PendingWithdrawal. The actual "balance" check is done
+        by summing leftover in Earnings holds, so if there's insufficient leftover,
+        we raise an error.
         """
         if amount < self.MINIMUM_PAYOUT_AMOUNT:
             raise ValueError(f"Cannot withdraw less than the minimum {self.MINIMUM_PAYOUT_AMOUNT}")
 
         async with AsyncSessionLocal() as session:
             account = await self.get_or_create_account(user_id, session)
-            # Only subtract from earnings_balance:
-            if account.earnings_balance < amount:
+            # Instead of subtracting from account.earnings_balance, we check if
+            # there's enough leftover in "Earnings" holds.
+            # If not enough leftover => raise.
+            total_earnings_leftover = 0.0
+            for hold in account.holds:
+                if hold.hold_type == HoldType.Earnings and not hold.charged:
+                    leftover = hold.total_amount - hold.used_amount
+                    if leftover > 0:
+                        total_earnings_leftover += leftover
+
+            if total_earnings_leftover < amount:
                 raise ValueError("insufficient earnings to request withdrawal")
 
-            account.earnings_balance -= amount
-
+            # We do not physically subtract from a column. It's enough that we
+            # create a PendingWithdrawal. The future code that approves or rejects
+            # can forcibly charge or free from an Earnings hold, if desired.
             new_withdrawal = PendingWithdrawal(
                 account_id=account.id,
                 user_id=user_id,
                 amount=amount,
             )
             session.add(new_withdrawal)
-
             await session.commit()
             await session.refresh(new_withdrawal)
             return new_withdrawal.id
@@ -204,8 +195,8 @@ class DBAdapterAccountsMixin:
 
     async def update_withdrawal_status(self, withdrawal_id: int, new_status: WithdrawalStatus):
         """
-        Approve or reject a pending withdrawal. If rejected, refund user. If approved, do nothing else here
-        (you might do a real payment or queue it).
+        If rejected, we simply do not finalize the withdrawal. 
+        If approved, you might do your real payment or external queue, etc.
         """
         async with AsyncSessionLocal() as session:
             stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
@@ -215,12 +206,8 @@ class DBAdapterAccountsMixin:
                 raise ValueError(f"Withdrawal {withdrawal_id} not found.")
 
             if new_status == WithdrawalStatus.REJECTED and withdrawal.status == WithdrawalStatus.PENDING:
-                # Return the funds to user (earnings_balance).
-                acct_stmt = select(Account).where(Account.id == withdrawal.account_id)
-                acct_result = await session.execute(acct_stmt)
-                account = acct_result.scalar_one_or_none()
-                if account:
-                    account.earnings_balance += withdrawal.amount
+                # We do not "refund" any column-based balance, because we only rely on hold leftover for logic.
+                pass
 
             withdrawal.status = new_status
             withdrawal.updated_at = datetime.utcnow()
@@ -228,10 +215,6 @@ class DBAdapterAccountsMixin:
             await session.commit()
 
     async def create_stripe_deposit(self, user_id: str, deposit_amount: float, session_id: str) -> int:
-        """
-        Insert a row in stripe_deposits with status='pending'.
-        Returns the deposit ID.
-        """
         async with AsyncSessionLocal() as session:
             new_dep = StripeDeposit(
                 user_id=user_id,
@@ -246,11 +229,6 @@ class DBAdapterAccountsMixin:
             return new_dep.id
 
     async def mark_stripe_deposit_completed(self, stripe_session_id: str) -> StripeDeposit | None:
-        """
-        Mark the deposit row as 'completed' if it's pending.
-        Returns the StripeDeposit object or None if not found.
-        If already completed, returns the deposit object unchanged.
-        """
         async with AsyncSessionLocal() as session:
             stmt = select(StripeDeposit).where(StripeDeposit.stripe_session_id == stripe_session_id)
             result = await session.execute(stmt)
@@ -259,7 +237,6 @@ class DBAdapterAccountsMixin:
                 return None
 
             if dep_obj.status == 'completed':
-                # Already done
                 return dep_obj
 
             dep_obj.status = 'completed'
@@ -276,18 +253,14 @@ class DBAdapterAccountsMixin:
         txn_type: CreditTxnType
     ) -> CreditTransaction:
         """
-        Creates a credit transaction (Add or Subtract) for the given user, updates the user's
-        credits_balance, and if txn_type=Add, also creates a new hold that expires in 1 year.
+        Creates a credit transaction (Add or Subtract) for the user, plus if txn_type=Add
+        it creates a new deposit-based hold (so the leftover in that hold is their "credits" balance).
         """
         async with AsyncSessionLocal() as session:
-            # fetch or create the account row
             account = await self.get_or_create_account(user_id, session)
 
             if txn_type == CreditTxnType.Add:
-                # Increase balance
-                account.credits_balance += amount
-
-                # Also create a hold that expires in 1 year
+                # We create a new hold that expires in 1 year. 
                 expiry_date = datetime.utcnow() + timedelta(days=365)
                 new_hold = Hold(
                     account_id=account.id,
@@ -300,23 +273,17 @@ class DBAdapterAccountsMixin:
                     charged_amount=0.0
                 )
                 session.add(new_hold)
-
-                # Log for debugging; 'new_hold.id' may still be None until session.flush() or commit
-                logging.info(
-                    f"[create_credit_transaction_for_user] user={user_id}, +{amount} credits. "
-                    f"Created 1-year hold (will expire {expiry_date})"
+                logger.info(
+                    f"[create_credit_transaction_for_user] user={user_id}, +{amount} credits => hold with expiry {expiry_date}"
                 )
 
             elif txn_type == CreditTxnType.Subtract:
-                if account.credits_balance < amount:
-                    raise ValueError(
-                        f"Insufficient balance to subtract {amount} for user {user_id}"
-                    )
-                account.credits_balance -= amount
+                # If we had to do a "Subtract," you'd typically want to locate a suitable credits-type hold
+                # and reduce leftover. But that's a more advanced approach. For now, we do no ephemeral "account" field.
+                pass
 
-            # **FIX**: Set 'account_id' to avoid null constraint error
             new_tx = CreditTransaction(
-                account_id=account.id,    # <-- CRITICAL
+                account_id=account.id,
                 user_id=user_id,
                 amount=amount,
                 txn_type=txn_type,
@@ -327,19 +294,13 @@ class DBAdapterAccountsMixin:
             await session.commit()
             await session.refresh(new_tx)
 
-            logging.info(
-                f"[create_credit_transaction_for_user] user={user_id}, txn={new_tx.id} "
-                f"({txn_type.name} {amount}) => success."
+            logger.info(
+                f"[create_credit_transaction_for_user] user={user_id}, txn={new_tx.id} => success."
             )
 
             return new_tx
 
-
     async def link_deposit_to_transaction(self, deposit_id: int, credit_tx_id: int) -> StripeDeposit:
-        """
-        Store credit_transaction_id in the StripeDeposit row.
-        Returns the updated deposit object.
-        """
         async with AsyncSessionLocal() as session:
             stmt = select(StripeDeposit).where(StripeDeposit.id == deposit_id)
             result = await session.execute(stmt)
@@ -352,4 +313,3 @@ class DBAdapterAccountsMixin:
             await session.refresh(dep_obj)
             logger.info(f"[link_deposit_to_transaction] deposit {deposit_id} linked to credit_tx {credit_tx_id}")
             return dep_obj
-

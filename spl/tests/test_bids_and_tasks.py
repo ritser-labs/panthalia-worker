@@ -4,7 +4,7 @@ from spl.models import AsyncSessionLocal, Hold, HoldType
 from datetime import datetime, timedelta
 from sqlalchemy import select
 
-from spl.models.enums import OrderType  # needed so we can pass e.g. OrderType.Bid
+from spl.models.enums import OrderType, TaskStatus
 
 @pytest.mark.asyncio
 async def test_create_bids_and_tasks_with_hold(db_adapter_server_fixture):
@@ -25,7 +25,7 @@ async def test_create_bids_and_tasks_with_hold(db_adapter_server_fixture):
             iteration=0
         )
 
-        # deposit 300 => fresh DB => so the user has 300 credits
+        # deposit 300 => user has leftover in a new credits hold
         await server.admin_deposit_account(user_id="testuser", amount=300.0)
 
         # Create a large hold

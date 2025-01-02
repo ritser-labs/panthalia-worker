@@ -33,7 +33,6 @@ async def clear_database():
         for table in reversed(Base.metadata.sorted_tables):
             await session.execute(table.delete())
         await session.commit()
-    # proceed
     yield
 
 

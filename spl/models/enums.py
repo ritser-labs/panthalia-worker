@@ -2,6 +2,8 @@
 
 import enum
 
+from ..common import TaskStatus
+
 class ServiceType(enum.Enum):
     Anvil = "anvil"
     Db = "db"

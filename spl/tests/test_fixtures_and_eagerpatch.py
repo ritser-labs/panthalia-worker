@@ -26,7 +26,8 @@ async def clear_database():
 def patch_get_task_eager():
     """
     Patch DBAdapterOrdersTasksMixin.get_task so it uses eager loading.
-    This avoids MissingGreenlet issues if the session is closed too soon.
+    This avoids lazy-loading after the session is out of scope, which
+    avoids the MissingGreenlet error in the tests.
     """
     original_get_task = DBAdapterOrdersTasksMixin.get_task
 

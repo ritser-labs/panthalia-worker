@@ -13,8 +13,8 @@ class DBAdapterBalanceDetailsMixin:
     async def get_balance_details_for_user(self) -> dict:
         """
         Returns a dictionary that includes:
-         - credits_balance
-         - earnings_balance
+         - credits_balance (derived)
+         - earnings_balance (derived)
          - locked_hold_amounts (dict by hold_type)
          - detailed_holds (array of hold info)
         Raises ValueError if user/account not found.
@@ -22,7 +22,6 @@ class DBAdapterBalanceDetailsMixin:
         user_id = self.get_user_id()
 
         async with AsyncSessionLocal() as session:
-            # 1) Load the account + holds
             stmt = (
                 select(Account)
                 .where(Account.user_id == user_id)
@@ -32,13 +31,13 @@ class DBAdapterBalanceDetailsMixin:
             account = result.scalars().unique().one_or_none()
 
             if not account:
-                # If you want an auto-create behavior, you'd do it here.
                 raise ValueError(f"No account found for user_id={user_id}")
 
-            credits_balance = account.credits_balance
-            earnings_balance = account.earnings_balance
             holds = account.holds
 
+            # Derive balances from uncharged leftover holds
+            derived_credits_balance = 0.0
+            derived_earnings_balance = 0.0
             locked_hold_amounts = {}
             detailed_holds = []
 
@@ -49,23 +48,22 @@ class DBAdapterBalanceDetailsMixin:
                     else str(hold.hold_type)
                 )
 
-                # -----------------------------------------
-                # CHANGE: skip fully charged holds entirely
-                # -----------------------------------------
                 if hold.charged:
-                    # If the hold is fully charged, it no longer
-                    # contributes to "locked" amounts at all.
                     locked_amount = 0.0
                 else:
-                    # The "locked" portion is hold.used_amount for uncharged holds
                     locked_amount = hold.used_amount
-
-                    # Accumulate by hold type
                     locked_hold_amounts[hold_type] = (
                         locked_hold_amounts.get(hold_type, 0.0) + locked_amount
                     )
 
                 leftover = hold.total_amount - hold.used_amount
+                # If it's uncharged leftover, it contributes to "balance" if it's a "credits" or "earnings" hold
+                if not hold.charged and leftover > 0:
+                    if hold.hold_type == HoldType.Credits:
+                        derived_credits_balance += leftover
+                    elif hold.hold_type == HoldType.Earnings:
+                        derived_earnings_balance += leftover
+
                 hold_data = {
                     "hold_id": hold.id,
                     "hold_type": hold_type,
@@ -79,12 +77,11 @@ class DBAdapterBalanceDetailsMixin:
                 }
                 detailed_holds.append(hold_data)
 
-        # Sum all locked amounts
         total_locked = sum(locked_hold_amounts.values())
 
         return {
-            "credits_balance": credits_balance,
-            "earnings_balance": earnings_balance,
+            "credits_balance": derived_credits_balance,
+            "earnings_balance": derived_earnings_balance,
             "locked_hold_amounts": locked_hold_amounts,
             "detailed_holds": detailed_holds,
         }

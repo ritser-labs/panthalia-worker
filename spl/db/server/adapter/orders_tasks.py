@@ -685,16 +685,14 @@ class DBAdapterOrdersTasksMixin:
         """
         Periodically called to:
         1) Cancel orders whose hold expires too soon to finish solve+dispute.
-        2) Remove leftover from deposit-based (Credits) or earnings-based (Earnings) holds after expiry.
-            - For 'Credits' hold leftover => subtract from account.credits_balance
-            - For 'Earnings' hold leftover => subtract from account.earnings_balance
+        2) Remove leftover from deposit-based or earnings-based holds after expiry,
+           but without adjusting any account.credits_balance or earnings_balance (which no longer exist).
         """
         now = datetime.utcnow()
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 logging.debug("[check_and_cleanup_holds] Running hold cleanup check...")
 
-                # --- PASS A: For each subnet, we can cancel any orders if the hold will expire too soon
                 subnets_stmt = select(Subnet).distinct()
                 subnets_result = await session.execute(subnets_stmt)
                 subnets = subnets_result.scalars().all()
@@ -721,8 +719,6 @@ class DBAdapterOrdersTasksMixin:
                         hold = order.hold
                         if not hold:
                             continue
-
-                        # if the hold expires before min_expiry => must cancel
                         if hold.expiry < min_expiry:
                             logging.info(f"[check_and_cleanup_holds] Canceling order {order.id} due to hold expiry too soon.")
                             if order.order_type.value == 'bid':
@@ -742,7 +738,6 @@ class DBAdapterOrdersTasksMixin:
                             session.add(hold_txn)
                             session.delete(order)
 
-                # --- PASS B: forcibly remove leftover from deposit-based or earnings-based holds that are fully expired
                 stmt_all_holds = select(Hold).options(joinedload(Hold.hold_transactions))
                 all_holds_result = await session.execute(stmt_all_holds)
                 all_holds_result = all_holds_result.unique()
@@ -750,81 +745,23 @@ class DBAdapterOrdersTasksMixin:
 
                 for hold in all_holds:
                     if hold.charged:
-                        continue  # already fully charged => skip
+                        continue
 
                     if hold.expiry < now:
                         leftover = hold.total_amount - hold.used_amount
 
-                        # 1) If hold_type=Credits => forcibly remove leftover from user’s credits_balance
-                        if hold.hold_type == HoldType.Credits and leftover > 0:
-                            acc_stmt = select(Account).where(Account.id == hold.account_id)
-                            acc_res = await session.execute(acc_stmt)
-                            account = acc_res.scalar_one_or_none()
-                            if account:
-                                if account.credits_balance < leftover:
-                                    logging.warning(
-                                        f"[check_and_cleanup_holds] Account {account.user_id} has only "
-                                        f"{account.credits_balance}, leftover is {leftover}"
-                                    )
-                                account.credits_balance -= leftover
+                        # No updates to any account.credits_balance or account.earnings_balance.
+                        # We simply fully charge this hold.
+                        hold.used_amount = hold.total_amount
+                        hold.charged = True
+                        hold.charged_amount = hold.total_amount
 
-                                # record a credit transaction => Subtract
-                                new_tx = CreditTransaction(
-                                    account_id=account.id,
-                                    user_id=account.user_id,
-                                    amount=leftover,
-                                    txn_type=CreditTxnType.Subtract,
-                                    reason="expired_credits"
-                                )
-                                session.add(new_tx)
+                        logging.info(
+                            f"[check_and_cleanup_holds] HOLD {hold.id} {hold.hold_type} expired => leftover {leftover} forcibly removed/burned"
+                        )
 
-                                logging.info(
-                                    f"[check_and_cleanup_holds] HOLD {hold.id} (Credits) expired => "
-                                    f"removed leftover {leftover} from user {account.user_id}'s credits_balance"
-                                )
-
-                            hold.used_amount = hold.total_amount
-                            hold.charged = True
-                            hold.charged_amount = hold.total_amount
-
-                        # 2) If hold_type=Earnings => forcibly remove leftover from user’s earnings_balance
-                        elif hold.hold_type == "Earnings" and leftover > 0:
-                            acc_stmt = select(Account).where(Account.id == hold.account_id)
-                            acc_res = await session.execute(acc_stmt)
-                            account = acc_res.scalar_one_or_none()
-                            if account:
-                                if account.earnings_balance < leftover:
-                                    logging.warning(
-                                        f"[check_and_cleanup_holds] Account {account.user_id} has only "
-                                        f"{account.earnings_balance} in earnings_balance, leftover is {leftover}"
-                                    )
-                                account.earnings_balance -= leftover
-
-                                # record an earnings transaction => Subtract
-                                new_earnings_txn = EarningsTransaction(
-                                    account_id=account.id,
-                                    user_id=account.user_id,
-                                    amount=leftover,
-                                    txn_type=EarningsTxnType.Subtract,
-                                    timestamp=datetime.utcnow()
-                                )
-                                session.add(new_earnings_txn)
-
-                                logging.info(
-                                    f"[check_and_cleanup_holds] HOLD {hold.id} (Earnings) expired => "
-                                    f"removed leftover {leftover} from user {account.user_id}'s earnings_balance"
-                                )
-
-                            hold.used_amount = hold.total_amount
-                            hold.charged = True
-                            hold.charged_amount = hold.total_amount
-
-                        # else: e.g. hold_type=CreditCard or something else => do whatever
-                        # you want for those leftover amounts. Possibly mark them
-                        # fully charged so leftover is effectively burned or forced.
-                        # ...
-                        
                 logging.debug("[check_and_cleanup_holds] Hold cleanup completed successfully.")
+
 
 
     async def get_global_stats(self) -> dict:
