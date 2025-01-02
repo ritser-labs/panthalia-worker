@@ -601,3 +601,12 @@ async def stripe_webhook_route():
     if "error" in response:
         return jsonify({"error": response["error"]}), response.get("status_code", 400)
     return jsonify(response), 200
+
+app.route('/debug_invariant', methods=['GET'], endpoint='debug_invariant_endpoint')(
+    create_get_route(
+        entity_name='InvariantResult',
+        method=db_adapter_server.check_invariant, 
+        params=[],            # no query params needed
+        auth_method=AuthMethod.NONE  # or AuthMethod.USER/KEY if you want
+    )
+)

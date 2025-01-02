@@ -1,9 +1,16 @@
 # spl/db/server/adapter/balance_details.py
 
 import logging
+import sqlalchemy
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
-from ....models import AsyncSessionLocal, Account, Hold
+from ....models import (
+    AsyncSessionLocal, 
+    CreditTransaction, CreditTxnType, 
+    PlatformRevenue, PlatformRevenueTxnType,
+    PendingWithdrawal, WithdrawalStatus,
+    Hold, HoldType, Account
+)
 from ....models.enums import HoldType
 from datetime import datetime
 
@@ -85,3 +92,89 @@ class DBAdapterBalanceDetailsMixin:
             "locked_hold_amounts": locked_hold_amounts,
             "detailed_holds": detailed_holds,
         }
+
+    async def check_invariant(self) -> dict:
+        """
+        Check the invariant:
+          total_deposited == platform_revenue + total_credits (free+locked) + total_earnings (free+locked) + total_withdrawn
+
+        Where:
+          - total_credits = sum of (free leftover + locked) across all uncharged credit holds
+          - total_earnings = likewise for earnings holds
+
+        Returns a dict with the intermediate sums + a boolean 'invariant_holds'.
+        """
+
+        async with AsyncSessionLocal() as session:
+            # 1) Sum all deposit-based credit transactions (CreditTxnType.Add)
+            stmt_deposits = select(
+                sqlalchemy.func.sum(CreditTransaction.amount)
+            ).where(CreditTransaction.txn_type == CreditTxnType.Add)
+            total_deposited = (await session.execute(stmt_deposits)).scalar() or 0.0
+
+            # 2) Sum all APPROVED withdrawals
+            stmt_withdrawals = select(
+                sqlalchemy.func.sum(PendingWithdrawal.amount)
+            ).where(PendingWithdrawal.status == WithdrawalStatus.APPROVED)
+            total_withdrawn = (await session.execute(stmt_withdrawals)).scalar() or 0.0
+
+            # 3) Sum platform revenue (Add => +, Subtract => -)
+            stmt_revenue = select(
+                sqlalchemy.func.sum(
+                    PlatformRevenue.amount *
+                    sqlalchemy.case(
+                        (PlatformRevenue.txn_type == PlatformRevenueTxnType.Add, 1),
+                        (PlatformRevenue.txn_type == PlatformRevenueTxnType.Subtract, -1),
+                        else_=0
+                    )
+                )
+            )
+            total_platform_revenue = (await session.execute(stmt_revenue)).scalar() or 0.0
+
+            # 4) Sum leftover + locked for credits & earnings in uncharged holds
+            holds_stmt = select(Hold)
+            all_holds = (await session.execute(holds_stmt)).scalars().all()
+
+            total_credits_free = 0.0
+            total_credits_locked = 0.0
+            total_earnings_free = 0.0
+            total_earnings_locked = 0.0
+
+            for hold in all_holds:
+                if not hold.charged:
+                    # If hold is not charged, the entire hold.total_amount is still in the system
+                    # We break it down:
+                    free_amount = hold.total_amount - hold.used_amount
+                    locked_amount = hold.used_amount
+
+                    if hold.hold_type == HoldType.Credits:
+                        total_credits_free += max(free_amount, 0.0)
+                        total_credits_locked += max(locked_amount, 0.0)
+                    elif hold.hold_type == HoldType.Earnings:
+                        total_earnings_free += max(free_amount, 0.0)
+                        total_earnings_locked += max(locked_amount, 0.0)
+
+            # sum_credits = free + locked
+            sum_credits = total_credits_free + total_credits_locked
+            sum_earnings = total_earnings_free + total_earnings_locked
+
+            # 5) Compare LHS vs RHS
+            lhs = total_deposited
+            rhs = total_platform_revenue + sum_credits + sum_earnings + total_withdrawn
+            invariant_holds = abs(lhs - rhs) < 1e-9
+
+            return {
+                "total_deposited": float(lhs),
+                "total_platform_revenue": float(total_platform_revenue),
+                "credits_free": float(total_credits_free),
+                "credits_locked": float(total_credits_locked),
+                "earnings_free": float(total_earnings_free),
+                "earnings_locked": float(total_earnings_locked),
+                "total_withdrawn": float(total_withdrawn),
+
+                "sum_credits": float(sum_credits),
+                "sum_earnings": float(sum_earnings),
+
+                "invariant_holds": invariant_holds,
+                "difference": float(lhs - rhs),
+            }
