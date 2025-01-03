@@ -12,7 +12,6 @@ from ....models import (
     EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType,
     AccountKey, PendingWithdrawal, WithdrawalStatus, StripeDeposit, Hold, HoldType
 )
-from ....db.init import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +21,7 @@ class DBAdapterAccountsMixin:
     async def get_or_create_account(self, user_id: str, session: AsyncSession = None):
         own_session = False
         if session is None:
-            session = AsyncSessionLocal()
+            session = self.get_async_session()
             own_session = True
         try:
             stmt = select(Account).where(Account.user_id == user_id)
@@ -104,7 +103,7 @@ class DBAdapterAccountsMixin:
         private_key = account.key.hex()
         public_key = account.address.lower()
 
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             new_account_key = AccountKey(
                 user_id=user_id,
                 public_key=public_key
@@ -120,7 +119,7 @@ class DBAdapterAccountsMixin:
         }
 
     async def account_key_from_public_key(self, public_key: str):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(AccountKey).filter_by(public_key=public_key.lower())
             result = await session.execute(stmt)
             account_key = result.scalar_one_or_none()
@@ -128,7 +127,7 @@ class DBAdapterAccountsMixin:
 
     async def get_account_keys(self):
         user_id = self.get_user_id()
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(AccountKey).filter_by(user_id=user_id)
             result = await session.execute(stmt)
             account_keys = result.scalars().all()
@@ -136,7 +135,7 @@ class DBAdapterAccountsMixin:
 
     async def delete_account_key(self, account_key_id: int):
         user_id = self.get_user_id()
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(AccountKey).filter_by(id=account_key_id)
             result = await session.execute(stmt)
             account_key = result.scalar_one_or_none()
@@ -154,7 +153,7 @@ class DBAdapterAccountsMixin:
         if amount < self.MINIMUM_PAYOUT_AMOUNT:
             raise ValueError(f"Cannot withdraw less than the minimum {self.MINIMUM_PAYOUT_AMOUNT}")
 
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             account = await self.get_or_create_account(user_id, session)
             # Instead of subtracting from account.earnings_balance, we check if
             # there's enough leftover in "Earnings" holds.
@@ -183,13 +182,13 @@ class DBAdapterAccountsMixin:
             return new_withdrawal.id
 
     async def get_withdrawal(self, withdrawal_id: int) -> PendingWithdrawal | None:
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
 
     async def get_withdrawals_for_user(self, user_id: str) -> list[PendingWithdrawal]:
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(PendingWithdrawal).where(PendingWithdrawal.user_id == user_id)
             result = await session.execute(stmt)
             return result.scalars().all()
@@ -199,7 +198,7 @@ class DBAdapterAccountsMixin:
         If rejected, we simply do not finalize the withdrawal. 
         If approved, you might do your real payment or external queue, etc.
         """
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
             result = await session.execute(stmt)
             withdrawal = result.scalar_one_or_none()
@@ -216,7 +215,7 @@ class DBAdapterAccountsMixin:
             await session.commit()
 
     async def create_stripe_deposit(self, user_id: str, deposit_amount: float, session_id: str) -> int:
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             new_dep = StripeDeposit(
                 user_id=user_id,
                 deposit_amount=deposit_amount,
@@ -230,7 +229,7 @@ class DBAdapterAccountsMixin:
             return new_dep.id
 
     async def mark_stripe_deposit_completed(self, stripe_session_id: str) -> StripeDeposit | None:
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(StripeDeposit).where(StripeDeposit.stripe_session_id == stripe_session_id)
             result = await session.execute(stmt)
             dep_obj = result.scalar_one_or_none()
@@ -257,7 +256,7 @@ class DBAdapterAccountsMixin:
         Creates a credit transaction (Add or Subtract) for the user, plus if txn_type=Add
         it creates a new deposit-based hold (so the leftover in that hold is their "credits" balance).
         """
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             account = await self.get_or_create_account(user_id, session)
 
             if txn_type == CreditTxnType.Add:
@@ -302,7 +301,7 @@ class DBAdapterAccountsMixin:
             return new_tx
 
     async def link_deposit_to_transaction(self, deposit_id: int, credit_tx_id: int) -> StripeDeposit:
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(StripeDeposit).where(StripeDeposit.id == deposit_id)
             result = await session.execute(stmt)
             dep_obj = result.scalar_one_or_none()

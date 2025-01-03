@@ -4,14 +4,13 @@ import logging
 from sqlalchemy import select, update
 from ....models import Job, Plugin, Subnet, Task, TaskStatus
 from sqlalchemy.orm import joinedload
-from ....db.init import AsyncSessionLocal
 
 
 logger = logging.getLogger(__name__)
 
 class DBAdapterJobsPluginsMixin:
     async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             new_job = Job(
                 name=name,
                 plugin_id=plugin_id,
@@ -27,7 +26,7 @@ class DBAdapterJobsPluginsMixin:
             return new_job.id
 
     async def create_subnet(self, dispute_period: int, solve_period: int, stake_multiplier: float):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             new_subnet = Subnet(
                 dispute_period=dispute_period,
                 solve_period=solve_period,
@@ -39,7 +38,7 @@ class DBAdapterJobsPluginsMixin:
             return new_subnet.id
 
     async def create_plugin(self, name: str, code: str):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             new_plugin = Plugin(
                 name=name,
                 code=code
@@ -50,21 +49,21 @@ class DBAdapterJobsPluginsMixin:
             return new_plugin.id
 
     async def get_plugin(self, plugin_id: int):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(Plugin).filter_by(id=plugin_id)
             result = await session.execute(stmt)
             plugin = result.scalar_one_or_none()
             return plugin
 
     async def get_subnet_using_address(self, address: str):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(Subnet).filter_by(address=address)
             result = await session.execute(stmt)
             subnet = result.scalar_one_or_none()
             return subnet
 
     async def get_subnet(self, subnet_id: int):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(Subnet).filter_by(id=subnet_id)
             result = await session.execute(stmt)
             subnet = result.scalar_one_or_none()
@@ -72,7 +71,7 @@ class DBAdapterJobsPluginsMixin:
 
     async def get_jobs_without_instances(self):
         from ....models import Instance
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = (
                 select(Job)
                 .outerjoin(Instance, Job.id == Instance.job_id)
@@ -83,7 +82,7 @@ class DBAdapterJobsPluginsMixin:
             return jobs_without_instances
 
     async def get_plugins(self):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(Plugin)
             result = await session.execute(stmt)
             plugins = result.scalars().all()
@@ -97,7 +96,7 @@ class DBAdapterJobsPluginsMixin:
         Return the dictionary stored in Job.state_json
         """
         logger.debug(f"[jobs_plugins] get_job_state called with job_id={job_id}")
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(Job).where(Job.id == job_id)
             result = await session.execute(stmt)
             job = result.scalar_one_or_none()
@@ -118,7 +117,7 @@ class DBAdapterJobsPluginsMixin:
         Overwrite Job.state_json with new_state
         """
         logger.debug(f"[jobs_plugins] update_job_state called with job_id={job_id}, new_state={new_state}")
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = update(Job).where(Job.id == job_id).values(state_json=new_state)
             result = await session.execute(stmt)
             await session.commit()
@@ -127,7 +126,7 @@ class DBAdapterJobsPluginsMixin:
             logger.debug(f"[jobs_plugins] update_job_state => done for job_id={job_id}")
 
     async def update_job_active(self, job_id: int, new_active: bool):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = (
                 update(Job)
                 .where(Job.id == job_id)
@@ -149,7 +148,7 @@ class DBAdapterJobsPluginsMixin:
           - have any task that is not resolved (i.e. statuses not in [ResolvedCorrect, ResolvedIncorrect]).
         This ensures we keep finishing tasks even if the owner toggles job.active==False.
         """
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             # We'll define which statuses are considered 'unresolved'
             unresolved_statuses = [
                 TaskStatus.SelectingSolver,

@@ -15,7 +15,6 @@ from ....models import (
     CreditTransaction, HoldTransaction, Hold, EarningsTransaction
 )
 
-from ....db.init import AsyncSessionLocal
 
 
 logger = logging.getLogger(__name__)
@@ -24,32 +23,32 @@ DISPUTE_PAYOUT_DELAY_DAYS = 1
 
 class DBAdapterOrdersTasksMixin:
     async def get_job(self, job_id: int):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(Job).filter_by(id=job_id)
             result = await session.execute(stmt)
             job = result.scalar_one_or_none()
             return job
 
     async def update_job_iteration(self, job_id: int, new_iteration: int):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = update(Job).where(Job.id == job_id).values(iteration=new_iteration)
             await session.execute(stmt)
             await session.commit()
 
     async def update_job_sot_url(self, job_id: int, new_sot_url: str):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = update(Job).where(Job.id == job_id).values(sot_url=new_sot_url)
             await session.execute(stmt)
             await session.commit()
 
     async def mark_job_as_done(self, job_id: int):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = update(Job).where(Job.id == job_id).values(done=True)
             await session.execute(stmt)
             await session.commit()
 
     async def create_task(self, job_id: int, job_iteration: int, status: TaskStatus, params: str):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(Job).filter_by(id=job_id)
             result = await session.execute(stmt)
             job = result.scalar_one_or_none()
@@ -71,7 +70,7 @@ class DBAdapterOrdersTasksMixin:
             return new_task.id
 
     async def update_task_status(self, task_id: int, job_id: int, status: TaskStatus, result=None, solver_address=None):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = update(Task).where(
                 Task.id == task_id,
                 Task.job_id == job_id
@@ -93,7 +92,7 @@ class DBAdapterOrdersTasksMixin:
         Creates either a BID or an ASK order, then calls match_bid_ask_orders().
         Wrapped in one transaction, with a rollback if anything fails.
         """
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             try:
                 user_id = self.get_user_id()
                 account = await self.get_or_create_account(user_id, session)
@@ -157,7 +156,7 @@ class DBAdapterOrdersTasksMixin:
                 raise
 
     async def get_num_orders(self, subnet_id: int, order_type: str, matched: bool | None):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             query = select(func.count()).select_from(Order).where(
                 Order.subnet_id == subnet_id,
                 Order.order_type == order_type
@@ -186,7 +185,7 @@ class DBAdapterOrdersTasksMixin:
         params: str,
         hold_id: Optional[int]
     ):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             try:
                 stmt = select(Job).filter_by(id=job_id).options(joinedload(Job.subnet))
                 result = await session.execute(stmt)
@@ -252,7 +251,7 @@ class DBAdapterOrdersTasksMixin:
         """
         Delete an order if not matched, then re-run match to fill others.
         """
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             try:
                 stmt = select(Order).filter_by(id=order_id)
                 result = await session.execute(stmt)
@@ -371,14 +370,14 @@ class DBAdapterOrdersTasksMixin:
         Patched in tests (with eager-loading) to avoid MissingGreenlet errors
         after the session is out of scope.
         """
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(Task).options(joinedload(Task.job)).filter(Task.id == task_id)
             result = await session.execute(stmt)
             task = result.scalar_one_or_none()
             return task
 
     async def get_assigned_tasks(self, subnet_id: int):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             user_id = self.get_user_id()
             stmt = (
                 select(Task)
@@ -395,7 +394,7 @@ class DBAdapterOrdersTasksMixin:
             return {'assigned_tasks': tasks}
 
     async def get_tasks_with_pagination_for_job(self, job_id: int, offset: int = 0, limit: int = 20):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = (
                 select(Task)
                 .filter_by(job_id=job_id)
@@ -408,14 +407,14 @@ class DBAdapterOrdersTasksMixin:
             return tasks
 
     async def get_task_count_for_job(self, job_id: int):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(func.count(Task.id)).filter_by(job_id=job_id)
             result = await session.execute(stmt)
             task_count = result.scalar_one()
             return task_count
 
     async def get_task_count_by_status_for_job(self, job_id: int, statuses: list[TaskStatus]):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = select(func.count(Task.id)).filter(
                 Task.job_id == job_id,
                 Task.status.in_(statuses)
@@ -431,7 +430,7 @@ class DBAdapterOrdersTasksMixin:
         return False
 
     async def submit_task_result(self, task_id: int, result: str) -> bool:
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             task_stmt = select(Task).where(Task.id == task_id).options(
                 joinedload(Task.job).joinedload(Job.subnet),
                 joinedload(Task.bid).joinedload(Order.hold),
@@ -470,7 +469,7 @@ class DBAdapterOrdersTasksMixin:
         FIXED version: do all DB ops in a single session + eager load,
         avoiding lazy-load issues after commit.
         """
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             # Eager-load the Task, plus bid->hold, ask->hold, job->subnet
             stmt = (
                 select(Task)
@@ -511,7 +510,7 @@ class DBAdapterOrdersTasksMixin:
         """
         Unused by the failing tests in question, but left for reference.
         """
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             task_stmt = select(Task).where(Task.id == task_id).options(
                 joinedload(Task.job).joinedload(Job.subnet),
                 joinedload(Task.bid).joinedload(Order.hold),
@@ -669,7 +668,7 @@ class DBAdapterOrdersTasksMixin:
 
 
     async def get_last_task_with_status(self, job_id: int, statuses: list[TaskStatus]):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = (
                 select(Task)
                 .filter(
@@ -692,7 +691,7 @@ class DBAdapterOrdersTasksMixin:
            but without adjusting any account.credits_balance or earnings_balance (which no longer exist).
         """
         now = datetime.utcnow()
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             async with session.begin():
                 logging.debug("[check_and_cleanup_holds] Running hold cleanup check...")
 
@@ -779,7 +778,7 @@ class DBAdapterOrdersTasksMixin:
 
         completed_statuses = [TaskStatus.ResolvedCorrect, TaskStatus.ResolvedIncorrect]
 
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             # total $ in open orders
             stmt_sum_open = select(func.sum(Order.price)).where(
                 Order.bid_task_id.is_(None),
@@ -825,7 +824,7 @@ class DBAdapterOrdersTasksMixin:
             }
 
     async def get_orders_for_user(self):
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             user_id = self.get_user_id()  # use the session-based user
             stmt = (
                 select(Order)

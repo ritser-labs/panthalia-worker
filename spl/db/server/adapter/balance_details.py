@@ -12,7 +12,6 @@ from ....models import (
 )
 from ....models.enums import HoldType
 from datetime import datetime
-from ....db.init import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ class DBAdapterBalanceDetailsMixin:
         """
         user_id = self.get_user_id()
 
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             stmt = (
                 select(Account)
                 .where(Account.user_id == user_id)
@@ -105,7 +104,7 @@ class DBAdapterBalanceDetailsMixin:
         Returns a dict with the intermediate sums + a boolean 'invariant_holds'.
         """
 
-        async with AsyncSessionLocal() as session:
+        async with self.get_async_session() as session:
             # 1) Sum all deposit-based credit transactions (CreditTxnType.Add)
             stmt_deposits = select(
                 sqlalchemy.func.sum(CreditTransaction.amount)

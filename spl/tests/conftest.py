@@ -2,7 +2,7 @@ import pytest
 import pytest_asyncio
 from unittest.mock import patch
 
-from spl.db.init import init_db, AsyncSessionLocal
+from spl.db.init import engine, init_db
 from spl.db.server.adapter import DBAdapterServer
 
 import os
@@ -24,17 +24,20 @@ async def setup_test_database():
     yield
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def clear_database():
+@pytest_asyncio.fixture(scope="function", autouse=True)
+async def fresh_db():
     """
-    Clear the database before each test, ensuring test isolation even across files.
+    For every single test function, we:
+      1) Drop all tables
+      2) Create all tables fresh
+    so there's zero leftover from previous tests.
     """
-    async with AsyncSessionLocal() as session:
-        for table in reversed(Base.metadata.sorted_tables):
-            await session.execute(table.delete())
-        await session.commit()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
     yield
-
+    # (Optional) you could drop again after the test
+    # but typically we only need to do it before
 
 @pytest.fixture(scope='session', autouse=True)
 def mock_auth_decorators():
@@ -72,7 +75,7 @@ def patch_get_task_eager():
     original_get_task = DBAdapterOrdersTasksMixin.get_task
 
     async def get_task_eager(self, task_id: int):
-        async with AsyncSessionLocal() as session:
+        async with DBAdapterServer().get_async_session() as session:
             stmt = (
                 select(Task)
                 .options(

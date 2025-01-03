@@ -16,8 +16,6 @@ from spl.db.server.app import original_app
 from spl.db.server.adapter.orders_tasks import DBAdapterOrdersTasksMixin
 from spl.db.server.adapter import DBAdapterServer
 
-from spl.db.init import AsyncSessionLocal
-
 
 @pytest.mark.asyncio
 async def test_basic_setup(db_adapter_server_fixture):
@@ -65,7 +63,7 @@ async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
             iteration=0
         )
 
-        async with AsyncSessionLocal() as session:
+        async with server.get_async_session() as session:
             account = await server.get_or_create_account("testuser", session=session)
             cc_hold = Hold(
                 account_id=account.id,
@@ -96,7 +94,7 @@ async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
             hold_id=cc_hold.id
         )
 
-        async with AsyncSessionLocal() as session:
+        async with server.get_async_session() as session:
             order = await session.execute(select(Order).where(Order.id == bid_order_id))
             order = order.scalar_one_or_none()
             assert order is not None
@@ -126,7 +124,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
         # solver => solveruser
         solver_server = DBAdapterServer(user_id_getter=lambda: "solveruser")
 
-        async with AsyncSessionLocal() as session:
+        async with solver_server.get_async_session() as session:
             solver_account = await solver_server.get_or_create_account("solveruser", session=session)
             solver_hold = Hold(
                 account_id=solver_account.id,
@@ -149,7 +147,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
             params="{}"
         )
 
-        async with AsyncSessionLocal() as session:
+        async with server.get_async_session() as session:
             buyer_account = await server.get_or_create_account("testuser", session=session)
             buyer_cc_hold = Hold(
                 account_id=buyer_account.id,
@@ -187,7 +185,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
         # finalize => correct => solver gets new earnings hold, etc.
         await server.finalize_sanity_check(task_id, True)
 
-        async with AsyncSessionLocal() as session:
+        async with server.get_async_session() as session:
             stmt = (
                 select(Task)
                 .options(

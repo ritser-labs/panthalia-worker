@@ -5,7 +5,6 @@ from spl.models import Hold, HoldType, Task
 from spl.models.enums import OrderType
 from spl.common import TaskStatus
 from sqlalchemy import select
-from spl.db.init import AsyncSessionLocal
 
 from spl.db.server.adapter import DBAdapterServer
 
@@ -30,7 +29,7 @@ async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
             iteration=0
         )
 
-        async with AsyncSessionLocal() as session:
+        async with DBAdapterServer().get_async_session() as session:
             account = await server.get_or_create_account("testuser", session=session)
             cc_hold = Hold(
                 account_id=account.id,
@@ -63,7 +62,7 @@ async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
             hold_id=cc_hold.id
         )
 
-        async with AsyncSessionLocal() as session:
+        async with DBAdapterServer().get_async_session() as session:
             hold_obj = await session.get(Hold, cc_hold.id)
             assert hold_obj.used_amount == 50.0
 
@@ -95,7 +94,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
         # solver => "solveruser"
         solver_server = DBAdapterServer(user_id_getter=lambda: "solveruser")
 
-        async with AsyncSessionLocal() as session:
+        async with DBAdapterServer().get_async_session() as session:
             solver_account = await solver_server.get_or_create_account("solveruser", session=session)
             solver_hold = Hold(
                 account_id=solver_account.id,
@@ -119,7 +118,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
         )
 
         # Buyer => place BID=100 with new CC hold
-        async with AsyncSessionLocal() as session:
+        async with DBAdapterServer().get_async_session() as session:
             buyer_account = await server.get_or_create_account("testuser", session=session)
             buyer_cc_hold = Hold(
                 account_id=buyer_account.id,
@@ -157,7 +156,7 @@ async def test_create_ask_order_with_cc_hold_and_match(db_adapter_server_fixture
         await server.finalize_sanity_check(task_id, True)
 
         # confirm
-        async with AsyncSessionLocal() as session:
+        async with DBAdapterServer().get_async_session() as session:
             solver_acc = await solver_server.get_or_create_account("solveruser", session=session)
             updated_solver_hold = await session.execute(
                 select(Hold).where(Hold.account_id == solver_acc.id, Hold.total_amount == 300.0)

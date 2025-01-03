@@ -1,9 +1,8 @@
 # file: spl/db/server/adapter/__init__.py
 
-# Instead of "from ....models import init_db, create_invariant_async_session", 
-# we now import them from spl.db.init to avoid the circular import.
 from ....db.init import init_db, create_invariant_async_session
 
+# Import all your mixins
 from .accounts import DBAdapterAccountsMixin
 from .holds import DBAdapterHoldsMixin
 from .orders_tasks import DBAdapterOrdersTasksMixin
@@ -14,6 +13,7 @@ from .state_updates import DBAdapterStateUpdatesMixin
 from .billing.stripe import DBAdapterStripeBillingMixin
 from .balance_details import DBAdapterBalanceDetailsMixin
 
+# If you need user_id_getter from auth:
 from ....auth.view import get_user_id as default_get_user_id
 
 class DBAdapterServer(
@@ -38,21 +38,19 @@ class DBAdapterServer(
 
     async def check_invariant(self) -> dict:
         """
-        The method that verifies your ledger / account invariants.
-        If it fails, return { 'invariant_holds': False, 'difference': ... } or similar.
-        If it passes, return { 'invariant_holds': True, ... }.
+        The method that verifies your ledger invariants.
+        Return { 'invariant_holds': False, 'difference': ... } if it fails,
+        or { 'invariant_holds': True, ... } if it passes.
         """
-        # If you have a 'check_invariant()' in a mixin, call super(). 
-        # Or implement it here. Example:
         return await super().check_invariant()
 
-# Instantiate the server object once
-db_adapter_server = DBAdapterServer()
+    def get_async_session(self):
+        """
+        Returns a brand-new session that automatically checks invariants
+        via create_invariant_async_session(db_adapter_server=...).
+        """
+        SessionFactory = create_invariant_async_session(db_adapter_server=self)
+        return SessionFactory()
 
-def get_async_session():
-    """
-    Returns a brand-new session that automatically checks invariants
-    before flush and after commit, via CheckingInvariantAsyncSession.
-    """
-    SessionFactory = create_invariant_async_session(db_adapter_server)
-    return SessionFactory()
+# Instantiate a single server instance
+db_adapter_server = DBAdapterServer()

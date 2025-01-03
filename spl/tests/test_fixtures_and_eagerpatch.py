@@ -7,7 +7,6 @@ from sqlalchemy import select
 from spl.models import Task, Job, Order
 from spl.db.server.adapter.orders_tasks import DBAdapterOrdersTasksMixin
 from spl.db.server.app import original_app
-from spl.db.init import AsyncSessionLocal
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -15,7 +14,7 @@ async def clear_database():
     """
     Clear the database before each test to ensure test isolation.
     """
-    async with AsyncSessionLocal() as session:
+    async with DBAdapterServer().get_async_session() as session:
         from spl.models import Base
         for table in reversed(Base.metadata.sorted_tables):
             await session.execute(table.delete())
@@ -33,7 +32,7 @@ def patch_get_task_eager():
     original_get_task = DBAdapterOrdersTasksMixin.get_task
 
     async def get_task_eager(self, task_id: int):
-        async with AsyncSessionLocal() as session:
+        async with DBAdapterServer().get_async_session() as session:
             stmt = (
                 select(Task)
                 .options(

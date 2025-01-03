@@ -1,6 +1,5 @@
 import pytest
 from spl.db.server.app import original_app
-from spl.db.init import AsyncSessionLocal
 from sqlalchemy import select
 
 @pytest.mark.asyncio
@@ -49,7 +48,7 @@ async def test_deposit_credits_expire_after_a_year(db_adapter_server_fixture):
         balance_info_1 = await server.get_balance_details_for_user()
         assert balance_info_1["credits_balance"] == 200.0
 
-        async with AsyncSessionLocal() as session:
+        async with server.get_async_session() as session:
             account = await server.get_or_create_account("testuser", session=session)
             deposit_hold = (
                 await session.execute(select(Hold).where(Hold.account_id == account.id))

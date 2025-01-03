@@ -6,7 +6,6 @@ from spl.db.server.app import original_app
 from spl.models import Hold, HoldType, TaskStatus
 from spl.models.enums import OrderType
 from spl.db.server.adapter import DBAdapterServer
-from spl.db.init import AsyncSessionLocal
 import logging
 
 
@@ -36,7 +35,7 @@ async def test_cc_hold_incorrect_leftover_to_credits(db_adapter_server_fixture):
 
         # 3) Solver => "solveruser" => has a CC hold
         solver_server = DBAdapterServer(user_id_getter=lambda: "solveruser")
-        async with AsyncSessionLocal() as session:
+        async with solver_server.get_async_session() as session:
             solver_account = await solver_server.get_or_create_account("solveruser", session=session)
             solver_cc_hold = Hold(
                 account_id=solver_account.id,
@@ -61,7 +60,7 @@ async def test_cc_hold_incorrect_leftover_to_credits(db_adapter_server_fixture):
         )
 
         # 5) Buyer => place a BID => price=100
-        async with AsyncSessionLocal() as session:
+        async with server.get_async_session() as session:
             buyer_account = await server.get_or_create_account("testuser", session=session)
             buyer_cc_hold = Hold(
                 account_id=buyer_account.id,
@@ -99,7 +98,7 @@ async def test_cc_hold_incorrect_leftover_to_credits(db_adapter_server_fixture):
         await server.finalize_sanity_check(task_id, is_valid=False)
 
         # 8) Re-fetch the solver's leftover hold => turned into deposit-based credits
-        async with AsyncSessionLocal() as session:
+        async with solver_server.get_async_session() as session:
             updated_solver_cc_hold = await session.get(Hold, solver_cc_hold.id)
             assert updated_solver_cc_hold.charged is True
             assert updated_solver_cc_hold.used_amount == updated_solver_cc_hold.total_amount

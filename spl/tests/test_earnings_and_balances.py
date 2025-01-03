@@ -11,7 +11,6 @@ from spl.db.server.adapter import DBAdapterServer
 from spl.models import (
     TaskStatus, OrderType
 )
-from spl.db.init import AsyncSessionLocal
 
 @pytest.mark.asyncio
 async def test_earnings_and_balances_scenario():

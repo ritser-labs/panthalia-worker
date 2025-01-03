@@ -3,7 +3,6 @@ from spl.db.server.app import original_app
 from spl.models import Hold, HoldType
 from datetime import datetime, timedelta
 from sqlalchemy import select
-from spl.db.init import AsyncSessionLocal
 
 from spl.models.enums import OrderType, TaskStatus
 
@@ -30,7 +29,7 @@ async def test_create_bids_and_tasks_with_hold(db_adapter_server_fixture):
         await server.admin_deposit_account(user_id="testuser", amount=300.0)
 
         # Create a large hold
-        async with AsyncSessionLocal() as session:
+        async with server.get_async_session() as session:
             account = await server.get_or_create_account("testuser", session=session)
             large_hold = Hold(
                 account_id=account.id,
@@ -56,7 +55,7 @@ async def test_create_bids_and_tasks_with_hold(db_adapter_server_fixture):
         )
         assert len(result["created_items"]) == 3
 
-        async with AsyncSessionLocal() as session:
+        async with server.get_async_session() as session:
             updated_hold = await session.execute(select(Hold).where(Hold.id == large_hold.id))
             updated_hold = updated_hold.scalar_one_or_none()
             assert updated_hold.used_amount == 150.0
