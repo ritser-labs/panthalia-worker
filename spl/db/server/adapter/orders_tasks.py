@@ -10,10 +10,13 @@ from typing import Optional
 import json
 
 from ....models import (
-    AsyncSessionLocal, Job, Task, TaskStatus, Subnet,
+    Job, Task, TaskStatus, Subnet,
     Order, Account, OrderType, HoldType, CreditTxnType, EarningsTxnType, PlatformRevenueTxnType,
     CreditTransaction, HoldTransaction, Hold, EarningsTransaction
 )
+
+from ....db.init import AsyncSessionLocal
+
 
 logger = logging.getLogger(__name__)
 PLATFORM_FEE_PERCENTAGE = 0.1

@@ -1,5 +1,7 @@
 from sqlalchemy import select, update
-from ....models import AsyncSessionLocal, Perm, PermDescription, PermType, Sot
+from ....models import Perm, PermDescription, PermType, Sot
+from ....db.init import AsyncSessionLocal
+
 
 class DBAdapterPermissionsMixin:
     async def get_perm(self, address: str, perm: int):

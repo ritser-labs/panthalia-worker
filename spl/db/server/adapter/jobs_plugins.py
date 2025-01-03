@@ -2,8 +2,10 @@
 
 import logging
 from sqlalchemy import select, update
-from ....models import AsyncSessionLocal, Job, Plugin, Subnet, Task, TaskStatus
+from ....models import Job, Plugin, Subnet, Task, TaskStatus
 from sqlalchemy.orm import joinedload
+from ....db.init import AsyncSessionLocal
+
 
 logger = logging.getLogger(__name__)
 

@@ -8,10 +8,11 @@ from eth_account import Account as EthAccount
 from datetime import timedelta
 
 from ....models import (
-    AsyncSessionLocal, Account, CreditTransaction, CreditTxnType,
+    Account, CreditTransaction, CreditTxnType,
     EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType,
     AccountKey, PendingWithdrawal, WithdrawalStatus, StripeDeposit, Hold, HoldType
 )
+from ....db.init import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 

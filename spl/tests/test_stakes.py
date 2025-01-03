@@ -1,10 +1,11 @@
 import pytest
 from datetime import datetime, timedelta
 from spl.db.server.app import original_app
-from spl.models import AsyncSessionLocal, Hold, HoldType, Task
+from spl.models import Hold, HoldType, Task
 from spl.models.enums import OrderType
 from spl.common import TaskStatus
 from sqlalchemy import select
+from spl.db.init import AsyncSessionLocal
 
 from spl.db.server.adapter import DBAdapterServer
 

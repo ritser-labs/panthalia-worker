@@ -9,8 +9,9 @@ from sqlalchemy.orm import selectinload
 from spl.db.server.app import original_app
 from spl.db.server.adapter import DBAdapterServer
 from spl.models import (
-    AsyncSessionLocal, Task, TaskStatus, OrderType
+    TaskStatus, OrderType
 )
+from spl.db.init import AsyncSessionLocal
 
 @pytest.mark.asyncio
 async def test_earnings_and_balances_scenario():

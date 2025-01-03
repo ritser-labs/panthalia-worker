@@ -11,7 +11,7 @@ from .enums import (
     CreditTxnType, EarningsTxnType, PlatformRevenueTxnType, WithdrawalStatus,
     TaskStatus
 )
-from . import Base
+from .base import Base
 import enum
 from ..common import device
 

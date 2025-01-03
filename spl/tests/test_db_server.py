@@ -8,13 +8,15 @@ from unittest.mock import patch
 import asyncio
 
 from spl.models import (
-    AsyncSessionLocal, TaskStatus, OrderType, HoldType,
+    TaskStatus, OrderType, HoldType,
     CreditTxnType, EarningsTxnType, PlatformRevenueTxnType,
     Hold, Order, Task, PlatformRevenue, Account, Job
 )
 from spl.db.server.app import original_app
 from spl.db.server.adapter.orders_tasks import DBAdapterOrdersTasksMixin
 from spl.db.server.adapter import DBAdapterServer
+
+from spl.db.init import AsyncSessionLocal
 
 
 @pytest.mark.asyncio

@@ -2,13 +2,13 @@ import pytest
 import pytest_asyncio
 from unittest.mock import patch
 
-from spl.models import init_db
+from spl.db.init import init_db, AsyncSessionLocal
 from spl.db.server.adapter import DBAdapterServer
 
 import os
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"  # in-memory DB
 
-from spl.models import AsyncSessionLocal, Base
+from spl.models import Base
 from sqlalchemy.orm import joinedload
 from sqlalchemy import select
 from spl.db.server.adapter.orders_tasks import DBAdapterOrdersTasksMixin

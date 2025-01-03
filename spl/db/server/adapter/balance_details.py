@@ -5,7 +5,6 @@ import sqlalchemy
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 from ....models import (
-    AsyncSessionLocal, 
     CreditTransaction, CreditTxnType, 
     PlatformRevenue, PlatformRevenueTxnType,
     PendingWithdrawal, WithdrawalStatus,
@@ -13,6 +12,7 @@ from ....models import (
 )
 from ....models.enums import HoldType
 from datetime import datetime
+from ....db.init import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 

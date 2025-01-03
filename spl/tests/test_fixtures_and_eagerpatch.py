@@ -4,9 +4,10 @@ from unittest.mock import patch
 from sqlalchemy.orm import joinedload
 from sqlalchemy import select
 
-from spl.models import AsyncSessionLocal, Task, Job, Order
+from spl.models import Task, Job, Order
 from spl.db.server.adapter.orders_tasks import DBAdapterOrdersTasksMixin
 from spl.db.server.app import original_app
+from spl.db.init import AsyncSessionLocal
 
 
 @pytest_asyncio.fixture(autouse=True)

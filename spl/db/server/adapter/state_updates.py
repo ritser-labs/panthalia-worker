@@ -1,5 +1,7 @@
 from sqlalchemy import select, func
-from ....models import AsyncSessionLocal, StateUpdate
+from ....models import StateUpdate
+from ....db.init import AsyncSessionLocal
+
 
 class DBAdapterStateUpdatesMixin:
     async def create_state_update(self, job_id: int, data: dict):

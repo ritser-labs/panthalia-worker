@@ -3,9 +3,10 @@ import json
 from datetime import datetime, timedelta
 from sqlalchemy import select
 from spl.db.server.app import original_app
-from spl.models import AsyncSessionLocal, Hold, HoldType, TaskStatus
+from spl.models import Hold, HoldType, TaskStatus
 from spl.models.enums import OrderType
 from spl.db.server.adapter import DBAdapterServer
+from spl.db.init import AsyncSessionLocal
 import logging
 
 

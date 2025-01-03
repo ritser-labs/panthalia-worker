@@ -1,6 +1,6 @@
 import pytest
 from spl.db.server.app import original_app
-from spl.models import AsyncSessionLocal
+from spl.db.init import AsyncSessionLocal
 from sqlalchemy import select
 
 @pytest.mark.asyncio

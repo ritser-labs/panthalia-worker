@@ -1,5 +1,7 @@
 from sqlalchemy import select, update
-from ....models import AsyncSessionLocal, Instance, ServiceType
+from ....models import Instance, ServiceType
+from ....db.init import AsyncSessionLocal
+
 
 class DBAdapterInstancesMixin:
     async def create_instance(self, name: str, service_type: ServiceType, job_id: int | None, private_key: str | None, pod_id: str | None, process_id: int | None):
