@@ -92,7 +92,7 @@ class DBAdapterBalanceDetailsMixin:
             "detailed_holds": detailed_holds,
         }
 
-    async def check_invariant(self) -> dict:
+    async def check_invariant(self, session=None) -> dict:
         """
         Check the invariant:
           total_deposited == platform_revenue + total_credits (free+locked) + total_earnings (free+locked) + total_withdrawn
@@ -103,8 +103,11 @@ class DBAdapterBalanceDetailsMixin:
 
         Returns a dict with the intermediate sums + a boolean 'invariant_holds'.
         """
-
-        async with self.get_async_session() as session:
+        own_session = False
+        if session is None:
+            session = self.get_async_session()
+            own_session = True
+        try:
             # 1) Sum all deposit-based credit transactions (CreditTxnType.Add)
             stmt_deposits = select(
                 sqlalchemy.func.sum(CreditTransaction.amount)
@@ -177,3 +180,6 @@ class DBAdapterBalanceDetailsMixin:
                 "invariant_holds": invariant_holds,
                 "difference": float(lhs - rhs),
             }
+        finally:
+            if own_session:
+                await session.close()

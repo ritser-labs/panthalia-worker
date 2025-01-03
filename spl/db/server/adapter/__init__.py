@@ -36,14 +36,6 @@ class DBAdapterServer(
     def get_user_id(self):
         return self._user_id_getter()
 
-    async def check_invariant(self) -> dict:
-        """
-        The method that verifies your ledger invariants.
-        Return { 'invariant_holds': False, 'difference': ... } if it fails,
-        or { 'invariant_holds': True, ... } if it passes.
-        """
-        return await super().check_invariant()
-
     def get_async_session(self):
         """
         Returns a brand-new session that automatically checks invariants
