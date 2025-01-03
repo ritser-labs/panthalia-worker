@@ -9,8 +9,9 @@ import curses
 from flask import Flask, jsonify, send_from_directory
 from ..common import wait_for_health, DB_PORT
 from ..db.db_adapter_client import DBAdapterClient
-from ..models import init_db, db_path, PermType, ServiceType
+from ..models import PermType, ServiceType
 from ..plugins.manager import get_plugin, global_plugin_dir
+from ..db.init import db_path
 from eth_account import Account
 import glob
 import shutil

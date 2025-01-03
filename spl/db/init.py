@@ -6,7 +6,10 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from spl.models.base import Base  # or wherever Base is defined
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.abspath(os.path.join(script_dir, os.pardir))
+db_path = os.path.join(parent_dir, 'sqlite.db')
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
 engine = create_async_engine(DATABASE_URL, echo=False)
 
 class CheckingInvariantAsyncSession(AsyncSession):
