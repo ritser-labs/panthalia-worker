@@ -5,7 +5,7 @@ import sqlalchemy
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 from ....models import (
-    CreditTransaction, CreditTxnType, 
+    CreditTransaction, CreditTxnType,
     PlatformRevenue, PlatformRevenueTxnType,
     PendingWithdrawal, WithdrawalStatus,
     Hold, HoldType, Account
@@ -90,69 +90,76 @@ class DBAdapterBalanceDetailsMixin:
 
     async def check_invariant(self, session=None) -> dict:
         """
-        For the invariant check, we ignore locked amounts and platform revenue.
-        We just verify that:
+        NEW VERSION:
+        Check the invariant by ignoring locked amounts entirely. We verify that:
+        
+           (deposits - withdrawals) == (sum_of_total_amounts_for_Credits_and_Earnings + total_platform_revenue)
 
-        sum_of_all_credits_total_amount + sum_of_all_earnings_total_amount
-        == total_deposited - total_withdrawn
+        1) total_deposited is the sum of CreditTxnType.Add credit transactions
+        2) total_withdrawn is the sum of APPROVED PendingWithdrawal amounts
+        3) total_platform_revenue sums up all PlatformRevenue (Add => +, Subtract => -)
+        4) sum_of_total_amounts_for_Credits_and_Earnings is the sum of hold.total_amount
+           for all holds with hold_type in [HoldType.Credits, HoldType.Earnings],
+           ignoring used_amount entirely.
 
-        Where:
-        - total_deposited = sum of all CreditTxnType.Add transactions
-        - total_withdrawn = sum of all APPROVED withdrawals
-        - sum_of_all_credits_total_amount = sum(Hold.total_amount) for hold_type=Credits
-        - sum_of_all_earnings_total_amount = sum(Hold.total_amount) for hold_type=Earnings
+        Returns a dict with the intermediate sums + a boolean 'invariant_holds'.
         """
-        import sqlalchemy
-        from sqlalchemy import select
-        from ....models import (
-            CreditTransaction, CreditTxnType,
-            PendingWithdrawal, WithdrawalStatus, Hold, HoldType
-        )
-
         own_session = False
         if session is None:
             session = self.get_async_session()
             own_session = True
+
         try:
-            # 1) Sum all deposit-based credit transactions (CreditTxnType.Add)
+            # (1) Sum all deposit-based credit transactions (CreditTxnType.Add)
             stmt_deposits = select(
                 sqlalchemy.func.sum(CreditTransaction.amount)
             ).where(CreditTransaction.txn_type == CreditTxnType.Add)
             total_deposited = (await session.execute(stmt_deposits)).scalar() or 0.0
 
-            # 2) Sum all APPROVED withdrawals
+            # (2) Sum all APPROVED withdrawals
             stmt_withdrawals = select(
                 sqlalchemy.func.sum(PendingWithdrawal.amount)
             ).where(PendingWithdrawal.status == WithdrawalStatus.APPROVED)
             total_withdrawn = (await session.execute(stmt_withdrawals)).scalar() or 0.0
 
-            # 3) Sum total_amount (NOT leftover or locked) for each hold with type=Credits or Earnings
+            # (3) Sum platform revenue (Add => +, Subtract => -)
+            stmt_revenue = select(
+                sqlalchemy.func.sum(
+                    PlatformRevenue.amount *
+                    sqlalchemy.case(
+                        (PlatformRevenue.txn_type == PlatformRevenueTxnType.Add, 1),
+                        (PlatformRevenue.txn_type == PlatformRevenueTxnType.Subtract, -1),
+                        else_=0
+                    )
+                )
+            )
+            total_platform_revenue = (await session.execute(stmt_revenue)).scalar() or 0.0
+
+            # (4) Sum total_amount for all 'Credits' or 'Earnings' holds
             holds_stmt = select(Hold)
             all_holds = (await session.execute(holds_stmt)).scalars().all()
 
-            sum_credits_total = 0.0
-            sum_earnings_total = 0.0
-
+            sum_credits_and_earnings = 0.0
             for hold in all_holds:
-                if hold.hold_type == HoldType.Credits:
-                    sum_credits_total += hold.total_amount
-                elif hold.hold_type == HoldType.Earnings:
-                    sum_earnings_total += hold.total_amount
+                if hold.hold_type in [HoldType.Credits, HoldType.Earnings]:
+                    sum_credits_and_earnings += hold.total_amount
 
-            # 4) Check the desired equality:
-            #    sum_credits_total + sum_earnings_total == total_deposited - total_withdrawn
-            lhs = sum_credits_total + sum_earnings_total
-            rhs = total_deposited - total_withdrawn
+            # LHS vs RHS
+            lhs = total_deposited - total_withdrawn
+            rhs = sum_credits_and_earnings + total_platform_revenue
+
             difference = lhs - rhs
             invariant_holds = abs(difference) < 1e-9
 
             return {
-                "total_deposited": float(total_deposited),
-                "total_withdrawn": float(total_withdrawn),
-                "sum_credits_total": float(sum_credits_total),
-                "sum_earnings_total": float(sum_earnings_total),
                 "invariant_holds": invariant_holds,
                 "difference": float(difference),
+                "total_deposited": float(total_deposited),
+                "total_withdrawn": float(total_withdrawn),
+                "total_platform_revenue": float(total_platform_revenue),
+                "sum_credits_and_earnings": float(sum_credits_and_earnings),
+                "lhs_deposits_minus_withdrawals": float(lhs),
+                "rhs_credits_earnings_plus_platform": float(rhs),
             }
         finally:
             if own_session:

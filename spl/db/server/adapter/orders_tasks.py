@@ -510,31 +510,194 @@ class DBAdapterOrdersTasksMixin:
         await self.charge_hold_for_price(session, solver_hold, solver_stake)
         await self.add_platform_revenue(session, solver_stake, PlatformRevenueTxnType.Add)
 
-    async def get_last_task_with_status(self, job_id: int, statuses: List[str]):
+    async def get_last_task_with_status(self, job_id: int, statuses: list[TaskStatus]):
         async with self.get_async_session() as session:
-            q = (
+            stmt = (
                 select(Task)
-                .where(Task.job_id == job_id, Task.status.in_(statuses))
+                .filter(
+                    Task.job_id == job_id,
+                    Task.status.in_(statuses)
+                )
                 .order_by(desc(Task.submitted_at))
                 .limit(1)
             )
-            r = await session.execute(q)
-            return r.scalar_one_or_none()
+            result = await session.execute(stmt)
+            task = result.scalar_one_or_none()
+            return task
 
+    ###########################################################################
     async def check_and_cleanup_holds(self):
+        """
+        1) For any unmatched orders whose hold.expiry is too soon (i.e., hold.expiry <= now + subnet.solve_period + subnet.dispute_period),
+           cancel (delete) these orders immediately.
+        2) For any tasks in SolverSelected status where the solver has taken more than subnet.solve_period to publish a solution,
+           finalize the task as ResolvedIncorrect automatically.
+        3) For expired holds (where hold.expiry < now):
+           - if hold.used_amount != 0, log an error,
+           - then fully charge the hold (which sets charged=True and zeroes out leftover).
+        """
         now = datetime.utcnow()
         async with self.get_async_session() as session:
             async with session.begin():
-                pass
+                logging.debug("[check_and_cleanup_holds] Running hold cleanup check...")
+
+                # STEP 1: Cancel unmatched orders if their hold is about to expire sooner than we can solve+dispute
+                # ----------------------------------------------------------------------------------------------
+                unmatched_order_ids_to_delete = []
+                # We pull all unmatched orders and relevant hold+subnet data
+                unmatched_q = (
+                    select(Order, Hold, Subnet)
+                    .join(Hold, Order.hold_id == Hold.id)
+                    .join(Subnet, Subnet.id == Order.subnet_id)
+                    .where(
+                        Order.bid_task_id.is_(None),  # unmatched
+                        Order.ask_task_id.is_(None)
+                    )
+                )
+                unmatched_res = await session.execute(unmatched_q)
+                for order, hold, subnet in unmatched_res:
+                    # If hold expires on/before: now + (solve_time + dispute_time), then we won't have enough time
+                    # for a solver to do the job or for disputing. => forcibly delete the order
+                    cutoff_time = now + timedelta(seconds=(subnet.solve_period + subnet.dispute_period))
+                    if hold.expiry <= cutoff_time:
+                        unmatched_order_ids_to_delete.append(order.id)
+
+                # STEP 2: Resolve overdue solver tasks as incorrect
+                # ------------------------------------------------
+                tasks_to_fail = []
+                # We'll find tasks that are in status=SolverSelected with time_solver_selected + solve_period < now
+                # Then we'll finalize them as is_valid=False (equivalent to ResolvedIncorrect).
+                # Because these tasks are presumably not solved on time.
+                tasks_q = (
+                    select(Task, Subnet)
+                    .join(Job, Task.job_id == Job.id)
+                    .join(Subnet, Job.subnet_id == Subnet.id)
+                    .where(Task.status == TaskStatus.SolverSelected)
+                )
+                tasks_res = await session.execute(tasks_q)
+                for task, subnet in tasks_res:
+                    # If there's no recorded time_solver_selected, skip
+                    if not task.time_solver_selected:
+                        continue
+                    deadline = task.time_solver_selected + timedelta(seconds=subnet.solve_period)
+                    if now > deadline:
+                        tasks_to_fail.append(task.id)
+
+                # STEP 3: For any hold that has fully expired, ensure used_amount=0 (log error if not), then fully charge.
+                # -------------------------------------------------------------------------------------------------------
+                expired_holds_q = (
+                    select(Hold)
+                    .where(
+                        Hold.charged == False,  # still active
+                        Hold.expiry < now
+                    )
+                )
+                expired_holds_res = await session.execute(expired_holds_q)
+                expired_holds = expired_holds_res.scalars().all()
+
+                # We'll process the hold-charging inline, because self.charge_hold_for_price(...)
+                # accepts a session and doesn't open a new one, so it's safe in a single transaction.
+                for hold in expired_holds:
+                    if hold.used_amount != 0.0:
+                        logger.error(
+                            f"[check_and_cleanup_holds] Found expired hold id={hold.id} with nonzero used_amount="
+                            f"{hold.used_amount:.2f}. Charging anyway..."
+                        )
+                    # Charge the entire leftover = hold.total_amount
+                    await self.charge_hold_for_price(session, hold, hold.total_amount)
+                    logger.info(f"[check_and_cleanup_holds] Expired hold id={hold.id} charged fully.")
+
+            # End of the transaction block => we've just enumerated items. 
+            # Now do the actual modifications that rely on new sessions:
+            #   - delete orders
+            #   - finalize tasks
+            # Because self.delete_order(...) and self.finalize_sanity_check(...) each open a new session.
+
+            # STEP 1 (continued): Actually delete the unmatched orders
+            # --------------------------------------------------------
+            for order_id in unmatched_order_ids_to_delete:
+                try:
+                    await self.delete_order(order_id)
+                    logger.info(f"[check_and_cleanup_holds] Deleted unmatched order {order_id} because hold expiry is too soon.")
+                except Exception as e:
+                    logger.error(f"[check_and_cleanup_holds] Failed to delete order {order_id}: {e}")
+
+            # STEP 2 (continued): Mark tasks as ResolvedIncorrect
+            # ---------------------------------------------------
+            for task_id in tasks_to_fail:
+                try:
+                    await self.finalize_sanity_check(task_id, is_valid=False)
+                    logger.info(f"[check_and_cleanup_holds] Finalized task {task_id} as incorrect due to solver timeout.")
+                except Exception as e:
+                    logger.error(f"[check_and_cleanup_holds] Failed to finalize task {task_id} as incorrect: {e}")
+
 
     async def get_global_stats(self) -> dict:
+        """
+        Return a dictionary of various global statistics:
+          - total $ in open (unmatched) orders
+          - number of open (unmatched) orders
+          - number of tasks in completed statuses
+          - volume = sum of bid prices for tasks that ended up completed
+        """
+        from ....models import TaskStatus, OrderType
+
+        completed_statuses = [TaskStatus.ResolvedCorrect, TaskStatus.ResolvedIncorrect]
+
         async with self.get_async_session() as session:
-            return {}
+            # total $ in open orders
+            stmt_sum_open = select(func.sum(Order.price)).where(
+                Order.bid_task_id.is_(None),
+                Order.ask_task_id.is_(None)
+            )
+            sum_open_result = await session.execute(stmt_sum_open)
+            total_open_orders_dollar = sum_open_result.scalar() or 0.0
+
+            # num of open (unmatched) orders
+            stmt_count_open = select(func.count(Order.id)).where(
+                Order.bid_task_id.is_(None),
+                Order.ask_task_id.is_(None)
+            )
+            count_open_result = await session.execute(stmt_count_open)
+            num_open_orders = count_open_result.scalar() or 0
+
+            # num completed tasks
+            stmt_count_completed = select(func.count(Task.id)).where(
+                Task.status.in_(completed_statuses)
+            )
+            count_completed_result = await session.execute(stmt_count_completed)
+            num_completed_tasks = count_completed_result.scalar() or 0
+
+            # volume (for completed matched bids)
+            # We'll interpret "volume" as sum of the *bid* side for tasks that ended up completed.
+            stmt_volume = (
+                select(func.sum(Order.price))
+                .join(Task, Order.bid_task_id == Task.id)
+                .where(
+                    Order.order_type == OrderType.Bid,
+                    Order.ask_task_id.isnot(None),  # matched with an ask
+                    Task.status.in_(completed_statuses)
+                )
+            )
+            volume_result = await session.execute(stmt_volume)
+            volume = volume_result.scalar() or 0.0
+
+            return {
+                "total_open_orders_dollar": float(total_open_orders_dollar),
+                "num_open_orders": int(num_open_orders),
+                "num_completed_tasks": int(num_completed_tasks),
+                "volume": float(volume)
+            }
 
     async def get_orders_for_user(self):
-        user_id = self.get_user_id()
         async with self.get_async_session() as session:
-            stmt = select(Order).where(Order.user_id == user_id).order_by(Order.id.desc())
-            res = await session.execute(stmt)
-            orders = res.scalars().all()
+            user_id = self.get_user_id()  # use the session-based user
+            stmt = (
+                select(Order)
+                .where(Order.user_id == user_id)
+                .order_by(Order.id.desc())
+            )
+            result = await session.execute(stmt)
+            orders = result.scalars().all()
+            # convert each to as_dict if you want to return it directly
             return [o.as_dict() for o in orders]
