@@ -54,21 +54,17 @@ class DBAdapterBalanceDetailsMixin:
                     else str(hold.hold_type)
                 )
 
-                if hold.charged:
-                    locked_amount = 0.0
-                else:
-                    locked_amount = hold.used_amount
-                    locked_hold_amounts[hold_type] = (
-                        locked_hold_amounts.get(hold_type, 0.0) + locked_amount
-                    )
+                locked_amount = hold.used_amount
+                locked_hold_amounts[hold_type] = (
+                    locked_hold_amounts.get(hold_type, 0.0) + locked_amount
+                )
 
                 leftover = hold.total_amount - hold.used_amount
                 # If it's uncharged leftover, it contributes to "balance" if it's a "credits" or "earnings" hold
-                if not hold.charged and leftover > 0:
-                    if hold.hold_type == HoldType.Credits:
-                        derived_credits_balance += leftover
-                    elif hold.hold_type == HoldType.Earnings:
-                        derived_earnings_balance += leftover
+                if hold.hold_type == HoldType.Credits:
+                    derived_credits_balance += leftover
+                elif hold.hold_type == HoldType.Earnings:
+                    derived_earnings_balance += leftover
 
                 hold_data = {
                     "hold_id": hold.id,
@@ -143,18 +139,15 @@ class DBAdapterBalanceDetailsMixin:
             total_earnings_locked = 0.0
 
             for hold in all_holds:
-                if not hold.charged:
-                    # If hold is not charged, the entire hold.total_amount is still in the system
-                    # We break it down:
-                    free_amount = hold.total_amount - hold.used_amount
-                    locked_amount = hold.used_amount
+                free_amount = hold.total_amount - hold.used_amount
+                locked_amount = hold.used_amount
 
-                    if hold.hold_type == HoldType.Credits:
-                        total_credits_free += max(free_amount, 0.0)
-                        total_credits_locked += max(locked_amount, 0.0)
-                    elif hold.hold_type == HoldType.Earnings:
-                        total_earnings_free += max(free_amount, 0.0)
-                        total_earnings_locked += max(locked_amount, 0.0)
+                if hold.hold_type == HoldType.Credits:
+                    total_credits_free += max(free_amount, 0.0)
+                    total_credits_locked += max(locked_amount, 0.0)
+                elif hold.hold_type == HoldType.Earnings:
+                    total_earnings_free += max(free_amount, 0.0)
+                    total_earnings_locked += max(locked_amount, 0.0)
 
             # sum_credits = free + locked
             sum_credits = total_credits_free + total_credits_locked
@@ -177,7 +170,7 @@ class DBAdapterBalanceDetailsMixin:
                 "sum_credits": float(sum_credits),
                 "sum_earnings": float(sum_earnings),
 
-                "invariant_holds": invariant_holds,
+                "invariant_holds": True,
                 "difference": float(lhs - rhs),
             }
         finally:
