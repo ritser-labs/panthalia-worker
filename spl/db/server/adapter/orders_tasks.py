@@ -538,36 +538,3 @@ class DBAdapterOrdersTasksMixin:
             res = await session.execute(stmt)
             orders = res.scalars().all()
             return [o.as_dict() for o in orders]
-
-    async def charge_hold_for_price(self, session: AsyncSession, hold: Hold, price: float):
-        """
-        Partially or fully charge `price` from 'hold', assuming the user has
-        enough locked funds (`used_amount`) to finalize this partial charge.
-
-        - If the hold has used_amount < price, raise an error (cannot finalize more than locked).
-        - Decrease total_amount and used_amount by `price`.
-        - Increase charged_amount by `price`.
-        - If total_amount <= 0, mark the hold as fully charged.
-
-        This approach omits the creation of any leftover child hold and 
-        allows multiple charges until the hold is fully consumed.
-        """
-
-        # The user can only finalize up to their currently locked portion.
-        # If they want to finalize more than used_amount, the code must first 'reserve' more or fail.
-        if hold.used_amount < price:
-            raise ValueError(
-                f"Cannot finalize {price} from hold {hold.id}; used_amount={hold.used_amount} is too small."
-            )
-
-        # Reduce the locked portion by price, and actually 'charge' that amount
-        hold.used_amount -= price
-        hold.charged_amount += price
-        hold.total_amount -= price   # we are removing that portion from the hold's total
-        hold.charged = True
-
-        # If the hold is now fully consumed, mark it as charged
-        if hold.total_amount < 0:
-            raise ValueError(f"Charged more than total_amount in hold {hold.id}")
-
-        await session.flush()

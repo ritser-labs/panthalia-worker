@@ -90,15 +90,25 @@ class DBAdapterBalanceDetailsMixin:
 
     async def check_invariant(self, session=None) -> dict:
         """
-        Check the invariant:
-          total_deposited == platform_revenue + total_credits (free+locked) + total_earnings (free+locked) + total_withdrawn
+        For the invariant check, we ignore locked amounts and platform revenue.
+        We just verify that:
+
+        sum_of_all_credits_total_amount + sum_of_all_earnings_total_amount
+        == total_deposited - total_withdrawn
 
         Where:
-          - total_credits = sum of (free leftover + locked) across all uncharged credit holds
-          - total_earnings = likewise for earnings holds
-
-        Returns a dict with the intermediate sums + a boolean 'invariant_holds'.
+        - total_deposited = sum of all CreditTxnType.Add transactions
+        - total_withdrawn = sum of all APPROVED withdrawals
+        - sum_of_all_credits_total_amount = sum(Hold.total_amount) for hold_type=Credits
+        - sum_of_all_earnings_total_amount = sum(Hold.total_amount) for hold_type=Earnings
         """
+        import sqlalchemy
+        from sqlalchemy import select
+        from ....models import (
+            CreditTransaction, CreditTxnType,
+            PendingWithdrawal, WithdrawalStatus, Hold, HoldType
+        )
+
         own_session = False
         if session is None:
             session = self.get_async_session()
@@ -116,62 +126,33 @@ class DBAdapterBalanceDetailsMixin:
             ).where(PendingWithdrawal.status == WithdrawalStatus.APPROVED)
             total_withdrawn = (await session.execute(stmt_withdrawals)).scalar() or 0.0
 
-            # 3) Sum platform revenue (Add => +, Subtract => -)
-            stmt_revenue = select(
-                sqlalchemy.func.sum(
-                    PlatformRevenue.amount *
-                    sqlalchemy.case(
-                        (PlatformRevenue.txn_type == PlatformRevenueTxnType.Add, 1),
-                        (PlatformRevenue.txn_type == PlatformRevenueTxnType.Subtract, -1),
-                        else_=0
-                    )
-                )
-            )
-            total_platform_revenue = (await session.execute(stmt_revenue)).scalar() or 0.0
-
-            # 4) Sum leftover + locked for credits & earnings in uncharged holds
+            # 3) Sum total_amount (NOT leftover or locked) for each hold with type=Credits or Earnings
             holds_stmt = select(Hold)
             all_holds = (await session.execute(holds_stmt)).scalars().all()
 
-            total_credits_free = 0.0
-            total_credits_locked = 0.0
-            total_earnings_free = 0.0
-            total_earnings_locked = 0.0
+            sum_credits_total = 0.0
+            sum_earnings_total = 0.0
 
             for hold in all_holds:
-                free_amount = hold.total_amount - hold.used_amount
-                locked_amount = hold.used_amount
-
                 if hold.hold_type == HoldType.Credits:
-                    total_credits_free += max(free_amount, 0.0)
-                    total_credits_locked += max(locked_amount, 0.0)
+                    sum_credits_total += hold.total_amount
                 elif hold.hold_type == HoldType.Earnings:
-                    total_earnings_free += max(free_amount, 0.0)
-                    total_earnings_locked += max(locked_amount, 0.0)
+                    sum_earnings_total += hold.total_amount
 
-            # sum_credits = free + locked
-            sum_credits = total_credits_free + total_credits_locked
-            sum_earnings = total_earnings_free + total_earnings_locked
-
-            # 5) Compare LHS vs RHS
-            lhs = total_deposited
-            rhs = total_platform_revenue + sum_credits + sum_earnings + total_withdrawn
-            invariant_holds = abs(lhs - rhs) < 1e-9
+            # 4) Check the desired equality:
+            #    sum_credits_total + sum_earnings_total == total_deposited - total_withdrawn
+            lhs = sum_credits_total + sum_earnings_total
+            rhs = total_deposited - total_withdrawn
+            difference = lhs - rhs
+            invariant_holds = abs(difference) < 1e-9
 
             return {
-                "total_deposited": float(lhs),
-                "total_platform_revenue": float(total_platform_revenue),
-                "credits_free": float(total_credits_free),
-                "credits_locked": float(total_credits_locked),
-                "earnings_free": float(total_earnings_free),
-                "earnings_locked": float(total_earnings_locked),
+                "total_deposited": float(total_deposited),
                 "total_withdrawn": float(total_withdrawn),
-
-                "sum_credits": float(sum_credits),
-                "sum_earnings": float(sum_earnings),
-
-                "invariant_holds": True,
-                "difference": float(lhs - rhs),
+                "sum_credits_total": float(sum_credits_total),
+                "sum_earnings_total": float(sum_earnings_total),
+                "invariant_holds": invariant_holds,
+                "difference": float(difference),
             }
         finally:
             if own_session:
