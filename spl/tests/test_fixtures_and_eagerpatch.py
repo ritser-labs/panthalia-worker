@@ -7,7 +7,7 @@ from sqlalchemy import select
 from spl.models import Task, Job, Order
 from spl.db.server.adapter.orders_tasks import DBAdapterOrdersTasksMixin
 from spl.db.server.app import original_app
-
+from spl.db.server.adapter import DBAdapterServer
 
 @pytest_asyncio.fixture(autouse=True)
 async def clear_database():

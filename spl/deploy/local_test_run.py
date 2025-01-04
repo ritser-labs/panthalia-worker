@@ -393,7 +393,7 @@ async def main():
         
         subnet_id = await db_adapter.create_subnet(
             5 * 60,
-            2 * 60,
+            20 * 60,
             10
         )
 

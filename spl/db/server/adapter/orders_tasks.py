@@ -396,7 +396,7 @@ class DBAdapterOrdersTasksMixin:
             await session.commit()
             return True
 
-    async def finalize_sanity_check(self, task_id: int, is_valid: bool):
+    async def finalize_sanity_check(self, task_id: int, is_valid: bool, force: bool = False):
         async with self.get_async_session() as session:
             stmt = (
                 select(Task)
@@ -417,7 +417,7 @@ class DBAdapterOrdersTasksMixin:
                     f"[finalize_sanity_check] Task {task_id} is already in {task.status} => skipping re-finalization."
                 )
                 return
-            if task.status != TaskStatus.SanityCheckPending:
+            if not force and task.status != TaskStatus.SanityCheckPending:
                 raise ValueError(f"Task {task_id} must be in SanityCheckPending to finalize sanity check.")
 
             if is_valid:
@@ -626,7 +626,7 @@ class DBAdapterOrdersTasksMixin:
             # ---------------------------------------------------
             for task_id in tasks_to_fail:
                 try:
-                    await self.finalize_sanity_check(task_id, is_valid=False)
+                    await self.finalize_sanity_check(task_id, is_valid=False, force=True)
                     logger.info(f"[check_and_cleanup_holds] Finalized task {task_id} as incorrect due to solver timeout.")
                 except Exception as e:
                     logger.error(f"[check_and_cleanup_holds] Failed to finalize task {task_id} as incorrect: {e}")
