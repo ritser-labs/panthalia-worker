@@ -26,7 +26,7 @@ class DBAdapterStripeBillingMixin:
 
         stripe.api_key = self.stripe_api_key
 
-    async def create_stripe_session(self, amount: int) -> dict:
+    async def create_stripe_credits_session(self, amount: int) -> dict:
         """
         Creates a Stripe Checkout Session. Also calls self.create_stripe_deposit(...) to record pending deposit.
         """
@@ -51,14 +51,14 @@ class DBAdapterStripeBillingMixin:
                 cancel_url=self.cancel_url,
             )
         except Exception as e:
-            self.logger.error(f"[create_stripe_session] Error from Stripe: {e}")
+            self.logger.error(f"[create_stripe_credits_session] Error from Stripe: {e}")
             return {"error": str(e), "status_code": 500}
 
         # Insert the deposit row in DB (pending)
         try:
             await self.create_stripe_deposit(user_id, amount, session.id)
         except Exception as e:
-            self.logger.error(f"[create_stripe_session] DB error create_stripe_deposit: {e}")
+            self.logger.error(f"[create_stripe_credits_session] DB error create_stripe_deposit: {e}")
             return {"error": str(e), "status_code": 500}
 
         return {"session_id": session.id, "url": session.url}

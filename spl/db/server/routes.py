@@ -567,9 +567,9 @@ async def update_job_active():
     await db_adapter_server.update_job_active(job_id, new_active)
     return jsonify({'success': True}), 200
 
-app.route('/create_stripe_session', methods=['POST'], endpoint='create_stripe_session_endpoint')(
+app.route('/create_stripe_credits_session', methods=['POST'], endpoint='create_stripe_credits_session_endpoint')(
     create_post_route(
-        db_adapter_server.create_stripe_session,
+        db_adapter_server.create_stripe_credits_session,
         ['amount'],
         auth_method=AuthMethod.USER
     )
