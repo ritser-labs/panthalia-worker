@@ -12,6 +12,7 @@ from ....models import (
     EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType,
     AccountKey, PendingWithdrawal, WithdrawalStatus, StripeDeposit, Hold, HoldType
 )
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,13 @@ class DBAdapterAccountsMixin:
                 status='pending'
             )
             session.add(new_dep)
+            await self.create_credit_transaction_for_user(
+                user_id=user_id,
+                amount=deposit_amount,
+                reason="1year_deposit",
+                txn_type=CreditTxnType.Add,
+                session=session
+            )
             await session.commit()
             await session.refresh(new_dep)
             logger.info(f"[create_stripe_deposit] Created deposit id={new_dep.id} for user={user_id}, amt={deposit_amount}")
@@ -250,55 +258,80 @@ class DBAdapterAccountsMixin:
         user_id: str,
         amount: int,
         reason: str,
+        txn_type: CreditTxnType,
+        session: Optional[AsyncSession] = None
+    ) -> CreditTransaction:
+        """
+        Creates a credit transaction (Add or Subtract) for the user. If txn_type=Add,
+        also creates a new deposit-based hold so that leftover in that hold is effectively
+        their "credits" balance.
+
+        If `session` is provided, it reuses that session and does NOT commit/close inside
+        this function. Otherwise, it creates its own session context, commits, and closes.
+        """
+        # If caller did not pass an existing session, open our own context
+        if session is None:
+            async with self.get_async_session() as new_session:
+                return await self._create_credit_transaction_for_user_internal(
+                    new_session, user_id, amount, reason, txn_type
+                )
+        else:
+            # Use caller's session
+            return await self._create_credit_transaction_for_user_internal(
+                session, user_id, amount, reason, txn_type
+            )
+
+    async def _create_credit_transaction_for_user_internal(
+        self,
+        session: AsyncSession,
+        user_id: str,
+        amount: int,
+        reason: str,
         txn_type: CreditTxnType
     ) -> CreditTransaction:
         """
-        Creates a credit transaction (Add or Subtract) for the user, plus if txn_type=Add
-        it creates a new deposit-based hold (so the leftover in that hold is their "credits" balance).
+        Internal helper that assumes an already-open session. This is where the actual
+        DB logic happens. The caller handles commit if needed.
         """
-        async with self.get_async_session() as session:
-            account = await self.get_or_create_account(user_id, session)
+        account = await self.get_or_create_account(user_id, session=session)
 
-            if txn_type == CreditTxnType.Add:
-                # We create a new hold that expires in 1 year. 
-                expiry_date = datetime.utcnow() + timedelta(days=365)
-                new_hold = Hold(
-                    account_id=account.id,
-                    user_id=user_id,
-                    hold_type=HoldType.Credits,
-                    total_amount=amount,
-                    used_amount=0.0,
-                    expiry=expiry_date,
-                    charged=False,
-                    charged_amount=0.0
-                )
-                session.add(new_hold)
-                logger.info(
-                    f"[create_credit_transaction_for_user] user={user_id}, +{amount} credits => hold with expiry {expiry_date}"
-                )
-
-            elif txn_type == CreditTxnType.Subtract:
-                # If we had to do a "Subtract," you'd typically want to locate a suitable credits-type hold
-                # and reduce leftover. But that's a more advanced approach. For now, we do no ephemeral "account" field.
-                pass
-
-            new_tx = CreditTransaction(
+        # If we're adding credits, create a new deposit-based hold
+        if txn_type == CreditTxnType.Add:
+            expiry_date = datetime.utcnow() + timedelta(days=365)
+            new_hold = Hold(
                 account_id=account.id,
                 user_id=user_id,
-                amount=amount,
-                txn_type=txn_type,
-                reason=reason
+                hold_type=HoldType.Credits,
+                total_amount=amount,
+                used_amount=0.0,
+                expiry=expiry_date,
+                charged=False,
+                charged_amount=0.0
             )
-            session.add(new_tx)
-
-            await session.commit()
-            await session.refresh(new_tx)
-
+            session.add(new_hold)
             logger.info(
-                f"[create_credit_transaction_for_user] user={user_id}, txn={new_tx.id} => success."
+                f"[create_credit_transaction_for_user] user={user_id}, +{amount} credits => "
+                f"hold with expiry {expiry_date}"
             )
 
-            return new_tx
+        # Insert the credit transaction
+        new_tx = CreditTransaction(
+            account_id=account.id,
+            user_id=user_id,
+            amount=amount,
+            txn_type=txn_type,
+            reason=reason
+        )
+        session.add(new_tx)
+
+        # Note: We don't do `await session.commit()` here because the caller
+        # (either our own `async with` block or the external caller) will handle it.
+
+        logger.info(
+            f"[create_credit_transaction_for_user] user={user_id}, created txn => reason={reason}, "
+            f"txn_type={txn_type}, amount={amount}"
+        )
+        return new_tx
 
     async def link_deposit_to_transaction(self, deposit_id: int, credit_tx_id: int) -> StripeDeposit:
         async with self.get_async_session() as session:
