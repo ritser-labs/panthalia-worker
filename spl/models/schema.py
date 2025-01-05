@@ -268,6 +268,7 @@ class StripeDeposit(Base):
     deposit_amount = Column(Integer, nullable=False)
     stripe_session_id = Column(String, nullable=False, unique=True, index=True)
     status = Column(String, nullable=False, default="pending")
+    is_authorization = Column(Boolean, nullable=False, default=False)
 
     credit_transaction_id = Column(Integer, ForeignKey("credit_transactions.id"), nullable=True)
     credit_transaction = relationship("CreditTransaction", backref="stripe_deposit")
