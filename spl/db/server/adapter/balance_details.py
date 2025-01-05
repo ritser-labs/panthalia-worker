@@ -149,7 +149,7 @@ class DBAdapterBalanceDetailsMixin:
             rhs = sum_credits_and_earnings + total_platform_revenue
 
             difference = lhs - rhs
-            invariant_holds = abs(difference) < 1e-9
+            invariant_holds = difference == 0
 
             return {
                 "invariant_holds": invariant_holds,
