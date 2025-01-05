@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from ....models import (
-    Account, Hold, HoldTransaction, HoldType
+    Account, Hold, HoldTransaction, HoldType, CreditTransaction, CreditTxnType
 )
 from typing import Optional
 
@@ -188,6 +188,15 @@ class DBAdapterHoldsMixin:
                     parent_hold_id=hold.id  # optional: track lineage
                 )
                 session.add(new_credits_hold)
+                # 1) Also log a "deposit" transaction for leftover
+                new_tx = CreditTransaction(
+                    account_id=hold.account_id,
+                    user_id=hold.user_id,
+                    amount=leftover,
+                    txn_type=CreditTxnType.Add,
+                    reason="CC leftover"
+                )
+                session.add(new_tx)
 
             # Done
             await session.flush()

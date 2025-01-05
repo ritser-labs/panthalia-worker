@@ -598,14 +598,23 @@ class DBAdapterOrdersTasksMixin:
                 # We'll process the hold-charging inline, because self.charge_hold_for_price(...)
                 # accepts a session and doesn't open a new one, so it's safe in a single transaction.
                 for hold in expired_holds:
-                    if hold.used_amount != 0.0:
-                        logger.error(
-                            f"[check_and_cleanup_holds] Found expired hold id={hold.id} with nonzero used_amount="
-                            f"{hold.used_amount:.2f}. Charging anyway..."
+                    leftover = hold.total_amount - hold.used_amount
+                    if leftover > 0:
+                        # Force the entire leftover to become “used” so we can charge everything
+                        logger.warning(
+                            f"[check_and_cleanup_holds] Forcing leftover {leftover:.2f} as used for expired hold id={hold.id}"
                         )
-                    # Charge the entire leftover = hold.total_amount
+                        hold.used_amount = hold.total_amount
+                    
+                    # We can keep an error/warning if used_amount != total_amount, or remove that check entirely:
+                    # if hold.used_amount != hold.total_amount:
+                    #     logger.error("...")
+
+                    # Now it’s safe to finalize the entire hold
                     await self.charge_hold_for_price(session, hold, hold.total_amount)
+                    await self.add_platform_revenue(session, hold.total_amount, PlatformRevenueTxnType.Add)
                     logger.info(f"[check_and_cleanup_holds] Expired hold id={hold.id} charged fully.")
+
 
             # End of the transaction block => we've just enumerated items. 
             # Now do the actual modifications that rely on new sessions:
