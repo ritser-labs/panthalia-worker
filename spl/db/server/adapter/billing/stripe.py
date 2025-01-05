@@ -26,10 +26,11 @@ class DBAdapterStripeBillingMixin:
 
         stripe.api_key = self.stripe_api_key
 
-    async def create_stripe_session(self, user_id: str, amount: int) -> dict:
+    async def create_stripe_session(self, amount: int) -> dict:
         """
         Creates a Stripe Checkout Session. Also calls self.create_stripe_deposit(...) to record pending deposit.
         """
+        user_id = self.get_user_id()
         if amount <= 0:
             return {"error": "Invalid amount", "status_code": 400}
 
