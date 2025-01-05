@@ -26,7 +26,7 @@ class DBAdapterStripeBillingMixin:
 
         stripe.api_key = self.stripe_api_key
 
-    async def create_stripe_session(self, user_id: str, amount: float) -> dict:
+    async def create_stripe_session(self, user_id: str, amount: int) -> dict:
         """
         Creates a Stripe Checkout Session. Also calls self.create_stripe_deposit(...) to record pending deposit.
         """
@@ -34,7 +34,7 @@ class DBAdapterStripeBillingMixin:
             return {"error": "Invalid amount", "status_code": 400}
 
         try:
-            amount_in_cents = int(round(amount * 100))
+            amount_in_cents = amount
             session = stripe.checkout.Session.create(
                 payment_method_types=["card"],
                 mode="payment",

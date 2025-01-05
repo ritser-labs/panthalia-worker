@@ -43,7 +43,7 @@ class DBAdapterAccountsMixin:
             if own_session:
                 await session.close()
 
-    async def add_credits_transaction(self, session: AsyncSession, account: Account, amount: float, txn_type: CreditTxnType):
+    async def add_credits_transaction(self, session: AsyncSession, account: Account, amount: int, txn_type: CreditTxnType):
         """
         Records a new credit transaction in the DB for auditing, but does NOT adjust
         any account.credits_balance because that no longer exists.
@@ -57,7 +57,7 @@ class DBAdapterAccountsMixin:
         session.add(new_credit_txn)
         # The actual "balance" is derived from the uncharged leftover in holds.
 
-    async def add_earnings_transaction(self, session: AsyncSession, account: Account, amount: float, txn_type: EarningsTxnType):
+    async def add_earnings_transaction(self, session: AsyncSession, account: Account, amount: int, txn_type: EarningsTxnType):
         """
         Records a new earnings transaction for auditing, does NOT mutate
         any ephemeral earnings_balance in the Account.
@@ -70,14 +70,14 @@ class DBAdapterAccountsMixin:
         )
         session.add(new_earnings_txn)
 
-    async def add_platform_revenue(self, session: AsyncSession, amount: float, txn_type: PlatformRevenueTxnType):
+    async def add_platform_revenue(self, session: AsyncSession, amount: int, txn_type: PlatformRevenueTxnType):
         new_rev = PlatformRevenue(
             amount=amount,
             txn_type=txn_type
         )
         session.add(new_rev)
 
-    async def admin_deposit_account(self, user_id: str, amount: float):
+    async def admin_deposit_account(self, user_id: str, amount: int):
         """
         Instead of touching any ephemeral account.credits_balance, we simply create a
         credit transaction and a hold for deposit-based credits, so the user
@@ -144,7 +144,7 @@ class DBAdapterAccountsMixin:
             await session.delete(account_key)
             await session.commit()
 
-    async def create_withdrawal_request(self, user_id: str, amount: float) -> int:
+    async def create_withdrawal_request(self, user_id: str, amount: int) -> int:
         """
         Creates a new PendingWithdrawal. The actual "balance" check is done
         by summing leftover in Earnings holds, so if there's insufficient leftover,
@@ -214,7 +214,7 @@ class DBAdapterAccountsMixin:
             session.add(withdrawal)
             await session.commit()
 
-    async def create_stripe_deposit(self, user_id: str, deposit_amount: float, session_id: str) -> int:
+    async def create_stripe_deposit(self, user_id: str, deposit_amount: int, session_id: str) -> int:
         async with self.get_async_session() as session:
             new_dep = StripeDeposit(
                 user_id=user_id,
@@ -248,7 +248,7 @@ class DBAdapterAccountsMixin:
     async def create_credit_transaction_for_user(
         self,
         user_id: str,
-        amount: float,
+        amount: int,
         reason: str,
         txn_type: CreditTxnType
     ) -> CreditTransaction:

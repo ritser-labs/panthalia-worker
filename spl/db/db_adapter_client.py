@@ -244,7 +244,7 @@ class DBAdapterClient:
         return response.get('success', False)
 
     @typechecked
-    async def create_order(self, task_id: int | None, subnet_id: int, order_type: str, price: float, hold_id: Optional[int]) -> Optional[int]:
+    async def create_order(self, task_id: int | None, subnet_id: int, order_type: str, price: int, hold_id: Optional[int]) -> Optional[int]:
         data = {
             'task_id': task_id,
             'subnet_id': subnet_id,
@@ -256,7 +256,7 @@ class DBAdapterClient:
         return self._extract_id(response, 'order_id')
 
     @typechecked
-    async def create_bids_and_tasks(self, job_id: int, num_tasks: int, price: float, params: str, hold_id: Optional[int]) -> Optional[List[Dict[str, int]]]:
+    async def create_bids_and_tasks(self, job_id: int, num_tasks: int, price: int, params: str, hold_id: Optional[int]) -> Optional[List[Dict[str, int]]]:
         data = {
             'job_id': job_id,
             'num_tasks': num_tasks,
@@ -317,7 +317,7 @@ class DBAdapterClient:
         return 'success' in response
 
     @typechecked
-    async def admin_deposit_account(self, user_id: str, amount: float) -> bool:
+    async def admin_deposit_account(self, user_id: str, amount: int) -> bool:
         data = {
             'user_id': user_id,
             'amount': amount
@@ -510,7 +510,7 @@ class DBAdapterClient:
     # NEW: Withdrawals
     ##
     @typechecked
-    async def create_withdrawal(self, user_id: str, amount: float) -> Optional[int]:
+    async def create_withdrawal(self, user_id: str, amount: int) -> Optional[int]:
         data = {
             'user_id': user_id,
             'amount': amount

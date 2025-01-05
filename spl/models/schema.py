@@ -164,7 +164,7 @@ class Order(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, nullable=False, index=True)
     order_type = Column(Enum(OrderType), nullable=False)
-    price = Column(Float, nullable=False, index=True)
+    price = Column(Integer, nullable=False, index=True)
     subnet_id = Column(Integer, ForeignKey('subnets.id'), nullable=False)
     bid_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
     ask_task_id = Column(Integer, ForeignKey('tasks.id'), nullable=True)
@@ -184,7 +184,7 @@ class AccountTransaction(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
     user_id = Column(String, nullable=False, index=True)
-    amount = Column(Float, nullable=False)
+    amount = Column(Integer, nullable=False)
     transaction_type = Column(Enum(AccountTxnType), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
 
@@ -196,11 +196,11 @@ class Hold(Serializable):
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
     user_id = Column(String, nullable=False, index=True)
     hold_type = Column(Enum(HoldType), nullable=False)
-    total_amount = Column(Float, nullable=False)
-    used_amount = Column(Float, nullable=False, default=0.0)
+    total_amount = Column(Integer, nullable=False)
+    used_amount = Column(Integer, nullable=False, default=0.0)
     expiry = Column(DateTime, nullable=False)
     charged = Column(Boolean, nullable=False, default=False)
-    charged_amount = Column(Float, nullable=False, default=0.0)
+    charged_amount = Column(Integer, nullable=False, default=0.0)
 
     account = relationship("Account", back_populates="holds")
     hold_transactions = relationship("HoldTransaction", back_populates="hold")
@@ -214,7 +214,7 @@ class HoldTransaction(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     hold_id = Column(Integer, ForeignKey('holds.id'), nullable=False)
     order_id = Column(Integer, ForeignKey('orders.id'), nullable=True)
-    amount = Column(Float, nullable=False)
+    amount = Column(Integer, nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     hold = relationship("Hold", back_populates="hold_transactions")
 
@@ -223,7 +223,7 @@ class CreditTransaction(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
     user_id = Column(String, nullable=False, index=True)
-    amount = Column(Float, nullable=False)
+    amount = Column(Integer, nullable=False)
     txn_type = Column(Enum(CreditTxnType), nullable=False)
     reason = Column(String, nullable=True)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
@@ -235,7 +235,7 @@ class EarningsTransaction(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
     user_id = Column(String, nullable=False, index=True)
-    amount = Column(Float, nullable=False)
+    amount = Column(Integer, nullable=False)
     txn_type = Column(Enum(EarningsTxnType), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
 
@@ -244,7 +244,7 @@ class EarningsTransaction(Serializable):
 class PlatformRevenue(Serializable):
     __tablename__ = 'platform_revenue'
     id = Column(Integer, primary_key=True, index=True)
-    amount = Column(Float, nullable=False)
+    amount = Column(Integer, nullable=False)
     txn_type = Column(Enum(PlatformRevenueTxnType), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
 
@@ -253,7 +253,7 @@ class PendingWithdrawal(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)
     user_id = Column(String, nullable=False, index=True)
-    amount = Column(Float, nullable=False)
+    amount = Column(Integer, nullable=False)
     status = Column(Enum(WithdrawalStatus), nullable=False, default=WithdrawalStatus.PENDING)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
@@ -265,7 +265,7 @@ class StripeDeposit(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, nullable=False, index=True)
-    deposit_amount = Column(Float, nullable=False)
+    deposit_amount = Column(Integer, nullable=False)
     stripe_session_id = Column(String, nullable=False, unique=True, index=True)
     status = Column(String, nullable=False, default="pending")
 

@@ -76,7 +76,7 @@ class DBAdapterOrdersTasksMixin:
         task_id: int | None,
         subnet_id: int,
         order_type: OrderType,
-        price: float,
+        price: int,
         hold_id: Optional[int] = None
     ):
         async with self.get_async_session() as session:
@@ -160,7 +160,7 @@ class DBAdapterOrdersTasksMixin:
         self,
         job_id: int,
         num_tasks: int,
-        price: float,
+        price: int,
         params: str,
         hold_id: Optional[int] = None
     ) -> Optional[Dict[str, List[Dict[str, int]]]]:
@@ -692,10 +692,10 @@ class DBAdapterOrdersTasksMixin:
             volume = volume_result.scalar() or 0.0
 
             return {
-                "total_open_orders_dollar": float(total_open_orders_dollar),
+                "total_open_orders_dollar": int(total_open_orders_dollar),
                 "num_open_orders": int(num_open_orders),
                 "num_completed_tasks": int(num_completed_tasks),
-                "volume": float(volume)
+                "volume": int(volume)
             }
 
     async def get_orders_for_user(self):

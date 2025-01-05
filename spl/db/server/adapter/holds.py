@@ -20,7 +20,7 @@ class DBAdapterHoldsMixin:
         account: Account,
         subnet,
         order_type,
-        price: float,
+        price: int,
         specified_hold_id: Optional[int] = None
     ) -> Hold:
         """
@@ -84,7 +84,7 @@ class DBAdapterHoldsMixin:
         return hold
 
 
-    async def reserve_funds_on_hold(self, session: AsyncSession, hold: Hold, amount: float, order):
+    async def reserve_funds_on_hold(self, session: AsyncSession, hold: Hold, amount: int, order):
         leftover_before = hold.total_amount - hold.used_amount
         if leftover_before < amount:
             raise ValueError(
@@ -98,7 +98,7 @@ class DBAdapterHoldsMixin:
         )
         session.add(txn)
 
-    async def free_funds_from_hold(self, session: AsyncSession, hold: Hold, amount: float, order):
+    async def free_funds_from_hold(self, session: AsyncSession, hold: Hold, amount: int, order):
         if hold.used_amount < amount:
             raise ValueError(
                 f"Hold {hold.id} used_amount={hold.used_amount}, cannot free {amount}"
@@ -111,7 +111,7 @@ class DBAdapterHoldsMixin:
         )
         session.add(txn)
 
-    async def charge_hold_for_price(self, session: AsyncSession, hold: Hold, price: float):
+    async def charge_hold_for_price(self, session: AsyncSession, hold: Hold, price: int):
         """
         Partially or fully charge `price` from 'hold'.
 

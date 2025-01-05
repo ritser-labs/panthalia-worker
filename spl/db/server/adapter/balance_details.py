@@ -153,13 +153,13 @@ class DBAdapterBalanceDetailsMixin:
 
             return {
                 "invariant_holds": invariant_holds,
-                "difference": float(difference),
-                "total_deposited": float(total_deposited),
-                "total_withdrawn": float(total_withdrawn),
-                "total_platform_revenue": float(total_platform_revenue),
-                "sum_credits_and_earnings": float(sum_credits_and_earnings),
-                "lhs_deposits_minus_withdrawals": float(lhs),
-                "rhs_credits_earnings_plus_platform": float(rhs),
+                "difference": int(difference),
+                "total_deposited": int(total_deposited),
+                "total_withdrawn": int(total_withdrawn),
+                "total_platform_revenue": int(total_platform_revenue),
+                "sum_credits_and_earnings": int(sum_credits_and_earnings),
+                "lhs_deposits_minus_withdrawals": int(lhs),
+                "rhs_credits_earnings_plus_platform": int(rhs),
             }
         finally:
             if own_session:
