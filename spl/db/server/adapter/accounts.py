@@ -234,9 +234,11 @@ class DBAdapterAccountsMixin:
         # If caller did not pass an existing session, open our own context
         if session is None:
             async with self.get_async_session() as new_session:
-                return await self._create_credit_transaction_for_user_internal(
+                result = await self._create_credit_transaction_for_user_internal(
                     new_session, user_id, amount, reason, txn_type
                 )
+                await new_session.commit()
+                return result
         else:
             # Use caller's session
             return await self._create_credit_transaction_for_user_internal(

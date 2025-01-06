@@ -1,7 +1,7 @@
-# file: spl/tests/test_stripe.py
-
 import pytest
 import json
+from unittest.mock import patch
+from sqlalchemy import select
 from spl.db.server.app import original_app
 from spl.models import StripeDeposit, Hold
 from spl.models.enums import HoldType
@@ -16,8 +16,7 @@ async def test_stripe_add_credits_flow(db_adapter_server_fixture):
     - verify a StripeDeposit row (is_authorization=False) is created in status=pending
     - simulate the Stripe webhook => deposit->completed => user gets deposit-based 'Credits' hold
     """
-
-    async with original_app.test_request_context('/'):
+    async with original_app.test_request_context("/"):
         server = db_adapter_server_fixture
 
         # Force user_id => e.g. "stripe_credits_user"
@@ -33,7 +32,7 @@ async def test_stripe_add_credits_flow(db_adapter_server_fixture):
         # 2) Check the DB for the newly created StripeDeposit
         async with server.get_async_session() as s:
             deposit_q = await s.execute(
-                s.select(StripeDeposit).where(StripeDeposit.stripe_session_id == session_id)
+                select(StripeDeposit).where(StripeDeposit.stripe_session_id == session_id)
             )
             deposit_obj = deposit_q.scalar_one_or_none()
             assert deposit_obj is not None, "Expected to find a StripeDeposit record"
@@ -42,7 +41,7 @@ async def test_stripe_add_credits_flow(db_adapter_server_fixture):
             assert deposit_obj.deposit_amount == amount
             deposit_id = deposit_obj.id
 
-        # 3) Simulate the Stripe webhook => we must craft a fake event
+        # 3) Simulate the Stripe webhook => craft a fake 'checkout.session.completed' event
         fake_stripe_payload = json.dumps({
             "id": "evt_1FAKE_COMPLETED",
             "type": "checkout.session.completed",
@@ -52,33 +51,45 @@ async def test_stripe_add_credits_flow(db_adapter_server_fixture):
                 }
             }
         }).encode("utf-8")
-        fake_signature = "sha256=foo"  # We skip real signature checks in test
+        fake_signature = "sha256=foo"
 
-        # 4) Call handle_stripe_webhook
-        webhook_resp = await server.handle_stripe_webhook(
-            payload=fake_stripe_payload,
-            sig_header=fake_signature,
-        )
-        assert "status" in webhook_resp
-        assert webhook_resp["status"] == "ok"
+        # 4) Patch stripe.Webhook.construct_event so it won't fail signature checks
+        with patch("stripe.Webhook.construct_event") as mock_construct_event:
+            # Return a dict shaped like a valid event
+            mock_construct_event.return_value = {
+                "id": "evt_1FAKE_COMPLETED",
+                "type": "checkout.session.completed",
+                "data": {
+                    "object": {
+                        "id": session_id
+                    }
+                }
+            }
 
-        # 5) Confirm deposit is now 'completed' and user has a 'Credits' hold.
+            # Actually call your webhook handler
+            webhook_resp = await server.handle_stripe_webhook(
+                payload=fake_stripe_payload,
+                sig_header=fake_signature,
+            )
+            assert "status" in webhook_resp
+            assert webhook_resp["status"] == "ok"
+
+        # 5) Confirm deposit is now 'completed' and user has a 'Credits' hold
         async with server.get_async_session() as s:
             # Reload deposit
             deposit_q2 = await s.execute(
-                s.select(StripeDeposit).where(StripeDeposit.id == deposit_id)
+                select(StripeDeposit).where(StripeDeposit.id == deposit_id)
             )
             deposit_obj2 = deposit_q2.scalar_one_or_none()
             assert deposit_obj2 is not None
             assert deposit_obj2.status == "completed"
 
             # Because normal deposits create a deposit-based hold (via create_credit_transaction_for_user)
-            # in Stripe’s `create_stripe_deposit`, we can confirm a 'Credits' hold exists with leftover = amount.
+            # in Stripe’s `create_stripe_deposit`, check a 'Credits' hold exists with leftover == amount.
             holds = await s.execute(
-                s.select(Hold).where(Hold.user_id == test_user_id).order_by(Hold.id.asc())
+                select(Hold).where(Hold.user_id == test_user_id).order_by(Hold.id.asc())
             )
             all_holds = holds.scalars().all()
-            # We expect at least one hold: the deposit-based hold for +100 credits
             found_deposit_hold = [h for h in all_holds if h.hold_type == HoldType.Credits]
             assert len(found_deposit_hold) > 0, "Expected at least one 'Credits' hold for deposit"
             assert found_deposit_hold[-1].total_amount == amount
@@ -97,8 +108,7 @@ async def test_stripe_authorization_flow(db_adapter_server_fixture):
     - verify StripeDeposit row (is_authorization=True) in status=pending
     - simulate webhook => deposit->completed => user gets a 'CreditCard' hold
     """
-
-    async with original_app.test_request_context('/'):
+    async with original_app.test_request_context("/"):
         server = db_adapter_server_fixture
 
         # Force user_id => e.g. "stripe_auth_user"
@@ -107,14 +117,14 @@ async def test_stripe_authorization_flow(db_adapter_server_fixture):
 
         # 1) Create a new stripe authorization session
         amount = 300
-        session_response = await server.create_stripe_auth_session(amount)
+        session_response = await server.create_stripe_authorization_session(amount)
         assert "session_id" in session_response, "Expected a Stripe session_id in response"
         session_id = session_response["session_id"]
 
         # 2) Check the DB for the newly created StripeDeposit (is_authorization=True)
         async with server.get_async_session() as s:
             deposit_q = await s.execute(
-                s.select(StripeDeposit).where(StripeDeposit.stripe_session_id == session_id)
+                select(StripeDeposit).where(StripeDeposit.stripe_session_id == session_id)
             )
             deposit_obj = deposit_q.scalar_one_or_none()
             assert deposit_obj is not None, "Expected to find a StripeDeposit for auth-only"
@@ -123,7 +133,7 @@ async def test_stripe_authorization_flow(db_adapter_server_fixture):
             assert deposit_obj.deposit_amount == amount
             deposit_id = deposit_obj.id
 
-        # 3) Simulate the Stripe webhook => craft a fake event
+        # 3) Simulate the Stripe webhook => craft a fake 'checkout.session.completed' event
         fake_stripe_payload = json.dumps({
             "id": "evt_1FAKE_COMPLETED_AUTH",
             "type": "checkout.session.completed",
@@ -133,21 +143,31 @@ async def test_stripe_authorization_flow(db_adapter_server_fixture):
                 }
             }
         }).encode("utf-8")
-        fake_signature = "sha256=foo"  # Typically stripe-signed, but we skip in tests
+        fake_signature = "sha256=foo"
 
-        # 4) Call handle_stripe_webhook
-        webhook_resp = await server.handle_stripe_webhook(
-            payload=fake_stripe_payload,
-            sig_header=fake_signature,
-        )
-        assert "status" in webhook_resp
-        assert webhook_resp["status"] == "ok"
+        # 4) Patch stripe.Webhook.construct_event so it won't fail signature checks
+        with patch("stripe.Webhook.construct_event") as mock_construct_event:
+            mock_construct_event.return_value = {
+                "id": "evt_1FAKE_COMPLETED_AUTH",
+                "type": "checkout.session.completed",
+                "data": {
+                    "object": {
+                        "id": session_id
+                    }
+                }
+            }
 
-        # 5) Confirm deposit is now 'completed' and user has a 'CreditCard' hold for the authorized amount
+            webhook_resp = await server.handle_stripe_webhook(
+                payload=fake_stripe_payload,
+                sig_header=fake_signature,
+            )
+            assert "status" in webhook_resp
+            assert webhook_resp["status"] == "ok"
+
+        # 5) Confirm deposit is now 'completed' and user has a 'CreditCard' hold
         async with server.get_async_session() as s:
-            # Reload deposit
             deposit_q2 = await s.execute(
-                s.select(StripeDeposit).where(StripeDeposit.id == deposit_id)
+                select(StripeDeposit).where(StripeDeposit.id == deposit_id)
             )
             deposit_obj2 = deposit_q2.scalar_one_or_none()
             assert deposit_obj2 is not None
@@ -155,11 +175,10 @@ async def test_stripe_authorization_flow(db_adapter_server_fixture):
 
             # For auth-only deposits, `apply_credit_card_authorization` => creates a new CC hold
             holds = await s.execute(
-                s.select(Hold).where(Hold.user_id == test_user_id).order_by(Hold.id.asc())
+                select(Hold).where(Hold.user_id == test_user_id).order_by(Hold.id.asc())
             )
             all_holds = holds.scalars().all()
 
-            # We expect exactly one hold with hold_type=CreditCard for the deposit_amount
             found_cc_hold = [h for h in all_holds if h.hold_type == HoldType.CreditCard]
             assert len(found_cc_hold) == 1, (
                 f"Expected exactly one credit-card hold after authorization. Found: {found_cc_hold}"
