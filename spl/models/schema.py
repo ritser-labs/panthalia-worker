@@ -140,9 +140,6 @@ class Account(Serializable):
     __tablename__ = 'accounts'
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, nullable=False, index=True)
-    # REMOVED:
-    # credits_balance = Column(Float, nullable=False, default=0.0)
-    # earnings_balance = Column(Float, nullable=False, default=0.0)
     deposited_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
 
     tasks = relationship("Task", back_populates="account")
@@ -268,6 +265,7 @@ class StripeDeposit(Base):
     deposit_amount = Column(Integer, nullable=False)
     stripe_session_id = Column(String, nullable=False, unique=True, index=True)
     status = Column(String, nullable=False, default="pending")
+    is_authorization = Column(Boolean, nullable=False, default=False)
 
     credit_transaction_id = Column(Integer, ForeignKey("credit_transactions.id"), nullable=True)
     credit_transaction = relationship("CreditTransaction", backref="stripe_deposit")

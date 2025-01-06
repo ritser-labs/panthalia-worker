@@ -575,6 +575,14 @@ app.route('/create_stripe_credits_session', methods=['POST'], endpoint='create_s
     )
 )
 
+app.route('/create_stripe_auth_session', methods=['POST'], endpoint='create_stripe_auth_session_endpoint')(
+    create_post_route(
+        db_adapter_server.create_stripe_authorization_session,
+        ['amount'],
+        auth_method=AuthMethod.USER
+    )
+)
+
 @app.route("/stripe/webhook", methods=["POST"])
 async def stripe_webhook_route():
     payload = await request.get_data()

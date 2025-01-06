@@ -215,44 +215,6 @@ class DBAdapterAccountsMixin:
             session.add(withdrawal)
             await session.commit()
 
-    async def create_stripe_deposit(self, user_id: str, deposit_amount: int, session_id: str) -> int:
-        async with self.get_async_session() as session:
-            new_dep = StripeDeposit(
-                user_id=user_id,
-                deposit_amount=deposit_amount,
-                stripe_session_id=session_id,
-                status='pending'
-            )
-            session.add(new_dep)
-            await self.create_credit_transaction_for_user(
-                user_id=user_id,
-                amount=deposit_amount,
-                reason="1year_deposit",
-                txn_type=CreditTxnType.Add,
-                session=session
-            )
-            await session.commit()
-            await session.refresh(new_dep)
-            logger.info(f"[create_stripe_deposit] Created deposit id={new_dep.id} for user={user_id}, amt={deposit_amount}")
-            return new_dep.id
-
-    async def mark_stripe_deposit_completed(self, stripe_session_id: str) -> StripeDeposit | None:
-        async with self.get_async_session() as session:
-            stmt = select(StripeDeposit).where(StripeDeposit.stripe_session_id == stripe_session_id)
-            result = await session.execute(stmt)
-            dep_obj = result.scalar_one_or_none()
-            if not dep_obj:
-                return None
-
-            if dep_obj.status == 'completed':
-                return dep_obj
-
-            dep_obj.status = 'completed'
-            await session.commit()
-            await session.refresh(dep_obj)
-            logger.info(f"[mark_stripe_deposit_completed] Deposit {dep_obj.id} marked completed.")
-            return dep_obj
-
     async def create_credit_transaction_for_user(
         self,
         user_id: str,
@@ -272,9 +234,11 @@ class DBAdapterAccountsMixin:
         # If caller did not pass an existing session, open our own context
         if session is None:
             async with self.get_async_session() as new_session:
-                return await self._create_credit_transaction_for_user_internal(
+                result = await self._create_credit_transaction_for_user_internal(
                     new_session, user_id, amount, reason, txn_type
                 )
+                await new_session.commit()
+                return result
         else:
             # Use caller's session
             return await self._create_credit_transaction_for_user_internal(

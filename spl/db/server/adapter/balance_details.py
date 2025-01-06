@@ -42,8 +42,8 @@ class DBAdapterBalanceDetailsMixin:
             holds = account.holds
 
             # Derive balances from uncharged leftover holds
-            derived_credits_balance = 0.0
-            derived_earnings_balance = 0.0
+            derived_credits_balance = 0
+            derived_earnings_balance = 0
             locked_hold_amounts = {}
             detailed_holds = []
 
@@ -56,7 +56,7 @@ class DBAdapterBalanceDetailsMixin:
 
                 locked_amount = hold.used_amount
                 locked_hold_amounts[hold_type] = (
-                    locked_hold_amounts.get(hold_type, 0.0) + locked_amount
+                    locked_hold_amounts.get(hold_type, 0) + locked_amount
                 )
 
                 leftover = hold.total_amount - hold.used_amount
@@ -114,13 +114,13 @@ class DBAdapterBalanceDetailsMixin:
             stmt_deposits = select(
                 sqlalchemy.func.sum(CreditTransaction.amount)
             ).where(CreditTransaction.txn_type == CreditTxnType.Add)
-            total_deposited = (await session.execute(stmt_deposits)).scalar() or 0.0
+            total_deposited = (await session.execute(stmt_deposits)).scalar() or 0
 
             # (2) Sum all APPROVED withdrawals
             stmt_withdrawals = select(
                 sqlalchemy.func.sum(PendingWithdrawal.amount)
             ).where(PendingWithdrawal.status == WithdrawalStatus.APPROVED)
-            total_withdrawn = (await session.execute(stmt_withdrawals)).scalar() or 0.0
+            total_withdrawn = (await session.execute(stmt_withdrawals)).scalar() or 0
 
             # (3) Sum platform revenue (Add => +, Subtract => -)
             stmt_revenue = select(
@@ -133,13 +133,13 @@ class DBAdapterBalanceDetailsMixin:
                     )
                 )
             )
-            total_platform_revenue = (await session.execute(stmt_revenue)).scalar() or 0.0
+            total_platform_revenue = (await session.execute(stmt_revenue)).scalar() or 0
 
             # (4) Sum total_amount for all 'Credits' or 'Earnings' holds
             holds_stmt = select(Hold)
             all_holds = (await session.execute(holds_stmt)).scalars().all()
 
-            sum_credits_and_earnings = 0.0
+            sum_credits_and_earnings = 0
             for hold in all_holds:
                 if hold.hold_type in [HoldType.Credits, HoldType.Earnings]:
                     sum_credits_and_earnings += hold.total_amount

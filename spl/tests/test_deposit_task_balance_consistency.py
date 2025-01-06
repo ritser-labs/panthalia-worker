@@ -129,7 +129,7 @@ async def test_deposit_task_balance_consistency(db_adapter_server_fixture):
         # Confirm buyer leftover => 100 - 50 => 50
         balance_info_buyer_after_bid = await server.get_balance_details_for_user()
         leftover_after_bid = balance_info_buyer_after_bid["credits_balance"]
-        assert abs(leftover_after_bid - (deposit_amount_buyer - bid_price)) < 1e-9, (
+        assert abs(leftover_after_bid - (deposit_amount_buyer - bid_price)) == 0, (
             f"Buyer leftover should now be {deposit_amount_buyer - bid_price}, got {leftover_after_bid}"
         )
 
@@ -155,7 +155,7 @@ async def test_deposit_task_balance_consistency(db_adapter_server_fixture):
         # Confirm solver leftover => 200 - (2*50) => 100
         balance_info_solver_after_ask = await server.get_balance_details_for_user()
         leftover_solver_after_ask = balance_info_solver_after_ask["credits_balance"]
-        assert abs(leftover_solver_after_ask - (deposit_amount_solver - 2 * ask_price)) < 1e-9, (
+        assert abs(leftover_solver_after_ask - (deposit_amount_solver - 2 * ask_price)) == 0, (
             f"Solver leftover must be {deposit_amount_solver - 2 * ask_price}, got {leftover_solver_after_ask}"
         )
 

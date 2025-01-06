@@ -40,7 +40,7 @@ async def test_holds_flow_end_to_end(db_adapter_server_fixture):
         # Switch to buyer
         server._user_id_getter = lambda: buyer_id
         balance_buyer_initial = await server.get_balance_details_for_user()
-        assert abs(balance_buyer_initial["credits_balance"] - deposit_buyer) < 1e-9, (
+        assert abs(balance_buyer_initial["credits_balance"] - deposit_buyer) == 0, (
             f"Buyer credits_balance expected={deposit_buyer}, got={balance_buyer_initial['credits_balance']}"
         )
 
@@ -84,7 +84,7 @@ async def test_holds_flow_end_to_end(db_adapter_server_fixture):
 
         bal_buyer_after_bid = await server.get_balance_details_for_user()
         leftover_buyer_bid = deposit_buyer - bid_price
-        assert abs(bal_buyer_after_bid["credits_balance"] - leftover_buyer_bid) < 1e-9, (
+        assert abs(bal_buyer_after_bid["credits_balance"] - leftover_buyer_bid) == 0, (
             f"Buyer leftover after placing bid expected={leftover_buyer_bid}, "
             f"got={bal_buyer_after_bid['credits_balance']}"
         )
@@ -103,7 +103,7 @@ async def test_holds_flow_end_to_end(db_adapter_server_fixture):
         # Because stake_multiplier=2.0 => solver locks up 200
         leftover_solver_after_ask = deposit_solver - 2.0 * ask_price
         bal_solver_after_ask = await server.get_balance_details_for_user()
-        assert abs(bal_solver_after_ask["credits_balance"] - leftover_solver_after_ask) < 1e-9, (
+        assert abs(bal_solver_after_ask["credits_balance"] - leftover_solver_after_ask) == 0, (
             f"Solver leftover after ask expected={leftover_solver_after_ask}, "
             f"got={bal_solver_after_ask['credits_balance']}"
         )
@@ -128,7 +128,7 @@ async def test_holds_flow_end_to_end(db_adapter_server_fixture):
 
         bal_buyer_final = await server.get_balance_details_for_user()
         final_buyer_leftover = deposit_buyer - bid_price
-        assert abs(bal_buyer_final["credits_balance"] - final_buyer_leftover) < 1e-9, (
+        assert abs(bal_buyer_final["credits_balance"] - final_buyer_leftover) == 0, (
             f"Buyer leftover final expected={final_buyer_leftover}, got={bal_buyer_final['credits_balance']}"
         )
 
@@ -138,14 +138,14 @@ async def test_holds_flow_end_to_end(db_adapter_server_fixture):
 
         # Freed stake => leftover => 300.0 in credits_balance
         expected_credits_final = deposit_solver
-        assert abs(bal_solver_final["credits_balance"] - expected_credits_final) < 1e-9, (
+        assert abs(bal_solver_final["credits_balance"] - expected_credits_final) == 0, (
             f"Solver final leftover credits expected={expected_credits_final}, "
             f"got={bal_solver_final['credits_balance']}"
         )
 
         # With a default 10% platform fee => solver_earnings= (1 - 0.1) * 100= 90
         expected_earnings = 0.9 * bid_price
-        assert abs(bal_solver_final["earnings_balance"] - expected_earnings) < 1e-9, (
+        assert abs(bal_solver_final["earnings_balance"] - expected_earnings) == 0, (
             f"Solver final leftover earnings expected={expected_earnings}, "
             f"got={bal_solver_final['earnings_balance']}"
         )
