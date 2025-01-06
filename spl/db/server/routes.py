@@ -433,6 +433,13 @@ async def update_withdrawal_status():
     await db_adapter_server.update_withdrawal_status(withdrawal_id, new_status)
     return jsonify({'success': True}), 200
 
+app.route('/complete_withdrawal', methods=['POST'], endpoint='complete_withdrawal_endpoint')(
+    create_post_route(
+        db_adapter_server.complete_withdrawal_flow,  # The backend method
+        ['withdrawal_id'],                          # JSON keys required
+        AuthMethod.KEY                              # Auth method
+    )
+)
 ################################################################
 # Creating resources endpoints (Job, Plugin, Task, Orders, etc.)
 ################################################################

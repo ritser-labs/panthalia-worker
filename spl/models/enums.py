@@ -45,5 +45,5 @@ class PlatformRevenueTxnType(enum.Enum):
 ##
 class WithdrawalStatus(enum.Enum):
     PENDING = "pending"
-    APPROVED = "approved"
+    FINALIZED = "finalized"
     REJECTED = "rejected"

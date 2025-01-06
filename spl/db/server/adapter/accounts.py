@@ -1,8 +1,9 @@
-# spl/db/server/adapter/accounts.py
+# file: spl/db/server/adapter/accounts.py
 
 import logging
 from datetime import datetime
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from eth_account import Account as EthAccount
 from datetime import timedelta
@@ -145,76 +146,6 @@ class DBAdapterAccountsMixin:
             await session.delete(account_key)
             await session.commit()
 
-    async def create_withdrawal_request(self, user_id: str, amount: int) -> int:
-        """
-        Creates a new PendingWithdrawal. The actual "balance" check is done
-        by summing leftover in Earnings holds, so if there's insufficient leftover,
-        we raise an error.
-        """
-        if amount < self.MINIMUM_PAYOUT_AMOUNT:
-            raise ValueError(f"Cannot withdraw less than the minimum {self.MINIMUM_PAYOUT_AMOUNT}")
-
-        async with self.get_async_session() as session:
-            account = await self.get_or_create_account(user_id, session)
-            # Instead of subtracting from account.earnings_balance, we check if
-            # there's enough leftover in "Earnings" holds.
-            # If not enough leftover => raise.
-            total_earnings_leftover = 0.0
-            for hold in account.holds:
-                if hold.hold_type == HoldType.Earnings and not hold.charged:
-                    leftover = hold.total_amount - hold.used_amount
-                    if leftover > 0:
-                        total_earnings_leftover += leftover
-
-            if total_earnings_leftover < amount:
-                raise ValueError("insufficient earnings to request withdrawal")
-
-            # We do not physically subtract from a column. It's enough that we
-            # create a PendingWithdrawal. The future code that approves or rejects
-            # can forcibly charge or free from an Earnings hold, if desired.
-            new_withdrawal = PendingWithdrawal(
-                account_id=account.id,
-                user_id=user_id,
-                amount=amount,
-            )
-            session.add(new_withdrawal)
-            await session.commit()
-            await session.refresh(new_withdrawal)
-            return new_withdrawal.id
-
-    async def get_withdrawal(self, withdrawal_id: int) -> PendingWithdrawal | None:
-        async with self.get_async_session() as session:
-            stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
-            result = await session.execute(stmt)
-            return result.scalar_one_or_none()
-
-    async def get_withdrawals_for_user(self, user_id: str) -> list[PendingWithdrawal]:
-        async with self.get_async_session() as session:
-            stmt = select(PendingWithdrawal).where(PendingWithdrawal.user_id == user_id)
-            result = await session.execute(stmt)
-            return result.scalars().all()
-
-    async def update_withdrawal_status(self, withdrawal_id: int, new_status: WithdrawalStatus):
-        """
-        If rejected, we simply do not finalize the withdrawal. 
-        If approved, you might do your real payment or external queue, etc.
-        """
-        async with self.get_async_session() as session:
-            stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
-            result = await session.execute(stmt)
-            withdrawal = result.scalar_one_or_none()
-            if not withdrawal:
-                raise ValueError(f"Withdrawal {withdrawal_id} not found.")
-
-            if new_status == WithdrawalStatus.REJECTED and withdrawal.status == WithdrawalStatus.PENDING:
-                # We do not "refund" any column-based balance, because we only rely on hold leftover for logic.
-                pass
-
-            withdrawal.status = new_status
-            withdrawal.updated_at = datetime.utcnow()
-            session.add(withdrawal)
-            await session.commit()
-
     async def create_credit_transaction_for_user(
         self,
         user_id: str,
@@ -253,10 +184,6 @@ class DBAdapterAccountsMixin:
         reason: str,
         txn_type: CreditTxnType
     ) -> CreditTransaction:
-        """
-        Internal helper that assumes an already-open session. This is where the actual
-        DB logic happens. The caller handles commit if needed.
-        """
         account = await self.get_or_create_account(user_id, session=session)
 
         # If we're adding credits, create a new deposit-based hold
@@ -287,9 +214,6 @@ class DBAdapterAccountsMixin:
             reason=reason
         )
         session.add(new_tx)
-
-        # Note: We don't do `await session.commit()` here because the caller
-        # (either our own `async with` block or the external caller) will handle it.
 
         logger.info(
             f"[create_credit_transaction_for_user] user={user_id}, created txn => reason={reason}, "
