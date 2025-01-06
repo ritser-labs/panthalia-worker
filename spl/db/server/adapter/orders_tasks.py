@@ -528,23 +528,22 @@ class DBAdapterOrdersTasksMixin:
     ###########################################################################
     async def check_and_cleanup_holds(self):
         """
-        1) For any unmatched orders whose hold.expiry is too soon (i.e., hold.expiry <= now + subnet.solve_period + subnet.dispute_period),
-           cancel (delete) these orders immediately.
-        2) For any tasks in SolverSelected status where the solver has taken more than subnet.solve_period to publish a solution,
-           finalize the task as ResolvedIncorrect automatically.
-        3) For expired holds (where hold.expiry < now):
-           - if hold.used_amount != 0, log an error,
-           - then fully charge the hold (which sets charged=True and zeroes out leftover).
+        Perform the following cleanup tasks for holds:
+        1) For unmatched orders with holds expiring soon (expiry <= now + solve_period + dispute_period),
+        cancel (delete) these orders immediately.
+        2) For tasks in SolverSelected status where the solver has taken too long (exceeding solve_period),
+        finalize the task as ResolvedIncorrect automatically.
+        3) For expired holds (where expiry < now):
+        - If the hold is a CreditCard hold and `used_amount == 0`, zero out `total_amount` and mark as unusable.
+        - Otherwise, charge the hold fully (sets charged=True, zeroes out leftover).
         """
         now = datetime.utcnow()
         async with self.get_async_session() as session:
             async with session.begin():
                 logging.debug("[check_and_cleanup_holds] Running hold cleanup check...")
 
-                # STEP 1: Cancel unmatched orders if their hold is about to expire sooner than we can solve+dispute
-                # ----------------------------------------------------------------------------------------------
-                unmatched_order_ids_to_delete = []
-                # We pull all unmatched orders and relevant hold+subnet data
+                # STEP 1: Cancel unmatched orders with holds expiring soon
+                unmatched_orders_to_delete = []
                 unmatched_q = (
                     select(Order, Hold, Subnet)
                     .join(Hold, Order.hold_id == Hold.id)
@@ -556,18 +555,12 @@ class DBAdapterOrdersTasksMixin:
                 )
                 unmatched_res = await session.execute(unmatched_q)
                 for order, hold, subnet in unmatched_res:
-                    # If hold expires on/before: now + (solve_time + dispute_time), then we won't have enough time
-                    # for a solver to do the job or for disputing. => forcibly delete the order
                     cutoff_time = now + timedelta(seconds=(subnet.solve_period + subnet.dispute_period))
                     if hold.expiry <= cutoff_time:
-                        unmatched_order_ids_to_delete.append(order.id)
+                        unmatched_orders_to_delete.append(order.id)
 
                 # STEP 2: Resolve overdue solver tasks as incorrect
-                # ------------------------------------------------
                 tasks_to_fail = []
-                # We'll find tasks that are in status=SolverSelected with time_solver_selected + solve_period < now
-                # Then we'll finalize them as is_valid=False (equivalent to ResolvedIncorrect).
-                # Because these tasks are presumably not solved on time.
                 tasks_q = (
                     select(Task, Subnet)
                     .join(Job, Task.job_id == Job.id)
@@ -576,15 +569,13 @@ class DBAdapterOrdersTasksMixin:
                 )
                 tasks_res = await session.execute(tasks_q)
                 for task, subnet in tasks_res:
-                    # If there's no recorded time_solver_selected, skip
                     if not task.time_solver_selected:
                         continue
                     deadline = task.time_solver_selected + timedelta(seconds=subnet.solve_period)
                     if now > deadline:
                         tasks_to_fail.append(task.id)
 
-                # STEP 3: For any hold that has fully expired, ensure used_amount=0 (log error if not), then fully charge.
-                # -------------------------------------------------------------------------------------------------------
+                # STEP 3: Handle expired holds
                 expired_holds_q = (
                     select(Hold)
                     .where(
@@ -595,50 +586,41 @@ class DBAdapterOrdersTasksMixin:
                 expired_holds_res = await session.execute(expired_holds_q)
                 expired_holds = expired_holds_res.scalars().all()
 
-                # We'll process the hold-charging inline, because self.charge_hold_for_price(...)
-                # accepts a session and doesn't open a new one, so it's safe in a single transaction.
                 for hold in expired_holds:
-                    leftover = hold.total_amount - hold.used_amount
-                    if leftover > 0:
-                        # Force the entire leftover to become “used” so we can charge everything
-                        logger.warning(
-                            f"[check_and_cleanup_holds] Forcing leftover {leftover:.2f} as used for expired hold id={hold.id}"
+                    if hold.hold_type == HoldType.CreditCard and hold.used_amount == 0:
+                        # Special case: Unused credit card holds are marked as unusable
+                        hold.total_amount = 0.0
+                        hold.charged = True
+                        logger.info(
+                            f"[check_and_cleanup_holds] Expired unused CC hold {hold.id} marked unusable."
                         )
-                        hold.used_amount = hold.total_amount
-                    
-                    # We can keep an error/warning if used_amount != total_amount, or remove that check entirely:
-                    # if hold.used_amount != hold.total_amount:
-                    #     logger.error("...")
+                    else:
+                        # Charge other expired holds fully
+                        leftover = hold.total_amount - hold.used_amount
+                        if leftover > 0:
+                            logger.warning(
+                                f"[check_and_cleanup_holds] Forcing leftover {leftover:.2f} as used for expired hold {hold.id}."
+                            )
+                            hold.used_amount = hold.total_amount
+                        await self.charge_hold_for_price(session, hold, hold.total_amount)
+                        logger.info(f"[check_and_cleanup_holds] Expired hold {hold.id} charged fully.")
 
-                    # Now it’s safe to finalize the entire hold
-                    await self.charge_hold_for_price(session, hold, hold.total_amount)
-                    await self.add_platform_revenue(session, hold.total_amount, PlatformRevenueTxnType.Add)
-                    logger.info(f"[check_and_cleanup_holds] Expired hold id={hold.id} charged fully.")
-
-
-            # End of the transaction block => we've just enumerated items. 
-            # Now do the actual modifications that rely on new sessions:
-            #   - delete orders
-            #   - finalize tasks
-            # Because self.delete_order(...) and self.finalize_sanity_check(...) each open a new session.
-
-            # STEP 1 (continued): Actually delete the unmatched orders
-            # --------------------------------------------------------
-            for order_id in unmatched_order_ids_to_delete:
+            # STEP 1 (continued): Delete unmatched orders
+            for order_id in unmatched_orders_to_delete:
                 try:
                     await self.delete_order(order_id)
-                    logger.info(f"[check_and_cleanup_holds] Deleted unmatched order {order_id} because hold expiry is too soon.")
+                    logger.info(f"[check_and_cleanup_holds] Deleted unmatched order {order_id} due to hold expiry.")
                 except Exception as e:
                     logger.error(f"[check_and_cleanup_holds] Failed to delete order {order_id}: {e}")
 
-            # STEP 2 (continued): Mark tasks as ResolvedIncorrect
-            # ---------------------------------------------------
+            # STEP 2 (continued): Finalize overdue tasks as incorrect
             for task_id in tasks_to_fail:
                 try:
                     await self.finalize_sanity_check(task_id, is_valid=False, force=True)
                     logger.info(f"[check_and_cleanup_holds] Finalized task {task_id} as incorrect due to solver timeout.")
                 except Exception as e:
                     logger.error(f"[check_and_cleanup_holds] Failed to finalize task {task_id} as incorrect: {e}")
+
 
 
     async def get_global_stats(self) -> dict:
