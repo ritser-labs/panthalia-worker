@@ -77,7 +77,7 @@ class Master:
         self.iteration = job.iteration
 
         # Load known data from job.state_json
-        state_data = await self.db_adapter.get_state_for_job(self.job_id)
+        state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
         self.losses = state_data.get("master_losses", [])
 
         # Possibly resume an unfinished iteration from the DB
@@ -236,9 +236,9 @@ class Master:
                 await self.db_adapter.update_job_iteration(self.job_id, iteration_number + 1)
 
                 # Update DB with new master_losses
-                state_data = await self.db_adapter.get_state_for_job(self.job_id)
+                state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
                 state_data["master_losses"] = self.losses
-                await self.db_adapter.update_state_for_job(self.job_id, state_data)
+                await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
 
                 # Possibly update SOT with new gradient data
                 learning_params = iteration_state.get("learning_params", {})
@@ -383,14 +383,14 @@ class Master:
         """
         Remove iteration sub-dict from state_json["master_iteration_state"] after finishing.
         """
-        state_data = await self.db_adapter.get_state_for_job(self.job_id)
+        state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
         iteration_state_obj = state_data.get(self.state_key, {})
 
         key_str = str(iteration_num)
         if key_str in iteration_state_obj:
             del iteration_state_obj[key_str]
             state_data[self.state_key] = iteration_state_obj
-            await self.db_adapter.update_state_for_job(self.job_id, state_data)
+            await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
             logging.info(f"Iteration {iteration_num} state removed from DB; not stored once done.")
 
     async def get_bid_price(self):
@@ -423,20 +423,20 @@ class Master:
         """
         Retrieve or initialize job.state_json["master_iteration_state"][str(iteration_number)].
         """
-        state_data = await self.db_adapter.get_state_for_job(self.job_id)
+        state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
         iteration_state_obj = state_data.get(self.state_key, {})
         if str(iteration_number) not in iteration_state_obj:
             iteration_state_obj[str(iteration_number)] = {"stage": "pending_get_input"}
             state_data[self.state_key] = iteration_state_obj
-            await self.db_adapter.update_state_for_job(self.job_id, state_data)
+            await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
         return iteration_state_obj[str(iteration_number)]
 
     async def _save_iteration_state(self, iteration_number, iteration_state):
         """
         Save iteration sub-dict in DB so we can resume on crash.
         """
-        state_data = await self.db_adapter.get_state_for_job(self.job_id)
+        state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
         iteration_state_obj = state_data.get(self.state_key, {})
         iteration_state_obj[str(iteration_number)] = iteration_state
         state_data[self.state_key] = iteration_state_obj
-        await self.db_adapter.update_state_for_job(self.job_id, state_data)
+        await self.db_adapter.update_master_state_for_job(self.job_id, state_data)

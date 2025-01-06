@@ -444,36 +444,60 @@ class DBAdapterClient:
         return self._extract_id(response, 'state_update_id')
 
     @typechecked
-    async def get_state_for_job(self, job_id: int) -> dict:
+    async def get_master_state_for_job(self, job_id: int) -> dict:
         """
-        Return the 'state_json' for this job from the DB.
+        Fetch the master_state_json from /get_master_job_state
         """
-        logger.debug(f"[DBAdapterClient] get_state_for_job called with job_id={job_id}")
         params = {'job_id': str(job_id)}
-        response = await self._authenticated_request('GET', '/get_job_state', params=params)
-        logger.debug(f"[DBAdapterClient] get_state_for_job => raw server response: {response}")
+        response = await self._authenticated_request('GET', '/get_master_job_state', params=params)
         if 'error' in response:
-            logger.error(f"[DBAdapterClient] get_state_for_job => error: {response['error']}")
+            logger.error(f"get_master_state_for_job => error: {response['error']}")
             return {}
         if isinstance(response, dict):
-            logger.debug(f"[DBAdapterClient] get_state_for_job => final: {response}")
             return response
         return {}
 
     @typechecked
-    async def update_state_for_job(self, job_id: int, new_state_data: dict) -> bool:
+    async def update_master_state_for_job(self, job_id: int, new_state: dict) -> bool:
         """
-        Overwrite the job's state_json with new_state_data
+        POST to /update_master_job_state with job_id and new_state
         """
-        logger.debug(f"[DBAdapterClient] update_state_for_job called with job_id={job_id}, new_state_data={new_state_data}")
         data = {
             'job_id': job_id,
-            'new_state': new_state_data
+            'new_state': new_state
         }
-        response = await self._authenticated_request('POST', '/update_job_state', data=data)
-        logger.debug(f"[DBAdapterClient] update_state_for_job => server response: {response}")
+        response = await self._authenticated_request('POST', '/update_master_job_state', data=data)
         if 'error' in response:
-            logger.error(f"[DBAdapterClient] update_state_for_job => error: {response['error']}")
+            logger.error(f"update_master_state_for_job => error: {response['error']}")
+            return False
+        return True
+
+    @typechecked
+    async def get_sot_state_for_job(self, job_id: int) -> dict:
+        """
+        Fetch the sot_state_json from /get_sot_job_state
+        """
+        params = {'job_id': str(job_id)}
+        response = await self._authenticated_request('GET', '/get_sot_job_state', params=params)
+        if 'error' in response:
+            logger.error(f"get_sot_state_for_job => error: {response['error']}")
+            return {}
+        if isinstance(response, dict):
+            return response
+        return {}
+
+    @typechecked
+    async def update_sot_state_for_job(self, job_id: int, new_state: dict) -> bool:
+        """
+        POST to /update_sot_job_state with job_id and new_state
+        """
+        data = {
+            'job_id': job_id,
+            'new_state': new_state
+        }
+        response = await self._authenticated_request('POST', '/update_sot_job_state', data=data)
+        if 'error' in response:
+            logger.error(f"update_sot_state_for_job => error: {response['error']}")
             return False
         return True
 

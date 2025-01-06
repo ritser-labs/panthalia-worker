@@ -148,7 +148,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                 logging.error("Missing tensor_name or result_url in /update_state")
                 return jsonify({'error': 'Missing tensor_name or result_url'}), 400
 
-            state_data = await self.db_adapter.get_state_for_job(self.job_id)
+            state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             block_timestamps = state_data.get("block_timestamps", {})
             num_updates = state_data.get("num_updates", {})
             last_future_version_number = state_data.get("last_future_version_number", {})
@@ -240,7 +240,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             state_data["num_updates"] = num_updates
             state_data["last_future_version_number"] = last_future_version_number
             state_data["iteration_number"] = iteration_number
-            await self.db_adapter.update_state_for_job(self.job_id, state_data)
+            await self.db_adapter.update_sot_state_for_job(self.job_id, state_data)
 
             return jsonify({
                 'status': 'success',
@@ -254,7 +254,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             if not tensor_name:
                 return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-            state_data = await self.db_adapter.get_state_for_job(self.job_id)
+            state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             block_timestamps = state_data.get("block_timestamps", {})
 
             requested_version_num = request.args.get('version_number', None)
@@ -290,7 +290,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             # *** ADDED LOG ***
             logging.debug(f"[/current_timestamp] Using self.job_id={self.job_id} for DB calls")
 
-            state_data = await self.db_adapter.get_state_for_job(self.job_id)
+            state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             block_timestamps = state_data.get("block_timestamps", {})
             num_updates = state_data.get("num_updates", {})
             iteration_number = state_data.get("iteration_number", {})
@@ -320,7 +320,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             except Exception as e:
                 logging.error(f"[/current_timestamp] update_cleanup_timestamps crashed: {e}", exc_info=True)
 
-            final_state = await self.db_adapter.get_state_for_job(self.job_id)
+            final_state = await self.db_adapter.get_sot_state_for_job(self.job_id)
             final_bt = final_state.get("block_timestamps", {})
             latest_version_number = final_bt.get(tensor_name, 0)
 
@@ -403,11 +403,11 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             if not data or 'loss' not in data:
                 return jsonify({'error': 'Missing loss value'}), 400
 
-            state_data = await self.db_adapter.get_state_for_job(self.job_id)
+            state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             if "latest_loss" not in state_data:
                 state_data["latest_loss"] = {}
             state_data["latest_loss"]["value"] = data['loss']
-            await self.db_adapter.update_state_for_job(self.job_id, state_data)
+            await self.db_adapter.update_sot_state_for_job(self.job_id, state_data)
             logging.info(f"Updated latest loss for version {data['version_number']}: {data['loss']}")
 
             return jsonify({'status': 'success'}), 200
@@ -415,7 +415,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         @self.app.route('/get_loss', methods=['GET'])
         async def get_loss():
             logging.info("Accessing /get_loss endpoint")
-            state_data = await self.db_adapter.get_state_for_job(self.job_id)
+            state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             loss = None
             if "latest_loss" in state_data:
                 loss = state_data["latest_loss"].get("value", None)

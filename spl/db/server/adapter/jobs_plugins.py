@@ -88,42 +88,59 @@ class DBAdapterJobsPluginsMixin:
             plugins = result.scalars().all()
             return plugins
 
-    ####################################################
-    # *** CHANGED ***: New debug logs in get_job_state
-    ####################################################
-    async def get_job_state(self, job_id: int) -> dict:
+    async def get_master_job_state(self, job_id: int) -> dict:
         """
-        Return the dictionary stored in Job.state_json
+        Returns the master_state_json for the specified job. 
+        If job not found or no master_state_json, returns {}.
         """
-        logger.debug(f"[jobs_plugins] get_job_state called with job_id={job_id}")
         async with self.get_async_session() as session:
-            stmt = select(Job).where(Job.id == job_id)
-            result = await session.execute(stmt)
-            job = result.scalar_one_or_none()
+            job = await session.get(Job, job_id)
             if not job:
-                logger.debug(f"[jobs_plugins] get_job_state => no job found for job_id={job_id}, returning {{}}")
+                logger.warning(f"[get_master_job_state] job_id={job_id} not found.")
                 return {}
-            if not job.state_json:
-                logger.debug(f"[jobs_plugins] get_job_state => job found but state_json is None, returning {{}}")
-                return {}
-            logger.debug(f"[jobs_plugins] get_job_state => returning: {job.state_json}")
-            return job.state_json
+            return job.master_state_json or {}
 
-    ####################################################
-    # *** CHANGED ***: New debug logs in update_job_state
-    ####################################################
-    async def update_job_state(self, job_id: int, new_state: dict):
+    async def update_master_job_state(self, job_id: int, new_state: dict) -> bool:
         """
-        Overwrite Job.state_json with new_state
+        Overwrites the master_state_json for the specified job.
+        Returns True on success, False if the job does not exist.
         """
-        logger.debug(f"[jobs_plugins] update_job_state called with job_id={job_id}, new_state={new_state}")
         async with self.get_async_session() as session:
-            stmt = update(Job).where(Job.id == job_id).values(state_json=new_state)
-            result = await session.execute(stmt)
+            job = await session.get(Job, job_id)
+            if not job:
+                logger.warning(f"[update_master_job_state] job_id={job_id} not found.")
+                return False
+
+            job.master_state_json = new_state
             await session.commit()
-            rows_updated = result.rowcount
-            logger.debug(f"[jobs_plugins] update_job_state => rows_updated={rows_updated}")
-            logger.debug(f"[jobs_plugins] update_job_state => done for job_id={job_id}")
+            return True
+
+    async def get_sot_job_state(self, job_id: int) -> dict:
+        """
+        Returns the sot_state_json for the specified job.
+        If job not found or no sot_state_json, returns {}.
+        """
+        async with self.get_async_session() as session:
+            job = await session.get(Job, job_id)
+            if not job:
+                logger.warning(f"[get_sot_job_state] job_id={job_id} not found.")
+                return {}
+            return job.sot_state_json or {}
+
+    async def update_sot_job_state(self, job_id: int, new_state: dict) -> bool:
+        """
+        Overwrites the sot_state_json for the specified job.
+        Returns True on success, False if the job does not exist.
+        """
+        async with self.get_async_session() as session:
+            job = await session.get(Job, job_id)
+            if not job:
+                logger.warning(f"[update_sot_job_state] job_id={job_id} not found.")
+                return False
+
+            job.sot_state_json = new_state
+            await session.commit()
+            return True
 
     async def update_job_active(self, job_id: int, new_active: bool):
         async with self.get_async_session() as session:

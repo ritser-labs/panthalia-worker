@@ -57,7 +57,8 @@ class Job(TimestampMixin, Serializable):
     sot_url = Column(String, nullable=False)
     done = Column(Boolean, nullable=False, default=False)
     iteration = Column(Integer, nullable=False)
-    state_json = Column(JSON, nullable=True, default={})
+    master_state_json = Column(JSON, nullable=True, default={})
+    sot_state_json = Column(JSON, nullable=True, default={})
 
     # Add an 'active' column
     active = Column(Boolean, nullable=False, default=True)

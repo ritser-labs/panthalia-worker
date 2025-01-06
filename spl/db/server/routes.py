@@ -366,32 +366,40 @@ async def get_jobs_in_progress():
 async def health_check():
     return jsonify({'status': 'healthy'}), 200
 
-@app.route('/get_job_state', methods=['GET'])
-@require_params('job_id')
-@handle_errors
-async def get_job_state():
-    """
-    Return job.state_json for the given job_id.
-    """
-    job_id = int(request.args.get('job_id'))
-    state = await db_adapter_server.get_job_state(job_id)
-    return jsonify(state), 200
+app.route('/get_master_job_state', methods=['GET'], endpoint='get_master_job_state_endpoint')(
+    create_get_route(
+        entity_name='MasterJobState',
+        method=db_adapter_server.get_master_job_state,
+        params=['job_id'],
+        auth_method=AuthMethod.USER
+    )
+)
 
-@app.route('/update_job_state', methods=['POST'])
-@handle_errors
-@require_json_keys('job_id', 'new_state')
-async def update_job_state(*args, **kwargs):
-    """
-    Overwrites job.state_json with the new dictionary
-    provided in the JSON 'new_state' key.
-    """
-    data = kwargs['data']
-    job_id = data['job_id']
-    new_state = data['new_state']  # should be a dict
-    if not isinstance(new_state, dict):
-        return jsonify({'error': 'new_state must be a dict'}), 400
-    await db_adapter_server.update_job_state(job_id, new_state)
-    return jsonify({'success': True}), 200
+app.route('/update_master_job_state', methods=['POST'], endpoint='update_master_job_state_endpoint')(
+    create_post_route(
+        method=db_adapter_server.update_master_job_state,
+        required_keys=['job_id', 'new_state'],
+        auth_method=AuthMethod.USER
+    )
+)
+
+# SOT:
+app.route('/get_sot_job_state', methods=['GET'], endpoint='get_sot_job_state_endpoint')(
+    create_get_route(
+        entity_name='SOTJobState',
+        method=db_adapter_server.get_sot_job_state,
+        params=['job_id'],
+        auth_method=AuthMethod.USER
+    )
+)
+
+app.route('/update_sot_job_state', methods=['POST'], endpoint='update_sot_job_state_endpoint')(
+    create_post_route(
+        method=db_adapter_server.update_sot_job_state,
+        required_keys=['job_id', 'new_state'],
+        auth_method=AuthMethod.USER
+    )
+)
 
 ################################################################
 # Withdrawals-related endpoints

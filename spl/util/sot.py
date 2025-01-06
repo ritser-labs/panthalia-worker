@@ -211,12 +211,12 @@ async def update_block_timestamps(
         iteration_number[tensor_name] = iteration_val
         last_future_version_number[tensor_name] = future_ts
 
-        state_data = await db_adapter.get_state_for_job(job_id)
+        state_data = await db_adapter.get_sot_state_for_job(job_id)
         state_data["block_timestamps"] = block_timestamps
         state_data["num_updates"] = num_updates
         state_data["iteration_number"] = iteration_number
         state_data["last_future_version_number"] = last_future_version_number
-        await db_adapter.update_state_for_job(job_id, state_data)
+        await db_adapter.update_sot_state_for_job(job_id, state_data)
 
 async def cleanup_old_timestamp(
     tensor_name: str,
@@ -287,7 +287,7 @@ async def update_cleanup_timestamps(
             iteration_number[tensor_name] = iteration_val
             last_future_version_number[tensor_name] = current_version
 
-            state_data = await db_adapter.get_state_for_job(job_id)
+            state_data = await db_adapter.get_sot_state_for_job(job_id)
             state_data["block_timestamps"] = block_timestamps
             state_data["num_updates"] = num_updates
             state_data["iteration_number"] = iteration_number
@@ -298,10 +298,10 @@ async def update_cleanup_timestamps(
             )
 
             try:
-                await db_adapter.update_state_for_job(job_id, state_data)
+                await db_adapter.update_sot_state_for_job(job_id, state_data)
                 logging.debug("[update_cleanup_timestamps] Successfully updated job state in DB.")
             except Exception as e:
-                logging.error("[update_cleanup_timestamps] update_state_for_job crashed: ", exc_info=True)
+                logging.error("[update_cleanup_timestamps] update_sot_state_for_job crashed: ", exc_info=True)
                 return
 
             # Now remove the old version if new_file definitely exists
