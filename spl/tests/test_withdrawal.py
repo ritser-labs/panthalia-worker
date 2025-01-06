@@ -90,3 +90,75 @@ async def test_withdrawal_flow(db_adapter_server_fixture):
         )
 
         print("Withdrawal from EARNINGS hold test passed!")
+
+@pytest.mark.asyncio
+async def test_reject_withdrawal_flow(db_adapter_server_fixture):
+    """
+    Ensures that rejecting a withdrawal:
+      - sets the status to REJECTED
+      - unreserves the previously used EARNINGS hold
+      - leftover in the EARNINGS hold reverts to the original
+    """
+    async with original_app.test_request_context('/'):
+        server = db_adapter_server_fixture
+
+        user_id = "reject_test_user"
+        server._user_id_getter = lambda: user_id
+
+        # 1) Let’s deposit into an EARNINGS hold for simplicity.
+        #    Or deposit as credits & forcibly morph it into Earnings, etc.
+        #    For brevity, let's replicate the approach from the existing withdrawal test:
+        await server.admin_deposit_account(user_id, 500)
+
+        # replace the user's single credits hold with an Earnings hold
+        async with server.get_async_session() as session:
+            acc_stmt = select(Account).where(Account.user_id == user_id)
+            acc_res = await session.execute(acc_stmt)
+            account = acc_res.scalar_one_or_none()
+            assert account, "No account found after deposit?"
+
+            # find the credits hold
+            holds_q = select(Hold).where(Hold.account_id == account.id, Hold.hold_type == HoldType.Credits)
+            hold_res = await session.execute(holds_q)
+            deposit_credits_hold = hold_res.scalar_one_or_none()
+
+            # remove it
+            if deposit_credits_hold:
+                await session.delete(deposit_credits_hold)
+                await session.flush()
+
+                # create an EARNINGS hold with leftover=500
+                earnings_hold = Hold(
+                    account_id=account.id,
+                    user_id=user_id,
+                    hold_type=HoldType.Earnings,
+                    total_amount=500.0,
+                    used_amount=0.0,
+                    expiry=deposit_credits_hold.expiry,
+                    charged=False,
+                    charged_amount=0.0
+                )
+                session.add(earnings_hold)
+                await session.commit()
+
+        # 2) create a withdrawal request => say 200 => leftover=300
+        withdrawal_id = await server.create_withdrawal_request(user_id, 200)
+        w_obj = await server.get_withdrawal(withdrawal_id)
+        assert w_obj.status == WithdrawalStatus.PENDING
+        balance_before_rejection = await server.get_balance_details_for_user()
+        assert balance_before_rejection["earnings_balance"] == 300.0
+
+        # 3) Now "admin" rejects the withdrawal
+        #    (we can just call the method directly, or call the route if you prefer)
+        await server.reject_withdrawal_flow(withdrawal_id)
+
+        w_obj = await server.get_withdrawal(withdrawal_id)
+        assert w_obj.status == WithdrawalStatus.REJECTED, "Withdrawal should be REJECTED after reject call"
+
+        # 4) check that leftover in hold is restored => 500
+        balance_after_rejection = await server.get_balance_details_for_user()
+        assert balance_after_rejection["earnings_balance"] == 500.0, (
+            f"Expected 500 leftover, got {balance_after_rejection['earnings_balance']}"
+        )
+
+        print("[test_reject_withdrawal_flow] => PASS")

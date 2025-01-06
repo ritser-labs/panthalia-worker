@@ -120,7 +120,7 @@ class DBAdapterWithdrawalsMixin:
                 raise ValueError(f"Withdrawal {withdrawal_id} must be PENDING before finalizing.")
 
             # Mark as FINALIZED
-            withdrawal.status = WithdrawalStatus("FINALIZED")
+            withdrawal.status = WithdrawalStatus.FINALIZED
             withdrawal.updated_at = datetime.utcnow()
             session.add(withdrawal)
 
@@ -150,5 +150,72 @@ class DBAdapterWithdrawalsMixin:
 
             # Charge that hold for 'required'
             await self.charge_hold_for_price(session, found_hold, required)
+            await session.commit()
+            return True
+
+    async def reject_withdrawal_flow(self, withdrawal_id: int) -> bool:
+        """
+        Marks the withdrawal as REJECTED, and 'unreserves' the user's Earnings hold
+        by decrementing used_amount by the withdrawal amount.
+
+        Typically called by an admin or payment system when a withdrawal is declined.
+        """
+        async with self.get_async_session() as session:
+            # 1) Fetch the PendingWithdrawal
+            stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
+            result = await session.execute(stmt)
+            withdrawal = result.scalar_one_or_none()
+            if not withdrawal:
+                raise ValueError(f"Withdrawal {withdrawal_id} not found.")
+
+            if withdrawal.status != WithdrawalStatus.PENDING:
+                raise ValueError(f"Withdrawal {withdrawal_id} must be PENDING before rejection.")
+
+            # 2) Mark as REJECTED
+            withdrawal.status = WithdrawalStatus.REJECTED
+            withdrawal.updated_at = datetime.utcnow()
+            session.add(withdrawal)
+
+            # 3) Unreserve the previously used amount from the user’s Earnings hold
+            required = withdrawal.amount
+            account_stmt = (
+                select(Account)
+                .where(Account.id == withdrawal.account_id)
+                .options(joinedload(Account.holds))
+            )
+            acc_res = await session.execute(account_stmt)
+            acc_res = acc_res.unique()
+            account = acc_res.scalar_one_or_none()
+            if not account:
+                raise ValueError(f"Missing account for withdrawal {withdrawal_id}?")
+
+            # find the Earnings hold that was used by create_withdrawal_request
+            found_hold = None
+            for hold in account.holds:
+                if hold.hold_type == HoldType.Earnings and not hold.charged:
+                    # Because create_withdrawal_request increments used_amount by 'withdrawal.amount'
+                    # we only need to find a hold with enough used_amount that covers this withdrawal
+                    if hold.used_amount >= required:
+                        found_hold = hold
+                        break
+            if not found_hold:
+                raise ValueError(
+                    "Could not find an Earnings hold with enough used_amount to unreserve for this withdrawal."
+                )
+
+            found_hold.used_amount -= required  # unreserve
+            if found_hold.used_amount < 0:
+                raise ValueError(
+                    f"Earnings hold {found_hold.id} used_amount became negative after rejection. Data mismatch!"
+                )
+
+            # Insert a negative hold transaction to reflect the unreserve
+            txn = HoldTransaction(
+                hold_id=found_hold.id,
+                order_id=None,
+                amount=-required
+            )
+            session.add(txn)
+
             await session.commit()
             return True

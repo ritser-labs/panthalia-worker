@@ -437,7 +437,15 @@ app.route('/complete_withdrawal', methods=['POST'], endpoint='complete_withdrawa
     create_post_route(
         db_adapter_server.complete_withdrawal_flow,  # The backend method
         ['withdrawal_id'],                          # JSON keys required
-        AuthMethod.KEY                              # Auth method
+        auth_method=AuthMethod.KEY                              # Auth method
+    )
+)
+
+app.route('/reject_withdrawal', methods=['POST'], endpoint='reject_withdrawal_endpoint')(
+    create_post_route(
+        db_adapter_server.reject_withdrawal_flow,  # The new mixin method
+        ['withdrawal_id'],                        # required JSON key
+        auth_method=AuthMethod.KEY                # same admin-level auth as complete_withdrawal
     )
 )
 ################################################################
