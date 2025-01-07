@@ -28,7 +28,7 @@ async def test_basic_setup(db_adapter_server_fixture):
             name="Test Job",
             plugin_id=plugin_id,
             subnet_id=subnet_id,
-            sot_url="http://example.com",
+            sot_url="http://panthalia.com",
             iteration=0
         )
 

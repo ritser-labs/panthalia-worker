@@ -33,7 +33,7 @@ async def test_earnings_and_balances_scenario():
             name="BalanceTesting Job",
             plugin_id=plugin_id,
             subnet_id=subnet_id,
-            sot_url="http://example.com",
+            sot_url="http://panthalia.com",
             iteration=0
         )
 

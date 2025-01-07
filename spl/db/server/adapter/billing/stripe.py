@@ -22,8 +22,8 @@ class DBAdapterStripeBillingMixin:
 
         self.stripe_api_key = os.environ.get("STRIPE_SECRET_KEY", "")
         self.webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-        self.success_url = os.environ.get("STRIPE_SUCCESS_URL", "https://example.com/success")
-        self.cancel_url = os.environ.get("STRIPE_CANCEL_URL", "https://example.com/cancel")
+        self.success_url = os.environ.get("STRIPE_SUCCESS_URL", "https://panthalia.com/success")
+        self.cancel_url = os.environ.get("STRIPE_CANCEL_URL", "https://panthalia.com/cancel")
 
         stripe.api_key = self.stripe_api_key
 

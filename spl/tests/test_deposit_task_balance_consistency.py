@@ -88,7 +88,7 @@ async def test_deposit_task_balance_consistency(db_adapter_server_fixture):
             name="BalanceCheckJob",
             plugin_id=plugin_id,
             subnet_id=subnet_id,
-            sot_url="http://example.com",
+            sot_url="http://panthalia.com",
             iteration=0
         )
 
