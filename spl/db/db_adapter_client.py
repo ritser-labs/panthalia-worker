@@ -534,9 +534,8 @@ class DBAdapterClient:
     # NEW: Withdrawals
     ##
     @typechecked
-    async def create_withdrawal(self, user_id: str, amount: int) -> Optional[int]:
+    async def create_withdrawal(self, amount: int) -> Optional[int]:
         data = {
-            'user_id': user_id,
             'amount': amount
         }
         resp = await self._authenticated_request('POST', '/create_withdrawal', data=data)
@@ -547,8 +546,8 @@ class DBAdapterClient:
         return await self._fetch_entity('/get_withdrawal', WithdrawalRequest, params={'withdrawal_id': withdrawal_id})
 
     @typechecked
-    async def get_withdrawals_for_user(self, user_id: str) -> List[WithdrawalRequest]:
-        response = await self._authenticated_request('GET', '/get_withdrawals_for_user', params={'user_id': user_id})
+    async def get_withdrawals_for_user(self) -> List[WithdrawalRequest]:
+        response = await self._authenticated_request('GET', '/get_withdrawals_for_user')
         if 'error' in response:
             logger.error(response['error'])
             return []

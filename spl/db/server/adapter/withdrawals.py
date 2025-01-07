@@ -12,7 +12,7 @@ class DBAdapterWithdrawalsMixin:
     Mixin for handling user withdrawals from their Earnings balance.
     """
 
-    async def create_withdrawal_request(self, user_id: str, amount: int, payment_instructions: str) -> int:
+    async def create_withdrawal_request(self, amount: int, payment_instructions: str) -> int:
         """
         Creates a new WithdrawalRequest in status=PENDING. Also 'reserves' that amount
         in an Earnings hold (so the user cannot double-spend those same earnings).
@@ -24,6 +24,7 @@ class DBAdapterWithdrawalsMixin:
 
         async with self.get_async_session() as session:
             # Eager-load the user's Account plus its holds:
+            user_id = self.get_user_id()
             stmt = (
                 select(Account)
                 .where(Account.user_id == user_id)

@@ -407,8 +407,9 @@ app.route('/update_sot_job_state', methods=['POST'], endpoint='update_sot_job_st
 app.route('/create_withdrawal', methods=['POST'], endpoint='create_withdrawal_endpoint')(
     create_post_route_return_id(
         db_adapter_server.create_withdrawal_request,
-        ['user_id', 'amount', 'payment_instructions'],
-        'withdrawal_id'
+        ['amount', 'payment_instructions'],
+        'withdrawal_id',
+        auth_method=AuthMethod.USER
     )
 )
 
