@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 from datetime import datetime
 from ....models.enums import WithdrawalStatus, HoldType
-from ....models import PendingWithdrawal, Account, Hold, HoldTransaction
+from ....models import WithdrawalRequest, Account, Hold, HoldTransaction
 
 class DBAdapterWithdrawalsMixin:
     """
@@ -14,7 +14,7 @@ class DBAdapterWithdrawalsMixin:
 
     async def create_withdrawal_request(self, user_id: str, amount: int) -> int:
         """
-        Creates a new PendingWithdrawal in status=PENDING. Also 'reserves' that amount
+        Creates a new WithdrawalRequest in status=PENDING. Also 'reserves' that amount
         in an Earnings hold (so the user cannot double-spend those same earnings).
 
         Raises ValueError if there's no single Earnings hold with enough leftover.
@@ -57,8 +57,8 @@ class DBAdapterWithdrawalsMixin:
             )
             session.add(hold_txn)
 
-            # Create new PendingWithdrawal
-            new_withdrawal = PendingWithdrawal(
+            # Create new WithdrawalRequest
+            new_withdrawal = WithdrawalRequest(
                 account_id=account.id,
                 user_id=user_id,
                 amount=amount,
@@ -70,21 +70,21 @@ class DBAdapterWithdrawalsMixin:
             await session.refresh(new_withdrawal)
             return new_withdrawal.id
 
-    async def get_withdrawal(self, withdrawal_id: int) -> PendingWithdrawal | None:
+    async def get_withdrawal(self, withdrawal_id: int) -> WithdrawalRequest | None:
         """
-        Fetch a single PendingWithdrawal by ID.
+        Fetch a single WithdrawalRequest by ID.
         """
         async with self.get_async_session() as session:
-            stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
+            stmt = select(WithdrawalRequest).where(WithdrawalRequest.id == withdrawal_id)
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
 
-    async def get_withdrawals_for_user(self, user_id: str) -> list[PendingWithdrawal]:
+    async def get_withdrawals_for_user(self, user_id: str) -> list[WithdrawalRequest]:
         """
         Return all withdrawals for a given user.
         """
         async with self.get_async_session() as session:
-            stmt = select(PendingWithdrawal).where(PendingWithdrawal.user_id == user_id)
+            stmt = select(WithdrawalRequest).where(WithdrawalRequest.user_id == user_id)
             result = await session.execute(stmt)
             return result.scalars().all()
 
@@ -93,7 +93,7 @@ class DBAdapterWithdrawalsMixin:
         For final 'approval' or 'rejection' steps.
         """
         async with self.get_async_session() as session:
-            stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
+            stmt = select(WithdrawalRequest).where(WithdrawalRequest.id == withdrawal_id)
             result = await session.execute(stmt)
             withdrawal = result.scalar_one_or_none()
             if not withdrawal:
@@ -110,7 +110,7 @@ class DBAdapterWithdrawalsMixin:
         for the requested amount. Typically called by an admin or payment system.
         """
         async with self.get_async_session() as session:
-            stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
+            stmt = select(WithdrawalRequest).where(WithdrawalRequest.id == withdrawal_id)
             result = await session.execute(stmt)
             withdrawal = result.scalar_one_or_none()
             if not withdrawal:
@@ -161,8 +161,8 @@ class DBAdapterWithdrawalsMixin:
         Typically called by an admin or payment system when a withdrawal is declined.
         """
         async with self.get_async_session() as session:
-            # 1) Fetch the PendingWithdrawal
-            stmt = select(PendingWithdrawal).where(PendingWithdrawal.id == withdrawal_id)
+            # 1) Fetch the WithdrawalRequest
+            stmt = select(WithdrawalRequest).where(WithdrawalRequest.id == withdrawal_id)
             result = await session.execute(stmt)
             withdrawal = result.scalar_one_or_none()
             if not withdrawal:
@@ -220,11 +220,11 @@ class DBAdapterWithdrawalsMixin:
             await session.commit()
             return True
 
-    async def get_pending_withdrawals(self) -> list[PendingWithdrawal]:
+    async def get_pending_withdrawals(self) -> list[WithdrawalRequest]:
         """
-        Fetch all PendingWithdrawal objects whose status is currently PENDING.
+        Fetch all WithdrawalRequest objects whose status is currently PENDING.
         """
         async with self.get_async_session() as session:
-            stmt = select(PendingWithdrawal).where(PendingWithdrawal.status == WithdrawalStatus.PENDING)
+            stmt = select(WithdrawalRequest).where(WithdrawalRequest.status == WithdrawalStatus.PENDING)
             result = await session.execute(stmt)
             return result.scalars().all()

@@ -7,7 +7,7 @@ from sqlalchemy.orm import joinedload
 from ....models import (
     CreditTransaction, CreditTxnType,
     PlatformRevenue, PlatformRevenueTxnType,
-    PendingWithdrawal, WithdrawalStatus,
+    WithdrawalRequest, WithdrawalStatus,
     Hold, HoldType, Account
 )
 from ....models.enums import HoldType
@@ -96,7 +96,7 @@ class DBAdapterBalanceDetailsMixin:
            (deposits - withdrawals) == (sum_of_total_amounts_for_Credits_and_Earnings + total_platform_revenue)
 
         1) total_deposited is the sum of CreditTxnType.Add credit transactions
-        2) total_withdrawn is the sum of FINALIZED PendingWithdrawal amounts
+        2) total_withdrawn is the sum of FINALIZED WithdrawalRequest amounts
         3) total_platform_revenue sums up all PlatformRevenue (Add => +, Subtract => -)
         4) sum_of_total_amounts_for_Credits_and_Earnings is the sum of hold.total_amount
            for all holds with hold_type in [HoldType.Credits, HoldType.Earnings],
@@ -118,8 +118,8 @@ class DBAdapterBalanceDetailsMixin:
 
             # (2) Sum all FINALIZED withdrawals
             stmt_withdrawals = select(
-                sqlalchemy.func.sum(PendingWithdrawal.amount)
-            ).where(PendingWithdrawal.status == WithdrawalStatus.FINALIZED)
+                sqlalchemy.func.sum(WithdrawalRequest.amount)
+            ).where(WithdrawalRequest.status == WithdrawalStatus.FINALIZED)
             total_withdrawn = (await session.execute(stmt_withdrawals)).scalar() or 0
 
             # (3) Sum platform revenue (Add => +, Subtract => -)

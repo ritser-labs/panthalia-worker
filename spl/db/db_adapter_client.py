@@ -13,7 +13,7 @@ from typeguard import typechecked
 
 from ..models import (
     Job, Plugin, Subnet, Task, TaskStatus, Perm, Sot, Instance, ServiceType, Base, PermType,
-    PendingWithdrawal
+    WithdrawalRequest
 )
 
 logger = logging.getLogger(__name__)
@@ -543,17 +543,17 @@ class DBAdapterClient:
         return self._extract_id(resp, 'withdrawal_id')
 
     @typechecked
-    async def get_withdrawal(self, withdrawal_id: int) -> Optional[PendingWithdrawal]:
-        return await self._fetch_entity('/get_withdrawal', PendingWithdrawal, params={'withdrawal_id': withdrawal_id})
+    async def get_withdrawal(self, withdrawal_id: int) -> Optional[WithdrawalRequest]:
+        return await self._fetch_entity('/get_withdrawal', WithdrawalRequest, params={'withdrawal_id': withdrawal_id})
 
     @typechecked
-    async def get_withdrawals_for_user(self, user_id: str) -> List[PendingWithdrawal]:
+    async def get_withdrawals_for_user(self, user_id: str) -> List[WithdrawalRequest]:
         response = await self._authenticated_request('GET', '/get_withdrawals_for_user', params={'user_id': user_id})
         if 'error' in response:
             logger.error(response['error'])
             return []
         # parse list:
-        return [self._deserialize(PendingWithdrawal, item) for item in response]
+        return [self._deserialize(WithdrawalRequest, item) for item in response]
 
     @typechecked
     async def update_withdrawal_status(self, withdrawal_id: int, new_status: str) -> bool:

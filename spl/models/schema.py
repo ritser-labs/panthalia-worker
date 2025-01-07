@@ -149,7 +149,7 @@ class Account(Serializable):
     holds = relationship("Hold", back_populates="account")
     credit_transactions = relationship("CreditTransaction", back_populates="account")
     earnings_transactions = relationship("EarningsTransaction", back_populates="account")
-    withdrawals = relationship("PendingWithdrawal", back_populates="account")
+    withdrawals = relationship("WithdrawalRequest", back_populates="account")
 
 class AccountKey(Serializable):
     __tablename__ = 'account_keys'
@@ -246,7 +246,7 @@ class PlatformRevenue(Serializable):
     txn_type = Column(Enum(PlatformRevenueTxnType), nullable=False)
     timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
 
-class PendingWithdrawal(Serializable):
+class WithdrawalRequest(Serializable):
     __tablename__ = 'pending_withdrawals'
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=False)

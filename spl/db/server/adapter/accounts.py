@@ -11,7 +11,7 @@ from datetime import timedelta
 from ....models import (
     Account, CreditTransaction, CreditTxnType,
     EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType,
-    AccountKey, PendingWithdrawal, WithdrawalStatus, StripeDeposit, Hold, HoldType
+    AccountKey, WithdrawalRequest, WithdrawalStatus, StripeDeposit, Hold, HoldType
 )
 from typing import Optional
 
