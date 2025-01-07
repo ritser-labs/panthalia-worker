@@ -448,6 +448,15 @@ app.route('/reject_withdrawal', methods=['POST'], endpoint='reject_withdrawal_en
         auth_method=AuthMethod.KEY                # same admin-level auth as complete_withdrawal
     )
 )
+
+app.route('/get_pending_withdrawals', methods=['GET'], endpoint='get_pending_withdrawals_endpoint')(
+    create_get_route(
+        entity_name='PendingWithdrawal',           # purely for clarity/logging
+        method=db_adapter_server.get_pending_withdrawals,
+        params=[],                                 # no query params needed
+        auth_method=AuthMethod.KEY                # or KEY, or NONE, as desired
+    )
+)
 ################################################################
 # Creating resources endpoints (Job, Plugin, Task, Orders, etc.)
 ################################################################

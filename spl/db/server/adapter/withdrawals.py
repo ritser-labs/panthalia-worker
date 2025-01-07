@@ -219,3 +219,12 @@ class DBAdapterWithdrawalsMixin:
 
             await session.commit()
             return True
+
+    async def get_pending_withdrawals(self) -> list[PendingWithdrawal]:
+        """
+        Fetch all PendingWithdrawal objects whose status is currently PENDING.
+        """
+        async with self.get_async_session() as session:
+            stmt = select(PendingWithdrawal).where(PendingWithdrawal.status == WithdrawalStatus.PENDING)
+            result = await session.execute(stmt)
+            return result.scalars().all()
