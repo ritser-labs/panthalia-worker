@@ -126,7 +126,7 @@ class DBAdapterStripeBillingMixin:
                     hold_type=HoldType.CreditCard,
                     total_amount=amount,
                     used_amount=0.0,
-                    expiry=datetime.utcnow() + timedelta(days=365),  # or your desired expiry
+                    expiry=datetime.utcnow() + timedelta(days=6),  # or your desired expiry
                     charged=False,
                     charged_amount=0.0,
                     parent_hold_id=None
