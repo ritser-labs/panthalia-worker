@@ -12,7 +12,7 @@ class DBAdapterWithdrawalsMixin:
     Mixin for handling user withdrawals from their Earnings balance.
     """
 
-    async def create_withdrawal_request(self, user_id: str, amount: int) -> int:
+    async def create_withdrawal_request(self, user_id: str, amount: int, payment_instructions: str) -> int:
         """
         Creates a new WithdrawalRequest in status=PENDING. Also 'reserves' that amount
         in an Earnings hold (so the user cannot double-spend those same earnings).
@@ -63,6 +63,7 @@ class DBAdapterWithdrawalsMixin:
                 user_id=user_id,
                 amount=amount,
                 status=WithdrawalStatus.PENDING,
+                payment_instructions=payment_instructions
             )
             session.add(new_withdrawal)
 
@@ -104,7 +105,7 @@ class DBAdapterWithdrawalsMixin:
             session.add(withdrawal)
             await session.commit()
 
-    async def complete_withdrawal_flow(self, withdrawal_id: int) -> bool:
+    async def complete_withdrawal_flow(self, withdrawal_id: int, payment_record: str) -> bool:
         """
         Marks the withdrawal as FINALIZED, and charges the user's Earnings hold 
         for the requested amount. Typically called by an admin or payment system.
@@ -122,6 +123,7 @@ class DBAdapterWithdrawalsMixin:
             # Mark as FINALIZED
             withdrawal.status = WithdrawalStatus.FINALIZED
             withdrawal.updated_at = datetime.utcnow()
+            withdrawal.payment_record = payment_record
             session.add(withdrawal)
 
             required = withdrawal.amount
@@ -153,7 +155,7 @@ class DBAdapterWithdrawalsMixin:
             await session.commit()
             return True
 
-    async def reject_withdrawal_flow(self, withdrawal_id: int) -> bool:
+    async def reject_withdrawal_flow(self, withdrawal_id: int, rejection_reason: str) -> bool:
         """
         Marks the withdrawal as REJECTED, and 'unreserves' the user's Earnings hold
         by decrementing used_amount by the withdrawal amount.
@@ -174,6 +176,7 @@ class DBAdapterWithdrawalsMixin:
             # 2) Mark as REJECTED
             withdrawal.status = WithdrawalStatus.REJECTED
             withdrawal.updated_at = datetime.utcnow()
+            withdrawal.rejection_reason = rejection_reason
             session.add(withdrawal)
 
             # 3) Unreserve the previously used amount from the user’s Earnings hold

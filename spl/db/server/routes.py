@@ -404,19 +404,13 @@ app.route('/update_sot_job_state', methods=['POST'], endpoint='update_sot_job_st
 ################################################################
 # Withdrawals-related endpoints
 ################################################################
-@app.route('/create_withdrawal', methods=['POST'])
-@require_json_keys('user_id', 'amount')
-@handle_errors
-async def create_withdrawal():
-    data = await request.get_json()
-    user_id = data['user_id']
-    amount = float(data['amount'])
-    try:
-        withdrawal_id = await db_adapter_server.create_withdrawal_request(user_id, amount)
-        return jsonify({'withdrawal_id': withdrawal_id}), 200
-    except Exception as e:
-        logger.error(f"create_withdrawal error: {e}")
-        return jsonify({'error': str(e)}), 400
+app.route('/create_withdrawal', methods=['POST'], endpoint='create_withdrawal_endpoint')(
+    create_post_route_return_id(
+        db_adapter_server.create_withdrawal_request,
+        ['user_id', 'amount', 'payment_instructions'],
+        'withdrawal_id'
+    )
+)
 
 @app.route('/update_withdrawal_status', methods=['POST'])
 @require_json_keys('withdrawal_id', 'new_status')
@@ -436,7 +430,7 @@ async def update_withdrawal_status():
 app.route('/complete_withdrawal', methods=['POST'], endpoint='complete_withdrawal_endpoint')(
     create_post_route(
         db_adapter_server.complete_withdrawal_flow,  # The backend method
-        ['withdrawal_id'],                          # JSON keys required
+        ['withdrawal_id, payment_record'],                          # JSON keys required
         auth_method=AuthMethod.KEY                              # Auth method
     )
 )
@@ -444,7 +438,7 @@ app.route('/complete_withdrawal', methods=['POST'], endpoint='complete_withdrawa
 app.route('/reject_withdrawal', methods=['POST'], endpoint='reject_withdrawal_endpoint')(
     create_post_route(
         db_adapter_server.reject_withdrawal_flow,  # The new mixin method
-        ['withdrawal_id'],                        # required JSON key
+        ['withdrawal_id', 'rejection_reason'],                        # required JSON key
         auth_method=AuthMethod.KEY                # same admin-level auth as complete_withdrawal
     )
 )

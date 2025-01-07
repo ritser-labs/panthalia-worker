@@ -69,7 +69,7 @@ async def test_withdrawal_flow(db_adapter_server_fixture):
         )
 
         # 4) create a withdrawal => 100 => leftover=200
-        withdrawal_id = await server.create_withdrawal_request(user_id, 100)
+        withdrawal_id = await server.create_withdrawal_request(user_id, 100, '')
         w_obj = await server.get_withdrawal(withdrawal_id)
         assert w_obj is not None
         assert w_obj.status == WithdrawalStatus.PENDING
@@ -79,7 +79,7 @@ async def test_withdrawal_flow(db_adapter_server_fixture):
         assert after_req_balance["earnings_balance"] == 200, "We reserved 100 from the EARNINGS hold"
 
         # 5) admin calls complete_withdrawal => sets status=FINALIZED, charges the hold
-        await server.complete_withdrawal_flow(withdrawal_id)
+        await server.complete_withdrawal_flow(withdrawal_id, '')
         w_obj = await server.get_withdrawal(withdrawal_id)
         assert w_obj.status == WithdrawalStatus.FINALIZED
 
@@ -142,7 +142,7 @@ async def test_reject_withdrawal_flow(db_adapter_server_fixture):
                 await session.commit()
 
         # 2) create a withdrawal request => say 200 => leftover=300
-        withdrawal_id = await server.create_withdrawal_request(user_id, 200)
+        withdrawal_id = await server.create_withdrawal_request(user_id, 200, '')
         w_obj = await server.get_withdrawal(withdrawal_id)
         assert w_obj.status == WithdrawalStatus.PENDING
         balance_before_rejection = await server.get_balance_details_for_user()
@@ -150,7 +150,7 @@ async def test_reject_withdrawal_flow(db_adapter_server_fixture):
 
         # 3) Now "admin" rejects the withdrawal
         #    (we can just call the method directly, or call the route if you prefer)
-        await server.reject_withdrawal_flow(withdrawal_id)
+        await server.reject_withdrawal_flow(withdrawal_id, '')
 
         w_obj = await server.get_withdrawal(withdrawal_id)
         assert w_obj.status == WithdrawalStatus.REJECTED, "Withdrawal should be REJECTED after reject call"

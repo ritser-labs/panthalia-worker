@@ -255,6 +255,9 @@ class WithdrawalRequest(Serializable):
     status = Column(Enum(WithdrawalStatus), nullable=False, default=WithdrawalStatus.PENDING)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+    payment_instructions = Column(Text, nullable=True)
+    payment_record = Column(Text, nullable=True)
+    rejection_reason = Column(Text, nullable=True)
 
     account = relationship("Account", back_populates="withdrawals")
 
