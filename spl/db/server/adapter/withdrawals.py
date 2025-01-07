@@ -80,11 +80,12 @@ class DBAdapterWithdrawalsMixin:
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
 
-    async def get_withdrawals_for_user(self, user_id: str) -> list[WithdrawalRequest]:
+    async def get_withdrawals_for_user(self) -> list[WithdrawalRequest]:
         """
         Return all withdrawals for a given user.
         """
         async with self.get_async_session() as session:
+            user_id = self.get_user_id()
             stmt = select(WithdrawalRequest).where(WithdrawalRequest.user_id == user_id)
             result = await session.execute(stmt)
             return result.scalars().all()
