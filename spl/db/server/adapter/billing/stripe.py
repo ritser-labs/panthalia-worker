@@ -253,13 +253,6 @@ class DBAdapterStripeBillingMixin:
                 status='pending'
             )
             session.add(new_dep)
-            await self.create_credit_transaction_for_user(
-                user_id=user_id,
-                amount=deposit_amount,
-                reason="1year_deposit",
-                txn_type=CreditTxnType.Add,
-                session=session
-            )
             await session.commit()
             await session.refresh(new_dep)
             logging.info(f"[create_stripe_deposit] Created deposit id={new_dep.id} for user={user_id}, amt={deposit_amount}")
