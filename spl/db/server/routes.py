@@ -377,7 +377,7 @@ app.route('/get_master_job_state', methods=['GET'], endpoint='get_master_job_sta
         entity_name='MasterJobState',
         method=db_adapter_server.get_master_job_state,
         params=['job_id'],
-        auth_method=AuthMethod.USER
+        auth_method=AuthMethod.KEY
     )
 )
 
@@ -385,7 +385,7 @@ app.route('/update_master_job_state', methods=['POST'], endpoint='update_master_
     create_post_route(
         method=db_adapter_server.update_master_job_state,
         required_keys=['job_id', 'new_state'],
-        auth_method=AuthMethod.USER
+        auth_method=AuthMethod.KEY
     )
 )
 
@@ -395,7 +395,7 @@ app.route('/get_sot_job_state', methods=['GET'], endpoint='get_sot_job_state_end
         entity_name='SOTJobState',
         method=db_adapter_server.get_sot_job_state,
         params=['job_id'],
-        auth_method=AuthMethod.USER
+        auth_method=AuthMethod.KEY
     )
 )
 
@@ -403,7 +403,7 @@ app.route('/update_sot_job_state', methods=['POST'], endpoint='update_sot_job_st
     create_post_route(
         method=db_adapter_server.update_sot_job_state,
         required_keys=['job_id', 'new_state'],
-        auth_method=AuthMethod.USER
+        auth_method=AuthMethod.KEY
     )
 )
 
