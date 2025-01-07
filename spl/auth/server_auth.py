@@ -121,7 +121,7 @@ def requires_user_auth(get_db_adapter, require_admin=False):
                 }
                     
             # Ensure the user account exists in the database
-            user_obj = await db_adapter.get_or_create_account(payload.get('sub'))
+            user_obj = await db_adapter.get_or_create_account(user_id)
             if require_admin and not user_obj.is_admin:
                 logger.error("User is not authorized")
                 return jsonify({'error': 'User is not authorized'}), 403
