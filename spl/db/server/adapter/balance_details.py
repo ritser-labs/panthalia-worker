@@ -148,7 +148,7 @@ class DBAdapterBalanceDetailsMixin:
             lhs = total_deposited - total_withdrawn
             rhs = sum_credits_and_earnings + total_platform_revenue
 
-            difference = lhs - rhs
+            difference = int(lhs - rhs)
             invariant_holds = False if difference > 0 else True
 
             return {
