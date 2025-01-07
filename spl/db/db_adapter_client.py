@@ -553,12 +553,3 @@ class DBAdapterClient:
             return []
         # parse list:
         return [self._deserialize(WithdrawalRequest, item) for item in response]
-
-    @typechecked
-    async def update_withdrawal_status(self, withdrawal_id: int, new_status: str) -> bool:
-        data = {
-            'withdrawal_id': withdrawal_id,
-            'new_status': new_status
-        }
-        resp = await self._authenticated_request('POST', '/update_withdrawal_status', data=data)
-        return 'success' in resp

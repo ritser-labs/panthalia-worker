@@ -64,7 +64,7 @@ async def verify_signature(db_adapter, message, signature):
         logger.error(f"Unexpected error during signature verification: {e}")
         return None
 
-def requires_user_auth(get_db_adapter):
+def requires_user_auth(get_db_adapter, require_admin=False):
     """
     Decorator to require user authentication via JWT or Ethereum signature.
 
@@ -91,15 +91,12 @@ def requires_user_auth(get_db_adapter):
                 token = authorization_header[len('Bearer '):]
                 try:
                     payload = verify_jwt(token)
+                    user_id = payload.get('sub')
                     g.user = {
-                        'user_id': payload.get('sub'),
+                        'user_id': user_id,
                         'token_payload': payload
                     }
-                    logger.debug(f"Authenticated via JWT: {g.user['user_id']}")
-
-                    # Ensure the user account exists in the database
-                    await db_adapter.get_or_create_account(payload.get('sub'))
-
+                    logger.debug(f"Authenticated via JWT: {user_id}")
                 except Exception as e:
                     logger.error(f"JWT verification failed: {e}")
                     return jsonify({'error': 'Invalid JWT token'}), 401
@@ -122,7 +119,13 @@ def requires_user_auth(get_db_adapter):
                 g.user = {
                     'user_id': user_id
                 }
-                logger.debug(f"Authenticated via signature: {g.user['user_id']}")
+                    
+            # Ensure the user account exists in the database
+            user_obj = await db_adapter.get_or_create_account(payload.get('sub'))
+            if require_admin and not user_obj.is_admin:
+                logger.error("User is not authorized")
+                return jsonify({'error': 'User is not authorized'}), 403
+            logger.debug(f"Authenticated via signature: {user_id}")
 
             return await f(*args, **kwargs)
         return wrapper

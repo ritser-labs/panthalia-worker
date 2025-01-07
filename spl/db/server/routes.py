@@ -21,6 +21,7 @@ class AuthMethod(Enum):
     NONE = 0
     USER = 1
     KEY = 2
+    ADMIN = 3
 
 def get_db_adapter():
     return db_adapter_server
@@ -33,6 +34,9 @@ def requires_auth(f):
 
 def requires_user_auth_with_adapter(f):
     return requires_user_auth(get_db_adapter)(f)
+
+def requires_admin_auth_with_adapter(f):
+    return requires_user_auth(get_db_adapter, True)(f)
 
 def handle_errors(f):
     @wraps(f)
@@ -199,7 +203,9 @@ def create_route(
             return jsonify({'error': str(e)}), 500
 
     # Apply any required auth
-    if auth_method == AuthMethod.USER:
+    if auth_method == AuthMethod.ADMIN:
+        handler = requires_admin_auth_with_adapter(handler)
+    elif auth_method == AuthMethod.USER:
         handler = requires_user_auth_with_adapter(handler)
     elif auth_method == AuthMethod.KEY:
         handler = requires_auth(handler)
@@ -412,27 +418,11 @@ app.route('/create_withdrawal', methods=['POST'], endpoint='create_withdrawal_en
         auth_method=AuthMethod.USER
     )
 )
-
-@app.route('/update_withdrawal_status', methods=['POST'])
-@require_json_keys('withdrawal_id', 'new_status')
-@handle_errors
-async def update_withdrawal_status():
-    data = await request.get_json()
-    withdrawal_id = data['withdrawal_id']
-    new_status_str = data['new_status']
-    # Convert string -> enum
-    try:
-        new_status = WithdrawalStatus[new_status_str.upper()]
-    except KeyError:
-        return jsonify({'error': f"Invalid withdrawal status: {new_status_str}"}), 400
-    await db_adapter_server.update_withdrawal_status(withdrawal_id, new_status)
-    return jsonify({'success': True}), 200
-
 app.route('/complete_withdrawal', methods=['POST'], endpoint='complete_withdrawal_endpoint')(
     create_post_route(
         db_adapter_server.complete_withdrawal_flow,  # The backend method
         ['withdrawal_id, payment_record'],                          # JSON keys required
-        auth_method=AuthMethod.KEY                              # Auth method
+        auth_method=AuthMethod.ADMIN                              # Auth method
     )
 )
 
@@ -440,7 +430,7 @@ app.route('/reject_withdrawal', methods=['POST'], endpoint='reject_withdrawal_en
     create_post_route(
         db_adapter_server.reject_withdrawal_flow,  # The new mixin method
         ['withdrawal_id', 'rejection_reason'],                        # required JSON key
-        auth_method=AuthMethod.KEY                # same admin-level auth as complete_withdrawal
+        auth_method=AuthMethod.ADMIN                # same admin-level auth as complete_withdrawal
     )
 )
 
@@ -449,7 +439,7 @@ app.route('/get_pending_withdrawals', methods=['GET'], endpoint='get_pending_wit
         entity_name='WithdrawalRequest',           # purely for clarity/logging
         method=db_adapter_server.get_pending_withdrawals,
         params=[],                                 # no query params needed
-        auth_method=AuthMethod.KEY                # or KEY, or NONE, as desired
+        auth_method=AuthMethod.ADMIN                # or KEY, or NONE, as desired
     )
 )
 

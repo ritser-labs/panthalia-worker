@@ -91,22 +91,6 @@ class DBAdapterWithdrawalsMixin:
             result = await session.execute(stmt)
             return result.scalars().all()
 
-    async def update_withdrawal_status(self, withdrawal_id: int, new_status: WithdrawalStatus):
-        """
-        For final 'approval' or 'rejection' steps.
-        """
-        async with self.get_async_session() as session:
-            stmt = select(WithdrawalRequest).where(WithdrawalRequest.id == withdrawal_id)
-            result = await session.execute(stmt)
-            withdrawal = result.scalar_one_or_none()
-            if not withdrawal:
-                raise ValueError(f"Withdrawal {withdrawal_id} not found.")
-
-            withdrawal.status = new_status
-            withdrawal.updated_at = datetime.utcnow()
-            session.add(withdrawal)
-            await session.commit()
-
     async def complete_withdrawal_flow(self, withdrawal_id: int, payment_record: str) -> bool:
         """
         Marks the withdrawal as FINALIZED, and charges the user's Earnings hold 

@@ -142,6 +142,7 @@ class Account(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, nullable=False, index=True)
     deposited_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+    is_admin = Column(Boolean, nullable=False, default=False)
 
     tasks = relationship("Task", back_populates="account")
     orders = relationship("Order", back_populates="account")
