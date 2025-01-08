@@ -16,7 +16,7 @@ DB_PERM_ID = 1
 async def launch_sot(db_adapter, job, deploy_type, db_url):
     logging.info(f"launch_sot")
     sot_wallet = generate_wallets(1)[0]
-    sot_id = await db_adapter.create_sot(job.id, None)
+    sot_id = await db_adapter.create_sot(job.id, sot_wallet['address'], None)
     
     if deploy_type == 'local':
         sot_url = f"http://localhost:{SOT_PRIVATE_PORT}"
@@ -55,11 +55,10 @@ async def launch_sot(db_adapter, job, deploy_type, db_url):
         exit(1)
     await db_adapter.update_sot(sot_id, sot_url)
     await db_adapter.update_job_sot_url(job.id, sot_url)
-    sot_db = await db_adapter.get_sot(job.id)
+    sot_db = await db_adapter.get_sot_by_job_id(job.id)
     sot_perm_id = sot_db.perm
     private_key_address = Account.from_key(args.private_key).address
     await db_adapter.create_perm(private_key_address, sot_perm_id)
-    await db_adapter.create_perm(sot_wallet['address'], DB_PERM_ID)
     return sot_db, sot_url
 
 async def launch_worker(db_adapter, job, deploy_type, subnet, db_url: str, sot_url: str, worker_key: str):

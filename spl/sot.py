@@ -40,9 +40,9 @@ def run():
 
     # Get SOT and job
     db_adapter = DBAdapterClient(args.db_url, args.private_key)
-    sot_db_obj = loop.run_until_complete(db_adapter.get_sot(args.sot_id))
+    sot_db_obj = loop.run_until_complete(db_adapter.sot_get_sot(args.sot_id))
     job_id = sot_db_obj.job_id
-    job_obj = loop.run_until_complete(db_adapter.get_job(job_id))
+    job_obj = loop.run_until_complete(db_adapter.sot_get_job(job_id))
     plugin_id = job_obj.plugin_id
     perm = sot_db_obj.perm
 

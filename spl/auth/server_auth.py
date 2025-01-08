@@ -10,6 +10,7 @@ import json
 import time
 
 from .jwt_verification import verify_jwt
+from ..models.enums import PermType
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,112 @@ def requires_user_auth(get_db_adapter, require_admin=False):
                 return jsonify({'error': 'User is not authorized'}), 403
             logger.debug(f"Authenticated via signature: {user_id}")
 
+            return await f(*args, **kwargs)
+        return wrapper
+    return decorator
+
+def requires_sot_auth(get_db_adapter):
+    def decorator(f):
+        @wraps(f)
+        async def wrapper(*args, **kwargs):
+            # 1) Check Authorization header
+            auth_header = request.headers.get("Authorization")
+            if not auth_header:
+                return jsonify({'error': 'Missing Authorization header'}), 401
+
+            # 2) Parse out <message>:<signature> from header
+            try:
+                message, signature = auth_header.rsplit(':', 1)
+            except ValueError:
+                return jsonify({'error': 'Invalid Authorization header format'}), 401
+
+            # 3) Check JSON in `message` => must have `timestamp` (avoid replay)
+            try:
+                msg_obj = json.loads(message)
+                timestamp = msg_obj.get('timestamp')
+                if not timestamp:
+                    return jsonify({'error': 'Missing timestamp in message'}), 400
+                if time.time() - timestamp > 10:
+                    return jsonify({'error': 'Message expired'}), 403
+            except:
+                return jsonify({'error': 'Invalid message JSON'}), 401
+
+            # 4) Recover address
+            defunct_msg = encode_defunct(text=message)
+            try:
+                recovered_address = Account.recover_message(defunct_msg, signature=signature)
+            except Exception:
+                return jsonify({'error': 'Signature invalid'}), 403
+
+            db_adapter = get_db_adapter()
+
+            # 5) Attempt to read job_id / sot_id from query OR from JSON body
+            job_id_str = request.args.get('job_id')
+            sot_id_str = request.args.get('sot_id')
+
+            if request.method == 'POST':
+                data = await request.get_json() or {}
+                # if the query param was missing, see if user supplied in JSON
+                if job_id_str is None and 'job_id' in data:
+                    job_id_str = str(data['job_id'])
+                if sot_id_str is None and 'sot_id' in data:
+                    sot_id_str = str(data['sot_id'])
+
+            # We’ll parse them carefully to ensure 0 or negative => invalid
+            job_id = None
+            if job_id_str is not None:
+                try:
+                    parsed = int(job_id_str)
+                    if parsed <= 0:
+                        return jsonify({'error': 'job_id must be a positive integer'}), 400
+                    job_id = parsed
+                except ValueError:
+                    return jsonify({'error': 'job_id must be an integer'}), 400
+
+            sot_id = None
+            if sot_id_str is not None:
+                try:
+                    parsed = int(sot_id_str)
+                    if parsed <= 0:
+                        return jsonify({'error': 'sot_id must be a positive integer'}), 400
+                    sot_id = parsed
+                except ValueError:
+                    return jsonify({'error': 'sot_id must be an integer'}), 400
+
+            # 6) Exactly one of {job_id, sot_id} must be specified
+            both = (job_id is not None) and (sot_id is not None)
+            none = (job_id is None) and (sot_id is None)
+            if both or none:
+                return jsonify({
+                    'error': 'Must supply exactly one: job_id OR sot_id (not both, not neither).'
+                }), 400
+
+            # 7) Fetch SoT object using whichever was provided
+            if job_id is not None:
+                sot_obj = await db_adapter.get_sot_by_job_id(job_id)
+                if not sot_obj:
+                    return jsonify({'error': 'No SoT found for this job_id'}), 404
+            else:
+                sot_obj = await db_adapter.get_sot(sot_id)
+                if not sot_obj:
+                    return jsonify({'error': 'No SoT found with this sot_id'}), 404
+
+            # 8) Check the SoT’s perm_description => must be type=ModifySot, etc.
+            perm_desc_id = sot_obj.perm
+            perm_desc = await db_adapter.get_perm_description(perm_desc_id)
+            if not perm_desc or perm_desc.perm_type != PermType.ModifySot:
+                return jsonify({'error': f'Not a ModifySot perm desc'}), 403
+
+            # also verify restricted_sot_id matches
+            if perm_desc.restricted_sot_id != sot_obj.id:
+                return jsonify({'error': 'Wrong SoT ID restriction'}), 403
+
+            # 9) Now see if recovered_address has a Perm row => (address, perm_desc_id)
+            p = await db_adapter.get_perm(recovered_address.lower(), perm_desc_id)
+            if not p:
+                return jsonify({'error': 'You do not hold the SOT perm'}), 403
+
+            # Optionally store g.sot = sot_obj, g.job_id = job_id, etc.
             return await f(*args, **kwargs)
         return wrapper
     return decorator

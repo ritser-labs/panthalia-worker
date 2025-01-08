@@ -11,7 +11,7 @@ import types
 
 from ...models import TaskStatus, PermType, ServiceType, WithdrawalStatus
 from ...auth.api_auth import requires_authentication
-from ...auth.server_auth import requires_user_auth
+from ...auth.server_auth import requires_user_auth, requires_sot_auth
 from ...util.enums import str_to_enum
 
 from .app import app, db_adapter, logger, get_perm_modify_db
@@ -22,6 +22,7 @@ class AuthMethod(Enum):
     USER = 1
     KEY = 2
     ADMIN = 3
+    SOT = 4
 
 def get_db_adapter():
     return db_adapter_server
@@ -37,6 +38,10 @@ def requires_user_auth_with_adapter(f):
 
 def requires_admin_auth_with_adapter(f):
     return requires_user_auth(get_db_adapter, True)(f)
+
+def requires_sot_auth_with_adapter(f):
+    return requires_sot_auth(get_db_adapter)(f)
+
 
 def handle_errors(f):
     @wraps(f)
@@ -209,6 +214,8 @@ def create_route(
         handler = requires_user_auth_with_adapter(handler)
     elif auth_method == AuthMethod.KEY:
         handler = requires_auth(handler)
+    elif auth_method == AuthMethod.SOT:
+        handler = requires_sot_auth_with_adapter(handler)
 
     # If it's a POST route, enforce required JSON keys if given
     if is_post:
@@ -274,11 +281,8 @@ app.route('/get_num_orders', methods=['GET'], endpoint='get_num_orders_endpoint'
 app.route('/get_perm', methods=['GET'], endpoint='get_perm_endpoint')(
     create_get_route('Permission', db_adapter_server.get_perm, ['address','perm'])
 )
-app.route('/get_sot', methods=['GET'], endpoint='get_sot_endpoint')(
-    create_get_route('SOT', db_adapter_server.get_sot, ['id'])
-)
 app.route('/get_sot_by_job_id', methods=['GET'], endpoint='get_sot_by_job_id_endpoint')(
-    create_get_route('SOT', db_adapter_server.get_sot_by_job_id, ['job_id'])
+    create_get_route('SOT', db_adapter_server.get_sot_by_job_id, ['job_id'], auth_method=AuthMethod.KEY)
 )
 app.route('/get_instance_by_service_type', methods=['GET'], endpoint='get_instance_by_service_type_endpoint')(
     create_get_route('Instance', db_adapter_server.get_instance_by_service_type, ['service_type','job_id'])
@@ -390,20 +394,38 @@ app.route('/update_master_job_state', methods=['POST'], endpoint='update_master_
 )
 
 # SOT:
-app.route('/get_sot_job_state', methods=['GET'], endpoint='get_sot_job_state_endpoint')(
+app.route('/sot/get_job_state', methods=['GET'], endpoint='sot_get_job_state_endpoint')(
     create_get_route(
         entity_name='SOTJobState',
         method=db_adapter_server.get_sot_job_state,
         params=['job_id'],
-        auth_method=AuthMethod.KEY
+        auth_method=AuthMethod.SOT
     )
 )
 
-app.route('/update_sot_job_state', methods=['POST'], endpoint='update_sot_job_state_endpoint')(
+app.route('/sot/update_job_state', methods=['POST'], endpoint='sot_update_job_state_endpoint')(
     create_post_route(
         method=db_adapter_server.update_sot_job_state,
         required_keys=['job_id', 'new_state'],
-        auth_method=AuthMethod.KEY
+        auth_method=AuthMethod.SOT
+    )
+)
+
+app.route('/sot/get_job', methods=['GET'], endpoint='sot_get_job_endpoint')(
+    create_get_route(
+        entity_name='Job',
+        method=db_adapter_server.get_job,
+        params=['job_id'],
+        auth_method=AuthMethod.SOT
+    )
+)
+
+app.route('/sot/get_sot', methods=['GET'], endpoint='sot_get_sot_endpoint')(
+    create_get_route(
+        entity_name='SOT',
+        method=db_adapter_server.get_sot,
+        params=['sot_id'],
+        auth_method=AuthMethod.SOT
     )
 )
 
@@ -474,7 +496,7 @@ app.route('/create_perm', methods=['POST'], endpoint='create_perm_endpoint')(
     create_post_route_return_id(db_adapter_server.create_perm, ['address', 'perm'], 'perm_id')
 )
 app.route('/create_perm_description', methods=['POST'], endpoint='create_perm_description_endpoint')(
-    create_post_route_return_id(db_adapter_server.create_perm_description, ['perm_type'], 'perm_description_id')
+    create_post_route_return_id(db_adapter_server.create_perm_description, ['perm_type', 'restricted_sot_id'], 'perm_description_id')
 )
 app.route('/create_task', methods=['POST'], endpoint='create_task_endpoint')(
     create_post_route_return_id(
@@ -543,7 +565,7 @@ app.route('/create_instance', methods=['POST'], endpoint='create_instance_endpoi
     create_post_route_return_id(db_adapter_server.create_instance, ['name', 'service_type', 'job_id', 'private_key', 'pod_id', 'process_id'], 'instance_id')
 )
 app.route('/create_sot', methods=['POST'], endpoint='create_sot_endpoint')(
-    create_post_route_return_id(db_adapter_server.create_sot, ['job_id', 'url'], 'sot_id')
+    create_post_route_return_id(db_adapter_server.create_sot, ['job_id', 'address', 'url'], 'sot_id')
 )
 
 app.route('/get_balance', methods=['GET'], endpoint='get_balance_endpoint')(

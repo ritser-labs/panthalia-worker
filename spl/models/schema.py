@@ -68,7 +68,7 @@ class Job(TimestampMixin, Serializable):
     instances = relationship("Instance", back_populates="job")
     tasks = relationship("Task", back_populates="job")
     state_updates = relationship("StateUpdate", back_populates="job")
-    sots = relationship("Sot", back_populates="job")
+    sot = relationship("Sot", back_populates="job", uselist=False)
 
 class Task(TimestampMixin, Serializable):
     __tablename__ = 'tasks'
@@ -109,6 +109,7 @@ class PermDescription(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     perm_type = Column(Enum(PermType), nullable=False)
     perms = relationship("Perm", back_populates="perm_description")
+    restricted_sot_id = Column(Integer, nullable=True)
 
 class Perm(Serializable):
     __tablename__ = 'perms'
@@ -121,10 +122,10 @@ class Perm(Serializable):
 class Sot(Serializable):
     __tablename__ = 'sots'
     id = Column(Integer, primary_key=True, index=True)
-    job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
+    job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False, unique=True)
     perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
     url = Column(String)
-    job = relationship("Job", back_populates="sots")
+    job = relationship("Job", back_populates="sot")
 
 class Instance(Serializable):
     __tablename__ = 'instances'

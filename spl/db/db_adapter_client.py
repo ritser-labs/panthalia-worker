@@ -43,27 +43,60 @@ class DBAdapterClient:
         signed_message = account.sign_message(message_defunct)
         return signed_message.signature.hex()
 
-    async def _authenticated_request(self, method: str, endpoint: str, data: Optional[dict] = None, params: Optional[dict] = None) -> Dict[str, Any]:
+    async def _authenticated_request(
+        self, 
+        method: str, 
+        endpoint: str, 
+        data: Optional[dict] = None, 
+        params: Optional[dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Sends an HTTP request with optional JSON `data` and `params`, adding a
+        signature header if self.private_key is set. If the server returns an
+        error status (>=400), logs status + body, and returns them in a dict.
+        """
         url = f"{self.base_url}{endpoint}"
         headers = {}
 
+        # If we have a private key, generate & sign a message
         if self.private_key:
             message = self._generate_message(endpoint, data)
             signature = self._sign_message(message)
-            headers = {"Authorization": f"{message}:{signature}"}
+            if signature:
+                headers["Authorization"] = f"{message}:{signature}"
 
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.request(method, url, json=data, params=params, headers=headers) as response:
-                    response.raise_for_status()
+                async with session.request(
+                    method, url, json=data, params=params, headers=headers
+                ) as response:
+                    # Check for HTTP error codes explicitly
+                    if response.status >= 400:
+                        body_text = await response.text()
+                        logger.error(
+                            "Request to %s failed: status=%s, body=%s",
+                            url, response.status, body_text
+                        )
+                        return {
+                            "error": f"HTTP {response.status}",
+                            "details": body_text
+                        }
+
+                    # Otherwise parse as JSON
                     json_response = await response.json()
                     if not isinstance(json_response, (dict, list)):
-                        logger.error(f"Unexpected response format from {url}: {json_response}")
-                        return {'error': 'Unexpected response format'}
+                        logger.error(
+                            "Unexpected response format from %s: %s",
+                            url, json_response
+                        )
+                        return {"error": "Unexpected response format"}
                     return json_response
+
             except aiohttp.ClientError as e:
-                logger.error(f"Request to {url} failed: {e}")
-                return {'error': str(e)}
+                # This catches network issues, DNS failures, timeouts, etc.
+                logger.error("Request to %s failed: %s", url, e)
+                return {"error": str(e)}
+
 
     def _extract_id(self, response: Dict[str, Any], id_key: str) -> Optional[int]:
         if 'error' in response:
@@ -343,9 +376,10 @@ class DBAdapterClient:
         return self._extract_id(response, 'perm_id')
 
     @typechecked
-    async def create_perm_description(self, perm_type: str) -> Optional[int]:
+    async def create_perm_description(self, perm_type: str, restricted_sot_id: Optional[int] = None) -> Optional[int]:
         data = {
             'perm_type': perm_type,
+            'restricted_sot_id': restricted_sot_id
         }
         response = await self._authenticated_request('POST', '/create_perm_description', data=data)
         return self._extract_id(response, 'perm_description_id')
@@ -361,17 +395,14 @@ class DBAdapterClient:
         return isinstance(response, dict) and 'perm' in response
 
     @typechecked
-    async def get_sot(self, sot_id: int) -> Optional[Sot]:
-        return await self._fetch_entity('/get_sot', Sot, params={'id': sot_id})
-
-    @typechecked
     async def get_sot_by_job_id(self, job_id: int) -> Optional[Sot]:
         return await self._fetch_entity('/get_sot_by_job_id', Sot, params={'job_id': job_id})
 
     @typechecked
-    async def create_sot(self, job_id: int, url: str | None) -> Optional[int]:
+    async def create_sot(self, job_id: int, address: str | None, url: str | None) -> Optional[int]:
         data = {
             'job_id': job_id,
+            'address': address,
             'url': url
         }
         response = await self._authenticated_request('POST', '/create_sot', data=data)
@@ -478,7 +509,7 @@ class DBAdapterClient:
         Fetch the sot_state_json from /get_sot_job_state
         """
         params = {'job_id': str(job_id)}
-        response = await self._authenticated_request('GET', '/get_sot_job_state', params=params)
+        response = await self._authenticated_request('GET', '/sot/get_job_state', params=params)
         if 'error' in response:
             logger.error(f"get_sot_state_for_job => error: {response['error']}")
             return {}
@@ -495,11 +526,19 @@ class DBAdapterClient:
             'job_id': job_id,
             'new_state': new_state
         }
-        response = await self._authenticated_request('POST', '/update_sot_job_state', data=data)
+        response = await self._authenticated_request('POST', '/sot/update_job_state', data=data)
         if 'error' in response:
             logger.error(f"update_sot_state_for_job => error: {response['error']}")
             return False
         return True
+    
+    @typechecked
+    async def sot_get_job(self, job_id: int) -> Optional[Job]:
+        return await self._fetch_entity('/sot/get_job', Job, params={'job_id': job_id})
+    
+    @typechecked
+    async def sot_get_sot(self, sot_id: int) -> Optional[Sot]:
+        return await self._fetch_entity('/sot/get_sot', Sot, params={'sot_id': sot_id})
 
     # Internal helper for retrieving single entity
     async def _fetch_entity(self, endpoint: str, model_cls: Type[T], data: Optional[dict] = None, params: Optional[dict] = None) -> Optional[T]:

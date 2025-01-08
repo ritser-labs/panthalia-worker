@@ -113,7 +113,7 @@ class DBAdapterJobsPluginsMixin:
 
             job.master_state_json = new_state
             await session.commit()
-            return True
+            return {'success': True}
 
     async def get_sot_job_state(self, job_id: int) -> dict:
         """
@@ -140,7 +140,7 @@ class DBAdapterJobsPluginsMixin:
 
             job.sot_state_json = new_state
             await session.commit()
-            return True
+            return {'success': True}
 
     async def update_job_active(self, job_id: int, new_active: bool):
         async with self.get_async_session() as session:
