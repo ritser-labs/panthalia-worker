@@ -25,6 +25,9 @@ from ..db.db_adapter_client import DBAdapterClient
 from ..util.docker import janky_url_replace
 from .sot_adapter import BaseSOTAdapter
 
+# We import download_file so we can retrieve job.initial_state_url if present
+from ..common import download_file
+
 class DefaultSOTAdapter(BaseSOTAdapter):
     def __init__(self, model_adapter, dataset, state_dir, tensor_version_interval, hyperparams_getter=None):
         self.initialized = False
@@ -52,6 +55,11 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         self.app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 * 1024  # 1 TB
 
     async def initialize(self, sot_id, db_url, private_key, job_id, perm_db, port):
+        """
+        Called once by the SOT side, passing relevant configuration (SOT ID, DB URL,
+        private key, job ID, etc.). We'll optionally load an initial model from
+        job.initial_state_url if it's non-empty.
+        """
         self.sot_id = sot_id
         self.db_url = janky_url_replace(db_url)
         self.private_key = private_key
@@ -59,11 +67,40 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         self.perm_db = perm_db
         self.db_adapter = DBAdapterClient(self.db_url, self.private_key)
 
-        # We won't use local JSON locks for final storage; we'll store everything in DB.
         self.file_locks = {}
         self.update_timestamp_lock = asyncio.Lock()
 
-        # Actually run init for e.g. model_0.pt if not present
+        # --------------------------------------------------------------
+        # 1) Check if job.initial_state_url is set; if so, download it
+        # --------------------------------------------------------------
+        job_obj = await self.db_adapter.sot_get_job(self.job_id)
+        if job_obj and job_obj.initial_state_url and job_obj.initial_state_url.strip():
+            init_url = job_obj.initial_state_url.strip()
+            logging.info(f"[DefaultSOTAdapter.initialize] Found non-empty initial_state_url => {init_url}")
+
+            local_path = os.path.join(self.base_dir, "model_0.pt")
+            if not os.path.exists(local_path):
+                logging.info(f"Downloading initial state from {init_url} to {local_path}...")
+                try:
+                    # We’ll store the initial model as model_0.pt so that
+                    # initialize_all_tensors(...) sees that 0 is already present
+                    await download_file(
+                        init_url,
+                        local_file_path=local_path,
+                        download_type='tensor',
+                        chunk_timeout=10
+                    )
+                    logging.info("Initial model downloaded successfully.")
+                except Exception as e:
+                    logging.error(f"Failed to download initial_state_url: {e}", exc_info=True)
+            else:
+                logging.info("Model 0 already exists locally, skipping re-download.")
+        else:
+            logging.info("[DefaultSOTAdapter.initialize] job.initial_state_url is empty or None. Using default init flow.")
+
+        # --------------------------------------------------------------
+        # 2) Actually run init for e.g. model_0.pt if not present
+        # --------------------------------------------------------------
         await initialize_all_tensors(
             self.base_dir,
             self.tensor_version_interval,
@@ -72,7 +109,9 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             file_locks=self.file_locks
         )
 
-        # Start dataset
+        # --------------------------------------------------------------
+        # 3) Start dataset, set flag as initialized
+        # --------------------------------------------------------------
         await self.dataset.initialize_dataset()
         self.initialized = True
 
@@ -85,7 +124,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         ################################################################
         # ROUTES
         ################################################################
-
         @self.app.route('/health', methods=['GET'])
         async def health_check():
             return jsonify({'status': 'healthy'}), 200
@@ -287,7 +325,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             if not tensor_name:
                 return jsonify({'error': 'Missing tensor_name parameter'}), 400
 
-            # *** ADDED LOG ***
             logging.debug(f"[/current_timestamp] Using self.job_id={self.job_id} for DB calls")
 
             state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)

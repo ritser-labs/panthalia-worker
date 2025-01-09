@@ -479,7 +479,7 @@ app.route('/get_withdrawals_for_user', methods=['GET'], endpoint='get_withdrawal
 app.route('/create_job', methods=['POST'], endpoint='create_job_endpoint')(
     create_post_route_return_id(
         db_adapter_server.create_job,
-        ['name', 'plugin_id', 'subnet_id', 'sot_url', 'iteration'],
+        ['name', 'plugin_id', 'subnet_id', 'sot_url', 'iteration', 'initial_state_url'],
         'job_id',
         auth_method=AuthMethod.USER
     )

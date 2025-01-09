@@ -9,7 +9,7 @@ from sqlalchemy.orm import joinedload
 logger = logging.getLogger(__name__)
 
 class DBAdapterJobsPluginsMixin:
-    async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int):
+    async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int, initial_state_url: str):
         async with self.get_async_session() as session:
             new_job = Job(
                 name=name,
@@ -18,7 +18,8 @@ class DBAdapterJobsPluginsMixin:
                 user_id=self.get_user_id(),
                 sot_url=sot_url,
                 iteration=iteration,
-                done=False
+                done=False,
+                initial_state_url=initial_state_url
             )
             session.add(new_job)
             await session.commit()
