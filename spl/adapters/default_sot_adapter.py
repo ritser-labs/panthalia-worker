@@ -10,7 +10,11 @@ import torch
 from quart import Quart, request, jsonify, make_response, send_from_directory
 
 from ..auth.api_auth import requires_authentication
-from ..common import get_future_version_number, TENSOR_NAME
+from ..common import (
+    get_future_version_number,
+    TENSOR_NAME,               # <-- We now exclusively use the constant TENSOR_NAME
+    download_file
+)
 from ..device import device
 from ..util.sot import (
     version_number_exists,
@@ -24,9 +28,6 @@ from ..util.sot import (
 from ..db.db_adapter_client import DBAdapterClient
 from ..util.docker import janky_url_replace
 from .sot_adapter import BaseSOTAdapter
-
-# We import download_file so we can retrieve job.initial_state_url if present
-from ..common import download_file
 
 class DefaultSOTAdapter(BaseSOTAdapter):
     def __init__(self, model_adapter, dataset, state_dir, tensor_version_interval, hyperparams_getter=None):
@@ -57,8 +58,9 @@ class DefaultSOTAdapter(BaseSOTAdapter):
     async def initialize(self, sot_id, db_url, private_key, job_id, perm_db, port):
         """
         Called once by the SOT side, passing relevant configuration (SOT ID, DB URL,
-        private key, job ID, etc.). We'll optionally load an initial model from
-        job.initial_state_url if it's non-empty.
+        private key, job ID, permission info, etc.). We'll optionally load an initial
+        model from job.initial_state_url if set. Then we initialize the dataset,
+        create routes, and run the app's event loop.
         """
         self.sot_id = sot_id
         self.db_url = janky_url_replace(db_url)
@@ -70,9 +72,9 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         self.file_locks = {}
         self.update_timestamp_lock = asyncio.Lock()
 
-        # --------------------------------------------------------------
-        # 1) Check if job.initial_state_url is set; if so, download it
-        # --------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 1) Check if job.initial_state_url is set; if so, download it once.
+        # -----------------------------------------------------------------
         job_obj = await self.db_adapter.sot_get_job(self.job_id)
         if job_obj and job_obj.initial_state_url and job_obj.initial_state_url.strip():
             init_url = job_obj.initial_state_url.strip()
@@ -82,8 +84,8 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             if not os.path.exists(local_path):
                 logging.info(f"Downloading initial state from {init_url} to {local_path}...")
                 try:
-                    # We’ll store the initial model as model_0.pt so that
-                    # initialize_all_tensors(...) sees that 0 is already present
+                    # We store the initial model as model_0.pt so that
+                    # initialize_all_tensors(...) sees version 0 is already present
                     await download_file(
                         init_url,
                         local_file_path=local_path,
@@ -98,9 +100,9 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         else:
             logging.info("[DefaultSOTAdapter.initialize] job.initial_state_url is empty or None. Using default init flow.")
 
-        # --------------------------------------------------------------
-        # 2) Actually run init for e.g. model_0.pt if not present
-        # --------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 2) Actually run init for model_0.pt if not present
+        # -----------------------------------------------------------------
         await initialize_all_tensors(
             self.base_dir,
             self.tensor_version_interval,
@@ -109,9 +111,9 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             file_locks=self.file_locks
         )
 
-        # --------------------------------------------------------------
+        # -----------------------------------------------------------------
         # 3) Start dataset, set flag as initialized
-        # --------------------------------------------------------------
+        # -----------------------------------------------------------------
         await self.dataset.initialize_dataset()
         self.initialized = True
 
@@ -121,9 +123,9 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         from ..auth.api_auth import requires_authentication
         requires_auth = requires_authentication(db_adapter_lambda, perm_db_lambda)
 
-        ################################################################
+        ####################################################################
         # ROUTES
-        ################################################################
+        ####################################################################
         @self.app.route('/health', methods=['GET'])
         async def health_check():
             return jsonify({'status': 'healthy'}), 200
@@ -159,7 +161,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             batch_tensor = torch.stack(inputs)
             targets_tensor = torch.stack(targets)
 
-            # Save combined
             timestamp = int(time.time())
             random_suffix = random.randint(1000, 9999)
             combined_filename = f'input_{timestamp}_{random_suffix}.pt'
@@ -177,14 +178,26 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         @self.app.route('/update_state', methods=['POST'])
         @requires_auth
         async def update_state():
+            """
+            This endpoint no longer reads `tensor_name` from the client:
+            we always use TENSOR_NAME from spl.common.
+            """
             logging.info("Accessing /update_state endpoint")
             data = await request.get_json()
-            tensor_name = data.get('tensor_name')
-            result_url = data.get('result_url')
 
-            if not tensor_name or not result_url:
-                logging.error("Missing tensor_name or result_url in /update_state")
-                return jsonify({'error': 'Missing tensor_name or result_url'}), 400
+            # We no longer parse or require `tensor_name`.
+            # Instead, we always use TENSOR_NAME.
+            tensor_name = TENSOR_NAME
+
+            result_url = data.get('result_url')
+            if not result_url:
+                logging.error("Missing result_url in /update_state")
+                return jsonify({'error': 'Missing result_url'}), 400
+
+            version_number = data.get('version_number')
+            if version_number is None:
+                logging.error("Missing version_number in /update_state")
+                return jsonify({'error': 'Missing version_number'}), 400
 
             state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             block_timestamps = state_data.get("block_timestamps", {})
@@ -192,13 +205,11 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             last_future_version_number = state_data.get("last_future_version_number", {})
             iteration_number = state_data.get("iteration_number", {})
 
-            future_version_number = get_future_version_number(self.tensor_version_interval)
             current_version_number = block_timestamps.get(tensor_name, 0)
-
-            if data['version_number'] != current_version_number:
+            if version_number != current_version_number:
                 return jsonify({'error': 'Version number mismatch'}), 409
 
-            local_file_path = get_local_file_path(data.get('result_url'), request, self.base_dir)
+            local_file_path = get_local_file_path(result_url, request, self.base_dir)
             input_url = data.get('input_url')
             local_input_path = get_local_file_path(input_url, request, self.base_dir)
             try:
@@ -214,6 +225,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             tensor = torch.load(local_file_path, map_location=device)
 
             # Accumulate grads
+            future_version_number = get_future_version_number(self.tensor_version_interval)
             grads_path = os.path.join(
                 self.base_dir,
                 f'accumulated_grads_{tensor_name}_{future_version_number}.pt'
@@ -287,10 +299,12 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         @self.app.route('/latest_state', methods=['GET'])
         async def latest_state():
+            """
+            This endpoint no longer checks 'tensor_name' as a GET param: 
+            we always use TENSOR_NAME from spl.common.
+            """
             logging.info("Accessing /latest_state endpoint")
-            tensor_name = request.args.get('tensor_name')
-            if not tensor_name:
-                return jsonify({'error': 'Missing tensor_name parameter'}), 400
+            tensor_name = TENSOR_NAME
 
             state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             block_timestamps = state_data.get("block_timestamps", {})
@@ -320,12 +334,11 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         @self.app.route('/current_timestamp', methods=['POST'])
         async def current_timestamp():
+            """
+            We always rely on TENSOR_NAME from spl.common for the current tensor name.
+            """
             logging.info("Accessing /current_timestamp endpoint")
-            tensor_name = request.args.get('tensor_name')
-            if not tensor_name:
-                return jsonify({'error': 'Missing tensor_name parameter'}), 400
-
-            logging.debug(f"[/current_timestamp] Using self.job_id={self.job_id} for DB calls")
+            tensor_name = TENSOR_NAME
 
             state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             block_timestamps = state_data.get("block_timestamps", {})
@@ -370,10 +383,12 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         @self.app.route('/tensor_size', methods=['GET'])
         async def get_tensor_size():
+            """
+            We no longer parse 'tensor_name' from the request:
+            we always use TENSOR_NAME from spl.common.
+            """
             logging.info("Accessing /tensor_size endpoint")
-            tensor_name = request.args.get('tensor_name')
-            if not tensor_name:
-                return jsonify({'error': 'Missing tensor_name parameter'}), 400
+            tensor_name = TENSOR_NAME
 
             file_path = os.path.join(self.base_dir, f'{tensor_name}.pt')
             if not os.path.exists(file_path):
@@ -402,6 +417,10 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         @self.app.route('/upload_tensor', methods=['POST'])
         async def upload_tensor():
+            """
+            Legacy endpoint for direct file upload (e.g. debugging).
+            Does not rely on 'tensor_name' from the request.
+            """
             request_files = await request.files
             if 'tensor' not in request_files:
                 return jsonify({'error': 'No tensor file provided'}), 400
