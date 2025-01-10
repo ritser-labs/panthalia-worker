@@ -5,7 +5,6 @@ from sqlalchemy import select, update
 from ....models import Job, Plugin, Subnet, Task, TaskStatus
 from sqlalchemy.orm import joinedload
 
-
 logger = logging.getLogger(__name__)
 
 class DBAdapterJobsPluginsMixin:
@@ -144,13 +143,22 @@ class DBAdapterJobsPluginsMixin:
             return {'success': True}
 
     async def update_job_active(self, job_id: int, new_active: bool):
+        """
+        Overwrite job.active. If new_active=True, also set job.queued=True
+        and assigned_master_id=None so the Master will pick it up.
+        """
         async with self.get_async_session() as session:
-            stmt = (
-                update(Job)
-                .where(Job.id == job_id)
-                .values(active=new_active)
-            )
-            await session.execute(stmt)
+            job = await session.get(Job, job_id)
+            if not job:
+                logger.warning(f"[update_job_active] job_id={job_id} not found.")
+                return
+
+            job.active = new_active
+            if new_active:
+                # <--- This is the crucial fix so Master sees the job
+                job.queued = True
+                job.assigned_master_id = None
+
             await session.commit()
 
         # If we set the job to inactive, also set any SOT for that job to inactive:
@@ -158,7 +166,7 @@ class DBAdapterJobsPluginsMixin:
             sot = await self.get_sot_by_job_id(job_id)
             if sot and sot.active:  # Only if it's currently active
                 await self.update_sot_active(sot.id, False)
-    
+
     async def get_jobs_in_progress(self):
         """
         Returns all jobs that are EITHER:
@@ -175,15 +183,11 @@ class DBAdapterJobsPluginsMixin:
                 TaskStatus.SanityCheckPending
             ]
             
-            # We do a LEFT JOIN on Task. If job is active OR there's at least one unresolved task => included
-            # Note: Using a subquery or a distinct approach is typical. Example below is fairly direct:
-            
             stmt = (
                 select(Job)
                 .outerjoin(Task, Task.job_id == Job.id)
                 .options(joinedload(Job.tasks))  # optional, if you want tasks preloaded
                 .where(
-                    # job.active==True OR (some tasks with 'unresolved' statuses)
                     (Job.active == True) |
                     (Task.status.in_(unresolved_statuses))
                 )
@@ -191,4 +195,86 @@ class DBAdapterJobsPluginsMixin:
             )
             result = await session.execute(stmt)
             jobs = result.scalars().unique().all()
+            return jobs
+
+    async def update_job_queue_status(self, job_id: int, new_queued: bool, assigned_master_id: str | None) -> bool:
+        """
+        Set job.queued = new_queued, job.assigned_master_id = assigned_master_id
+        (or clear it if assigned_master_id is None).
+        """
+        async with self.get_async_session() as session:
+            job = await session.get(Job, job_id)
+            if not job:
+                logger.warning(f"[update_job_queue_status] job_id={job_id} not found.")
+                return False
+
+            job.queued = new_queued
+            job.assigned_master_id = assigned_master_id  # may be None
+            await session.commit()
+            return True
+
+    async def get_unassigned_queued_jobs(self):
+        """
+        Return all jobs where queued==True and assigned_master_id==None
+        """
+        async with self.get_async_session() as session:
+            stmt = (
+                select(Job)
+                .where(Job.queued == True)
+                .where(Job.assigned_master_id == None)
+            )
+            result = await session.execute(stmt)
+            jobs = result.scalars().all()
+            return jobs
+
+    async def get_jobs_assigned_to_master(self, master_id: str):
+        """
+        Return all jobs assigned to master_id, regardless of queued or not.
+        Usually we only care about those that are still active or partially done.
+        """
+        async with self.get_async_session() as session:
+            stmt = (
+                select(Job)
+                .where(Job.assigned_master_id == master_id)
+            )
+            result = await session.execute(stmt)
+            jobs = result.scalars().all()
+            return jobs
+
+    # The following placeholders assume you have update_sot_active or get_sot_by_job_id, etc.
+    async def update_sot_active(self, sot_id: int, new_active: bool):
+        """
+        If you have a separate 'active' field for SOT, you'd do it here.
+        For now, we just log a placeholder.
+        """
+        # Example placeholder
+        logger.info(f"[update_sot_active] Setting SOT {sot_id} active={new_active} (Not fully implemented)")
+
+    async def get_sot_by_job_id(self, job_id: int):
+        async with self.get_async_session() as session:
+            from ....models import Sot
+            stmt = select(Sot).filter_by(job_id=job_id)
+            result = await session.execute(stmt)
+            sot = result.scalar_one_or_none()
+            return sot
+
+    async def get_unassigned_unqueued_active_jobs(self):
+        """
+        Return all jobs with:
+          - active == True
+          - assigned_master_id IS NULL
+          - queued == False
+        We'll use this to auto-set them queued=True so the Master can pick them up.
+        """
+        async with self.get_async_session() as session:
+            stmt = (
+                select(Job)
+                .where(
+                    Job.active == True,
+                    Job.queued == False,
+                    Job.assigned_master_id.is_(None)
+                )
+            )
+            result = await session.execute(stmt)
+            jobs = result.scalars().all()
             return jobs

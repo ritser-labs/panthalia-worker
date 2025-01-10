@@ -160,7 +160,6 @@ class DBAdapterClient:
         if 'error' in response:
             logger.error(response['error'])
             return None
-        # each item is a job dict => deserialize
         return [self._deserialize(Job, job_dict) for job_dict in response]
 
     @typechecked
@@ -593,3 +592,58 @@ class DBAdapterClient:
             return []
         # parse list:
         return [self._deserialize(WithdrawalRequest, item) for item in response]
+
+    # job queue management
+
+    @typechecked
+    async def update_job_queue_status(
+        self,
+        job_id: int,
+        new_queued: bool,
+        assigned_master_id: Optional[str] = None
+    ) -> bool:
+        """
+        POST /update_job_queue_status
+
+        ★ FIXED: We post 'new_queued' instead of 'queued', to match the route's required_keys. ★
+        """
+        data = {
+            'job_id': job_id,
+            'new_queued': new_queued,           # <-- changed here from 'queued': new_queued
+            'assigned_master_id': assigned_master_id
+        }
+        response = await self._authenticated_request('POST', '/update_job_queue_status', data=data)
+        return 'success' in response
+
+    @typechecked
+    async def get_unassigned_queued_jobs(self) -> Optional[List[Job]]:
+        response = await self._authenticated_request('GET', '/get_unassigned_queued_jobs')
+        if 'error' in response:
+            logger.error(response['error'])
+            return None
+        if isinstance(response, list):
+            return [self._deserialize(Job, job_dict) for job_dict in response]
+        else:
+            return []
+
+    @typechecked
+    async def get_jobs_assigned_to_master(self, master_id: str) -> Optional[List[Job]]:
+        params = {'master_id': master_id}
+        response = await self._authenticated_request('GET', '/get_jobs_assigned_to_master', params=params)
+        if 'error' in response:
+            logger.error(response['error'])
+            return None
+        if isinstance(response, list):
+            return [self._deserialize(Job, job_dict) for job_dict in response]
+        else:
+            return []
+    
+    @typechecked
+    async def get_unassigned_unqueued_active_jobs(self) -> Optional[List[Job]]:
+        response = await self._authenticated_request('GET', '/get_unassigned_unqueued_active_jobs')
+        if 'error' in response:
+            logger.error(response['error'])
+            return None
+        if isinstance(response, list):
+            return [self._deserialize(Job, job_dict) for job_dict in response]
+        return []

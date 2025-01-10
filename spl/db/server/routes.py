@@ -442,26 +442,26 @@ app.route('/create_withdrawal', methods=['POST'], endpoint='create_withdrawal_en
 )
 app.route('/complete_withdrawal', methods=['POST'], endpoint='complete_withdrawal_endpoint')(
     create_post_route(
-        db_adapter_server.complete_withdrawal_flow,  # The backend method
-        ['withdrawal_id, payment_record'],                          # JSON keys required
-        auth_method=AuthMethod.ADMIN                              # Auth method
+        db_adapter_server.complete_withdrawal_flow,
+        ['withdrawal_id', 'payment_record'],
+        auth_method=AuthMethod.ADMIN
     )
 )
 
 app.route('/reject_withdrawal', methods=['POST'], endpoint='reject_withdrawal_endpoint')(
     create_post_route(
-        db_adapter_server.reject_withdrawal_flow,  # The new mixin method
-        ['withdrawal_id', 'rejection_reason'],                        # required JSON key
-        auth_method=AuthMethod.ADMIN                # same admin-level auth as complete_withdrawal
+        db_adapter_server.reject_withdrawal_flow,
+        ['withdrawal_id', 'rejection_reason'],
+        auth_method=AuthMethod.ADMIN
     )
 )
 
 app.route('/get_pending_withdrawals', methods=['GET'], endpoint='get_pending_withdrawals_endpoint')(
     create_get_route(
-        entity_name='WithdrawalRequest',           # purely for clarity/logging
+        entity_name='WithdrawalRequest',
         method=db_adapter_server.get_pending_withdrawals,
-        params=[],                                 # no query params needed
-        auth_method=AuthMethod.ADMIN                # or KEY, or NONE, as desired
+        params=[],
+        auth_method=AuthMethod.ADMIN
     )
 )
 
@@ -605,6 +605,7 @@ app.route('/finalize_sanity_check', methods=['POST'], endpoint='finalize_sanity_
     create_post_route(db_adapter_server.finalize_sanity_check, ['task_id', 'is_valid'], 'success')
 )
 
+
 @app.route('/update_job_active', methods=['POST'], endpoint='update_job_active_endpoint')
 @require_json_keys('job_id', 'new_active')
 @handle_errors
@@ -646,7 +647,54 @@ app.route('/debug_invariant', methods=['GET'], endpoint='debug_invariant_endpoin
     create_get_route(
         entity_name='InvariantResult',
         method=db_adapter_server.check_invariant, 
-        params=[],            # no query params needed
-        auth_method=AuthMethod.NONE  # or AuthMethod.USER/KEY if you want
+        params=[],
+        auth_method=AuthMethod.NONE
+    )
+)
+
+
+#
+# POST /update_job_queue_status
+#
+# ★ FIXED: We now expect "new_queued" instead of "queued" to match the client code. ★
+#
+app.route('/update_job_queue_status', methods=['POST'], endpoint='update_job_queue_status_endpoint')(
+    create_post_route(
+        method=db_adapter_server.update_job_queue_status,
+        required_keys=['job_id', 'new_queued', 'assigned_master_id'],  # <-- changed from 'queued' to 'new_queued'
+        auth_method=AuthMethod.KEY
+    )
+)
+
+#
+# GET /get_unassigned_queued_jobs
+#
+app.route('/get_unassigned_queued_jobs', methods=['GET'], endpoint='get_unassigned_queued_jobs_endpoint')(
+    create_get_route(
+        entity_name='Job',
+        method=db_adapter_server.get_unassigned_queued_jobs,
+        params=[],
+        auth_method=AuthMethod.KEY
+    )
+)
+
+#
+# GET /get_jobs_assigned_to_master?master_id=XXXX
+#
+app.route('/get_jobs_assigned_to_master', methods=['GET'], endpoint='get_jobs_assigned_to_master_endpoint')(
+    create_get_route(
+        entity_name='Job',
+        method=db_adapter_server.get_jobs_assigned_to_master,
+        params=['master_id'],
+        auth_method=AuthMethod.KEY
+    )
+)
+
+app.route('/get_unassigned_unqueued_active_jobs', methods=['GET'], endpoint='get_unassighned_unqueued_active_jobs_endpoint')(
+    create_get_route(
+        entity_name='Job',
+        method=db_adapter_server.get_unassigned_unqueued_active_jobs,
+        params=[],
+        auth_method=AuthMethod.KEY
     )
 )

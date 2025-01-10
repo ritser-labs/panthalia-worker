@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-import time
+import time  # <-- ADDED to store last_task_creation_time
 import datetime
 import math
 import logging
@@ -97,9 +97,6 @@ class Master:
                 self.iteration = it_num
             logging.info(f"Resuming iteration {it_num} from stage {stage_info.get('stage')}")
 
-        # Also read concurrency from the plugin if you like
-        # But you already set self.max_concurrent_iterations in constructor or from plugin
-        # self.max_concurrent_iterations = await self.plugin.get("max_concurrent_iterations")
         logging.info(f"Master init complete. iteration={self.iteration}, losses={self.losses}")
 
     async def run_main(self):
@@ -140,7 +137,7 @@ class Master:
                 self.logger.info(f"[Master.run_main] job {self.job_id} inactive, no tasks => done.")
                 self.done = True
 
-            # 5) If iteration >= max_iterations => finish tasks, stop
+            # 5) If iteration >= self.max_iterations => finish tasks, stop
             if self.iteration >= self.max_iterations:
                 self.logger.info(f"[Master.run_main] job {self.job_id} reached max_iterations => finishing tasks.")
                 if self.tasks:
@@ -194,9 +191,14 @@ class Master:
                     # Create tasks
                     task_id_info = await self._submit_task_with_persist(params_json, iteration_number)
 
-                    # *** FIX #1: ensure task_id_info is valid before continuing ***
+                    # If we failed to create tasks => set job to inactive
                     if not task_id_info or len(task_id_info) < 1:
-                        self.logger.error(f"[main_iteration] Could not create tasks. `task_id_info` is empty. Aborting iteration.")
+                        self.logger.error(
+                            f"[main_iteration] Could not create tasks for job {self.job_id}. "
+                            "Marking job as inactive."
+                        )
+                        await self.db_adapter.update_job_active(self.job_id, False)
+
                         iteration_state["stage"] = "done"
                         await self._save_iteration_state(iteration_number, iteration_state)
                         break  # or return
@@ -208,7 +210,6 @@ class Master:
 
             elif stage == "pending_wait_for_result":
                 logging.info(f"Iteration {iteration_number}: waiting for result.")
-                # *** FIX #2: double-check the structure before indexing [0]["task_id"] ***
                 task_id_info = iteration_state.get("task_id_info")
                 if not task_id_info or len(task_id_info) < 1:
                     self.logger.error("[main_iteration] No `task_id_info` found, cannot wait for result. Aborting iteration.")
@@ -248,7 +249,6 @@ class Master:
                 # Mark iteration done
                 iteration_state["stage"] = "done"
                 await self._save_iteration_state(iteration_number, iteration_state)
-
                 # Remove iteration from DB so we keep no finished states
                 await self._remove_iteration_entry(iteration_number)
 
@@ -287,6 +287,8 @@ class Master:
     async def _submit_task_with_persist(self, params_str, iteration_number):
         """
         Create a DB task + Bid. If we crash, we can pick up from the same info next time.
+        Also, if creation succeeds, store the last_task_creation_time in the job's master_state
+        so we can measure inactivity time later in jobs.py.
         """
         max_duration = datetime.timedelta(seconds=MAX_SUBMIT_TASK_RETRY_DURATION)
         start_time = datetime.datetime.now()
@@ -303,10 +305,15 @@ class Master:
                 bid_info = await self.db_adapter.create_bids_and_tasks(
                     self.job_id, 1, price, params_str, None
                 )
-                # If create_bids_and_tasks returns None or an empty list => something failed
                 if not bid_info or len(bid_info) == 0:
                     logging.error(f"[submit_task_with_persist] create_bids_and_tasks returned empty. iteration={iteration_number}")
                     return None
+
+                # ADDED: If tasks were created successfully => track last creation time
+                state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
+                state_data["last_task_creation_time"] = time.time()  # store epoch seconds
+                await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
+
                 return bid_info
             except Exception as e:
                 logging.error(f"Failure creating Bids/Tasks (attempt #{attempt}): {e}")
@@ -414,8 +421,8 @@ class Master:
         Sign a message with our private key for SOT authentication.
         """
         from eth_account.messages import encode_defunct
-        msg_defunct = encode_defunct(text=message)
         account = Account.from_key(args.private_key)
+        msg_defunct = encode_defunct(text=message)
         signed = account.sign_message(msg_defunct)
         return signed.signature.hex()
 
