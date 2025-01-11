@@ -1,4 +1,5 @@
 # spl/master/config.py
+
 import argparse
 import logging
 import sys
@@ -17,10 +18,14 @@ def parse_args():
     parser.add_argument("--num_master_wallets", type=int, help="Number of wallets to generate for the master", default=70)
     parser.add_argument("--deploy_type", type=str, required=True, help="Type of deployment (disabled, local, cloud)")
     parser.add_argument("--torch_compile", action="store_true", help="Enable torch.compile and model warmup")
-    
-    # NEW concurrency limit
+
+    # concurrency limit
     parser.add_argument("--max_concurrent_jobs", type=int, default=2,
                         help="Maximum number of jobs this Master can handle concurrently")
+
+    # NEW: For cloud SSH endpoints in the form user:pass@host[:port], comma-separated
+    parser.add_argument("--cloud_ssh_endpoints", type=str, default="",
+                        help="Comma-separated list of SSH endpoints in form user:password@host[:port]")
 
     return parser.parse_args()
 
