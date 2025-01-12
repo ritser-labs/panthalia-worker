@@ -394,7 +394,7 @@ class DBAdapterOrdersTasksMixin:
             task.time_solved = datetime.now(timezone.utc)
             session.add(task)
             await session.commit()
-            return True
+            return {'success': True}
 
     async def finalize_sanity_check(self, task_id: int, is_valid: bool, force: bool = False):
         async with self.get_async_session() as session:

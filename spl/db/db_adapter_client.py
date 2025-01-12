@@ -540,6 +540,15 @@ class DBAdapterClient:
     async def sot_get_sot(self, sot_id: int) -> Optional[Sot]:
         return await self._fetch_entity('/sot/get_sot', Sot, params={'sot_id': sot_id})
 
+    @typechecked
+    async def update_job_active(self, job_id: int, active: bool) -> bool:
+        data = {
+            'job_id': job_id,
+            'active': active
+        }
+        response = await self._authenticated_request('POST', '/update_job_active', data=data)
+        return 'success' in response
+
     # Internal helper for retrieving single entity
     async def _fetch_entity(self, endpoint: str, model_cls: Type[T], data: Optional[dict] = None, params: Optional[dict] = None) -> Optional[T]:
         response = await self._authenticated_request('GET', endpoint, data=data, params=params)
