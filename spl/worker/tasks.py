@@ -32,10 +32,58 @@ upload_lock = AsyncQueuedLock()
 
 task_queue = TaskQueue()
 
+
+def quantize_gradients_int8(tensor):
+    """
+    Naive min–max int8 quantization.
+    
+    We return a dict that contains:
+      - 'quantized':  uint8 tensor of the same size (flattened)
+      - 'min_val':    float, the global minimum
+      - 'scale':      float, the scale factor
+      - 'orig_shape': original shape of the gradient
+    """
+
+    import torch
+
+    # Flatten for a simple global min–max approach
+    flat = tensor.flatten()
+    min_val = flat.min()
+    max_val = flat.max()
+
+    # Avoid degenerate scale if min==max
+    if float(max_val) == float(min_val):
+        # e.g., all zeros => scale can be anything nonzero
+        return {
+            'quantized': torch.zeros_like(flat, dtype=torch.uint8),
+            'min_val': min_val,
+            'scale': torch.tensor(1e-5),
+            'orig_shape': tensor.shape
+        }
+
+    # scale = (max - min) / 255
+    scale = (max_val - min_val) / 255.0
+
+    # (value - min_val)/scale => clamp => round => convert to uint8
+    q = torch.round((flat - min_val) / scale).clamp_(0, 255).to(torch.uint8)
+
+    return {
+        'quantized': q,
+        'min_val': min_val,
+        'scale': scale,
+        'orig_shape': tensor.shape
+    }
+
+
 async def get_ask_price():
     return 1
 
+
 async def deposit_stake():
+    """
+    Called periodically to ensure we create enough 'Ask' orders
+    (i.e., 'stakes') if we have capacity.
+    """
     global concurrent_tasks_counter
     if (await task_queue.queue_length() + concurrent_tasks_counter) > args.max_tasks_handling:
         logger.debug("Too many tasks being processed. Not depositing more stakes.")
@@ -48,11 +96,17 @@ async def deposit_stake():
         price = await get_ask_price()
         await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, price, None)
 
+
 async def handle_task(task, time_invoked):
+    """
+    Called whenever we get a new assigned task from the DB. We push it into the local queue, 
+    then call process_tasks() to see if we can handle it now.
+    """
     global last_handle_event_timestamp
 
     current_time = time.time()
     logger.debug(f'Time since invocation: {current_time - time_invoked:.2f} seconds')
+
     async with last_handle_event_timestamp_lock:
         if last_handle_event_timestamp is not None:
             time_since_last_event = current_time - last_handle_event_timestamp
@@ -63,9 +117,8 @@ async def handle_task(task, time_invoked):
     logger.debug(f"Task params: {task.params}")
     task_params = json.loads(task.params)
 
-    logger.debug(f"Adding task to queue with ID: {task.id}")
+    # Prepare a queue entry
     job_db = await db_adapter.get_job(task.job_id)
-
     task_queue_obj = {
         'task_id': task.id,
         'plugin_id': job_db.plugin_id,
@@ -74,17 +127,27 @@ async def handle_task(task, time_invoked):
         'time_solver_selected': task.time_solver_selected.timestamp()
     }
 
+    logger.debug(f"Adding task to queue with ID: {task.id}")
     await task_queue.add_task(task_queue_obj)
+
+    # Preload the plugin for speed
     await get_plugin(task_queue_obj['plugin_id'], db_adapter)
 
     time_since_change = time.time() - task_queue_obj['time_solver_selected']
     logger.debug(f"Time since solver selection: {time_since_change} seconds")
 
+    # Mark the start time
     async with task_start_times_lock:
         task_start_times[task.id] = time.time()
+
+    # Attempt to process the queue
     await process_tasks()
 
+
 async def process_tasks():
+    """
+    Tries to fetch the next task from the queue and handle it, respecting concurrency limits.
+    """
     global task_queue, concurrent_tasks_counter
     retry_attempt = 0
     task_success = False
@@ -93,8 +156,10 @@ async def process_tasks():
         logger.debug("No tasks in the queue to process.")
         return
 
+    # concurrency guard
     async with concurrent_tasks_counter_lock:
         concurrent_tasks_counter += 1
+
     try:
         next_task = await task_queue.get_next_task()
         if not next_task:
@@ -109,29 +174,36 @@ async def process_tasks():
         while retry_attempt < MAX_WORKER_TASK_RETRIES and not task_success:
             try:
                 logger.debug(f"{task_id}: Attempt {retry_attempt+1}/{MAX_WORKER_TASK_RETRIES}, params: {task_params}")
-                # Pre-download the data:
+
+                # 1) Pre-download the data
                 predownloaded_data = await download_file(task_params['input_url'])
                 if predownloaded_data is None:
-                    # If somehow got None (shouldn't happen if raise on empty), treat as error
                     raise Exception("Predownloaded data is None unexpectedly.")
 
-                # Acquire processing lock
+                # 2) Acquire processing lock => run the model
                 await task_processing_lock.acquire(priority=time_solver_selected)
                 try:
                     plugin = await get_plugin(next_task['plugin_id'], db_adapter)
                     result = await plugin.call_submodule(
-                        'model_adapter', 'execute_task',
+                        'model_adapter',
+                        'execute_task',
                         TENSOR_NAME,
                         sot_url,
                         task_params,
                         predownloaded_data
                     )
                     version_number, updates, loss = result
-                    logger.info(f"{task_id}: Received updates. Loss: {loss:.4f}. Update size: {updates.numel()} params.")
+                    logger.info(
+                        f"{task_id}: Received updates. "
+                        f"Loss: {loss:.4f}. Update size: {updates.numel()} params."
+                    )
                 finally:
                     await task_processing_lock.release()
 
-                # Acquire upload lock
+                # 3) QUANTIZE to int8
+                updates = quantize_gradients_int8(updates)
+
+                # 4) Acquire upload lock => upload
                 await upload_lock.acquire(priority=time_solver_selected)
                 try:
                     upload_start = time.time()
@@ -141,19 +213,22 @@ async def process_tasks():
                 finally:
                     await upload_lock.release()
 
-                # Submit solution to DB
+                # 5) Submit solution to DB
                 await submit_solution(task_id, upload_res)
 
+                # Mark success
                 async with task_start_times_lock:
                     task_start_time = task_start_times.pop(task_id, None)
                 total_time = time.time() - (task_start_time if task_start_time else time.time())
-                logger.info(f"{task_id}: Completed task in {total_time:.2f}s. Concurrent tasks: {concurrent_tasks_counter}")
-
+                logger.info(
+                    f"{task_id}: Completed task in {total_time:.2f}s. "
+                    f"Concurrent tasks: {concurrent_tasks_counter}"
+                )
                 task_success = True
 
             except NoMoreDataException:
-                logger.info(f"{task_id}: No more data available for this task. Skipping further attempts.")
-                break  # gracefully exit without marking as failure
+                logger.info(f"{task_id}: No more data available. Skipping further attempts.")
+                break  # gracefully exit
             except Exception as e:
                 retry_attempt += 1
                 logger.error(f"Error processing task {task_id} on attempt {retry_attempt}: {e}", exc_info=True)
@@ -165,13 +240,17 @@ async def process_tasks():
                     await asyncio.sleep(backoff * retry_attempt)
 
     finally:
+        # done => reduce concurrency
         async with concurrent_tasks_counter_lock:
             concurrent_tasks_counter -= 1
 
 
 async def submit_solution(task_id, result):
+    """
+    Submit final solution to DB => e.g. triggers the next phase or a sanity-check.
+    """
     try:
-        logger.info('Submitting solution')
+        logger.info('Submitting solution to DB')
         result_str = json.dumps(result)
         receipt = await db_adapter.submit_task_result(task_id, result_str)
         logger.info(f"Solution submission receipt: {receipt}")
@@ -179,7 +258,11 @@ async def submit_solution(task_id, result):
         logger.error(f"Error submitting solution for task {task_id}: {e}")
         raise
 
+
 async def upload_results(version_number, updates, loss, sot_url):
+    """
+    Actually calls upload_tensor(...) with the quantized data.
+    """
     grads_url = await upload_tensor(updates, 'grads', sot_url)
     return {
         'grads_url': grads_url,
