@@ -200,8 +200,19 @@ async def process_tasks():
                 finally:
                     await task_processing_lock.release()
 
-                # 3) QUANTIZE to int8
-                updates = quantize_gradients_int8(updates)
+                # 3) QUANTIZE to int8 and log compression %
+                original_bytes = updates.numel() * updates.element_size()
+                quantized_dict = quantize_gradients_int8(updates)
+                quantized_bytes = quantized_dict['quantized'].numel() * quantized_dict['quantized'].element_size()
+                if original_bytes == 0:
+                    compression_ratio = 0.0
+                else:
+                    compression_ratio = 100.0 * (1.0 - float(quantized_bytes) / float(original_bytes))
+                logger.info(
+                    f"{task_id}: Compressed from {original_bytes} bytes to "
+                    f"{quantized_bytes} bytes => {compression_ratio:.2f}% reduction."
+                )
+                updates = quantized_dict
 
                 # 4) Acquire upload lock => upload
                 await upload_lock.acquire(priority=time_solver_selected)
@@ -243,6 +254,7 @@ async def process_tasks():
         # done => reduce concurrency
         async with concurrent_tasks_counter_lock:
             concurrent_tasks_counter -= 1
+
 
 
 async def submit_solution(task_id, result):
