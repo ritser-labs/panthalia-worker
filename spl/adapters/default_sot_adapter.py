@@ -12,7 +12,7 @@ from quart import Quart, request, jsonify, make_response, send_from_directory
 from ..auth.api_auth import requires_authentication
 from ..common import (
     get_future_version_number,
-    TENSOR_NAME,               # <-- We now exclusively use the constant TENSOR_NAME
+    TENSOR_NAME,
     download_file
 )
 from ..device import device
@@ -57,10 +57,9 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
     async def initialize(self, sot_id, db_url, private_key, job_id, perm_db, port):
         """
-        Called once by the SOT side, passing relevant configuration (SOT ID, DB URL,
-        private key, job ID, permission info, etc.). We'll optionally load an initial
-        model from job.initial_state_url if set. Then we initialize the dataset,
-        create routes, and run the app's event loop.
+        Called once by the SOT side, passing relevant config. We optionally load an initial
+        model from job.initial_state_url if it exists. Then we initialize the dataset and run
+        the SOT adapter's HTTP server.
         """
         self.sot_id = sot_id
         self.db_url = janky_url_replace(db_url)
@@ -73,35 +72,27 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         self.update_timestamp_lock = asyncio.Lock()
 
         # -----------------------------------------------------------------
-        # 1) Check if job.initial_state_url is set; if so, download it once.
+        # Optionally load initial model from job.initial_state_url
         # -----------------------------------------------------------------
         job_obj = await self.db_adapter.sot_get_job(self.job_id)
         if job_obj and job_obj.initial_state_url and job_obj.initial_state_url.strip():
             init_url = job_obj.initial_state_url.strip()
             logging.info(f"[DefaultSOTAdapter.initialize] Found non-empty initial_state_url => {init_url}")
-
             local_path = os.path.join(self.base_dir, "model_0.pt")
             if not os.path.exists(local_path):
-                logging.info(f"Downloading initial state from {init_url} to {local_path}...")
+                logging.info(f"Downloading initial model from {init_url} -> {local_path}")
                 try:
-                    # We store the initial model as model_0.pt so that
-                    # initialize_all_tensors(...) sees version 0 is already present
-                    await download_file(
-                        init_url,
-                        local_file_path=local_path,
-                        download_type='tensor',
-                        chunk_timeout=10
-                    )
+                    await download_file(init_url, local_file_path=local_path, download_type='tensor', chunk_timeout=10)
                     logging.info("Initial model downloaded successfully.")
                 except Exception as e:
                     logging.error(f"Failed to download initial_state_url: {e}", exc_info=True)
             else:
                 logging.info("Model 0 already exists locally, skipping re-download.")
         else:
-            logging.info("[DefaultSOTAdapter.initialize] job.initial_state_url is empty or None. Using default init flow.")
+            logging.info("[DefaultSOTAdapter.initialize] No initial_state_url found; using default init flow.")
 
         # -----------------------------------------------------------------
-        # 2) Actually run init for model_0.pt if not present
+        # Ensure at least model_0.pt is present
         # -----------------------------------------------------------------
         await initialize_all_tensors(
             self.base_dir,
@@ -111,9 +102,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             file_locks=self.file_locks
         )
 
-        # -----------------------------------------------------------------
-        # 3) Start dataset, set flag as initialized
-        # -----------------------------------------------------------------
+        # Start dataset
         await self.dataset.initialize_dataset()
         self.initialized = True
 
@@ -123,9 +112,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         from ..auth.api_auth import requires_authentication
         requires_auth = requires_authentication(db_adapter_lambda, perm_db_lambda)
 
-        ####################################################################
-        # ROUTES
-        ####################################################################
         @self.app.route('/health', methods=['GET'])
         async def health_check():
             return jsonify({'status': 'healthy'}), 200
@@ -149,13 +135,13 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                     logging.info("No more batches available in /get_batch.")
                     return jsonify({'error': 'No more batches available'}), 404
             except StopAsyncIteration:
-                logging.info("Dataset iterator exhausted (StopAsyncIteration).")
+                logging.info("Dataset exhausted (StopAsyncIteration).")
                 return jsonify({'error': 'No more batches available'}), 404
             except Exception as e:
                 logging.error(f"Error in /get_batch: {e}", exc_info=True)
                 return jsonify({'error': 'Could not get batch'}), 500
 
-            # Convert pairs to tensors
+            import torch
             inputs = [torch.tensor(pair[0], dtype=torch.long) for pair in token_pairs]
             targets = [torch.tensor(pair[1], dtype=torch.long) for pair in token_pairs]
             batch_tensor = torch.stack(inputs)
@@ -165,9 +151,10 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             random_suffix = random.randint(1000, 9999)
             combined_filename = f'input_{timestamp}_{random_suffix}.pt'
             combined_tensor = torch.cat([batch_tensor, targets_tensor], dim=0)
+
             await asyncio.to_thread(
-                torch.save,
-                combined_tensor,
+                torch.save, 
+                combined_tensor, 
                 os.path.join(self.temp_dir, combined_filename)
             )
 
@@ -178,27 +165,18 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         @self.app.route('/update_state', methods=['POST'])
         @requires_auth
         async def update_state():
-            """
-            This endpoint no longer reads `tensor_name` from the client:
-            we always use TENSOR_NAME from spl.common.
-            """
             logging.info("Accessing /update_state endpoint")
             data = await request.get_json()
 
-            # We no longer parse or require `tensor_name`.
-            # Instead, we always use TENSOR_NAME.
-            tensor_name = TENSOR_NAME
-
             result_url = data.get('result_url')
             if not result_url:
-                logging.error("Missing result_url in /update_state")
                 return jsonify({'error': 'Missing result_url'}), 400
 
             version_number = data.get('version_number')
             if version_number is None:
-                logging.error("Missing version_number in /update_state")
                 return jsonify({'error': 'Missing version_number'}), 400
 
+            tensor_name = TENSOR_NAME
             state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             block_timestamps = state_data.get("block_timestamps", {})
             num_updates = state_data.get("num_updates", {})
@@ -222,50 +200,83 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                 logging.error(f"File not found at {local_file_path}")
                 return jsonify({'error': 'File not found'}), 404
 
-            tensor = torch.load(local_file_path, map_location=device)
+            # ===========================
+            # LOAD + DEQUANTIZE
+            # ===========================
+            loaded_obj = torch.load(local_file_path, map_location=device)
 
-            # Accumulate grads
+            # If it's our int8 dict => dequantize
+            if isinstance(loaded_obj, dict) and 'quantized' in loaded_obj:
+                qvals = loaded_obj['quantized'].float()  # from uint8 -> float
+                scale = loaded_obj['scale']
+                min_val = loaded_obj['min_val']
+                orig_shape = loaded_obj['orig_shape']
+
+                # v = qvals*scale + min_val
+                # then reshape
+                tensor = (qvals * scale + min_val).view(orig_shape).to(device)
+            else:
+                # Possibly float16 or float32 or whatever
+                tensor = loaded_obj
+                if tensor.dtype == torch.float16:
+                    tensor = tensor.float()
+                tensor = tensor.to(device)
+
+            # We can safely remove the uploaded file now
+            if os.path.exists(local_file_path):
+                await asyncio.to_thread(os.remove, local_file_path)
+
             future_version_number = get_future_version_number(self.tensor_version_interval)
             grads_path = os.path.join(
-                self.base_dir,
-                f'accumulated_grads_{tensor_name}_{future_version_number}.pt'
+                self.base_dir, f'accumulated_grads_{tensor_name}_{future_version_number}.pt'
             )
             if os.path.exists(grads_path):
                 accumulated_grads = torch.load(grads_path, map_location=device).to(device)
             else:
                 accumulated_grads = torch.zeros_like(tensor, device=device)
 
-            accumulated_grads += tensor.to(device)
+            accumulated_grads += tensor
             await asyncio.to_thread(torch.save, accumulated_grads, grads_path)
 
-            # update num_updates
             num_of_updates = num_updates.get(tensor_name, 0) + 1
             num_updates[tensor_name] = num_of_updates
 
-            # do averaging
-            averaged_grads = (accumulated_grads / num_of_updates).to(device)
-
-            # get learning params
-            learning_params = {}
+            # Possibly get hyperparams
             if self.hyperparams_getter:
-                iteration_val = iteration_number.get(tensor_name, 0)
-                learning_params = self.hyperparams_getter(iteration_val)
+                it_val = iteration_number.get(tensor_name, 0)
+                learning_params = self.hyperparams_getter(it_val)
+            else:
+                learning_params = {}
+
+            lr = learning_params.get('learning_rate', 0.001)
+            beta1 = learning_params.get('beta1', 0.9)
+            beta2 = learning_params.get('beta2', 0.999)
+            eps = learning_params.get('epsilon', 1e-8)
+            wd = learning_params.get('weight_decay', 0.0)
+            t_val = learning_params.get('t', 0)
+
+            # average grads
+            averaged_grads = accumulated_grads / num_of_updates
 
             new_params, new_m = await apply_optimizer(
                 current_version_number,
                 tensor_name,
                 averaged_grads,
-                learning_params.get('learning_rate', 0.001),
-                learning_params.get('beta1', 0.9),
-                learning_params.get('beta2', 0.999),
-                learning_params.get('epsilon', 1e-8),
-                learning_params.get('weight_decay', 0.0),
-                learning_params.get('t', 0),
+                lr,
+                beta1,
+                beta2,
+                eps,
+                wd,
+                t_val,
                 self.base_dir
             )
 
+            # finalize
             future_tensor_path = os.path.join(self.base_dir, f'{tensor_name}_{future_version_number}.pt')
-            future_tensor_adam_m_path = os.path.join(self.base_dir, f'{tensor_name}_adam_m_{future_version_number}.pt')
+            future_tensor_adam_m_path = os.path.join(
+                self.base_dir,
+                f'{tensor_name}_adam_m_{future_version_number}.pt'
+            )
             await asyncio.to_thread(torch.save, new_params, future_tensor_path + '.tmp')
             await asyncio.to_thread(torch.save, new_m, future_tensor_adam_m_path + '.tmp')
 
@@ -274,15 +285,15 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
             # Cleanup old version
             old_block_timestamp = block_timestamps.get(tensor_name, 0)
-            await cleanup_old_timestamp(tensor_name, old_block_timestamp, block_timestamps, self.base_dir)
+            await cleanup_old_timestamp(
+                tensor_name, old_block_timestamp, block_timestamps, self.base_dir
+            )
 
-            # Remove partial grads
+            # Remove partial grads from earlier intervals
             for filename in os.listdir(self.base_dir):
-                if filename.startswith(f'accumulated_grads_{tensor_name}_') and not filename.endswith(f'{future_version_number}.pt'):
-                    await asyncio.to_thread(os.remove, os.path.join(self.base_dir, filename))
-
-            if os.path.exists(local_file_path):
-                await asyncio.to_thread(os.remove, local_file_path)
+                if filename.startswith(f'accumulated_grads_{tensor_name}_'):
+                    if not filename.endswith(f'{future_version_number}.pt'):
+                        await asyncio.to_thread(os.remove, os.path.join(self.base_dir, filename))
 
             # Update DB state
             block_timestamps[tensor_name] = future_version_number
@@ -299,21 +310,17 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         @self.app.route('/latest_state', methods=['GET'])
         async def latest_state():
-            """
-            This endpoint no longer checks 'tensor_name' as a GET param: 
-            we always use TENSOR_NAME from spl.common.
-            """
             logging.info("Accessing /latest_state endpoint")
             tensor_name = TENSOR_NAME
 
             state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             block_timestamps = state_data.get("block_timestamps", {})
 
-            requested_version_num = request.args.get('version_number', None)
-            if requested_version_num is None:
+            requested_version_str = request.args.get('version_number', None)
+            if requested_version_str is None:
                 requested_version_num = block_timestamps.get(tensor_name, 0)
             else:
-                requested_version_num = int(requested_version_num)
+                requested_version_num = int(requested_version_str)
                 if not version_number_exists(requested_version_num, tensor_name, self.base_dir):
                     requested_version_num = block_timestamps.get(tensor_name, 0)
 
@@ -334,9 +341,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         @self.app.route('/current_timestamp', methods=['POST'])
         async def current_timestamp():
-            """
-            We always rely on TENSOR_NAME from spl.common for the current tensor name.
-            """
             logging.info("Accessing /current_timestamp endpoint")
             tensor_name = TENSOR_NAME
 
@@ -346,13 +350,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             iteration_number = state_data.get("iteration_number", {})
             last_future_version_number = state_data.get("last_future_version_number", {})
 
-            logging.debug(
-                f"[/current_timestamp] BEFORE update_cleanup_timestamps => "
-                f"block_timestamps.get('{tensor_name}',0)={block_timestamps.get(tensor_name,0)}"
-            )
-
             try:
-                logging.debug(f"[/current_timestamp] About to call update_cleanup_timestamps for {tensor_name}...")
                 await update_cleanup_timestamps(
                     tensor_name,
                     block_timestamps,
@@ -366,36 +364,25 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                     self.update_timestamp_lock,
                     self.file_locks
                 )
-                logging.debug("[/current_timestamp] update_cleanup_timestamps completed OK.")
             except Exception as e:
-                logging.error(f"[/current_timestamp] update_cleanup_timestamps crashed: {e}", exc_info=True)
+                logging.error(f"update_cleanup_timestamps crashed: {e}", exc_info=True)
 
             final_state = await self.db_adapter.get_sot_state_for_job(self.job_id)
             final_bt = final_state.get("block_timestamps", {})
             latest_version_number = final_bt.get(tensor_name, 0)
 
-            logging.debug(
-                f"[/current_timestamp] AFTER update_cleanup_timestamps => "
-                f"latest_version_number={latest_version_number}"
-            )
-
             return jsonify({'version_number': latest_version_number})
 
         @self.app.route('/tensor_size', methods=['GET'])
         async def get_tensor_size():
-            """
-            We no longer parse 'tensor_name' from the request:
-            we always use TENSOR_NAME from spl.common.
-            """
             logging.info("Accessing /tensor_size endpoint")
             tensor_name = TENSOR_NAME
-
             file_path = os.path.join(self.base_dir, f'{tensor_name}.pt')
             if not os.path.exists(file_path):
                 return jsonify({'error': 'Tensor not found'}), 404
 
-            tensor = torch.load(file_path, map_location=device)
-            size = tensor.numel()
+            t = torch.load(file_path, map_location=device)
+            size = t.numel()
             return jsonify({'size': size})
 
         @self.app.route('/data/state/temp/<path:filename>', methods=['GET'])
@@ -417,10 +404,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         @self.app.route('/upload_tensor', methods=['POST'])
         async def upload_tensor():
-            """
-            Legacy endpoint for direct file upload (e.g. debugging).
-            Does not rely on 'tensor_name' from the request.
-            """
             request_files = await request.files
             if 'tensor' not in request_files:
                 return jsonify({'error': 'No tensor file provided'}), 400
@@ -445,9 +428,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                         break
                     await f.write(chunk)
 
-            tensor_state = torch.load(local_file_path, map_location=device)
-            torch.save(tensor_state, os.path.join(self.temp_dir, filename))
-
+            # no special logic needed here; we just store it
             return jsonify({
                 'message': 'Tensor uploaded successfully',
                 'tensor_url': f'/data/state/temp/{filename}'
@@ -472,11 +453,10 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         async def get_loss():
             logging.info("Accessing /get_loss endpoint")
             state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
-            loss = None
+            val = None
             if "latest_loss" in state_data:
-                loss = state_data["latest_loss"].get("value", None)
-            return jsonify({'loss': loss}), 200
+                val = state_data["latest_loss"].get("value", None)
+            return jsonify({'loss': val}), 200
 
         logging.info("default_sot_adapter initialized fully")
-
         await self.app.run_task(host='0.0.0.0', port=port)
