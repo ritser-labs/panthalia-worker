@@ -61,18 +61,15 @@ async def handle_newly_assigned_job(
     await db_adapter.admin_deposit_account(job_obj.user_id, deposit_amount)
 
     # 3) Launch SOT + workers
-    sot_db, sot_url = await launch_sot(db_adapter, job_obj, deploy_type, db_url)
-    await launch_workers(db_adapter, job_obj, deploy_type, sot_db, db_url, sot_url)
+    sot_db, sot_url = await launch_sot(db_adapter, job_obj, db_url)
+    await launch_workers(db_adapter, job_obj, db_url, args.num_workers)
 
     # 4) Create the local Master task for run_master_task
     master_task = asyncio.create_task(
         run_master_task(
-            sot_url=sot_url,
             job_id=job_obj.id,
-            subnet_id=job_obj.subnet_id,
             db_adapter=db_adapter,
-            max_iterations=float('inf'),
-            detailed_logs=args.detailed_logs
+            max_iters=float('inf')
         )
     )
     jobs_processing[job_obj.id] = master_task

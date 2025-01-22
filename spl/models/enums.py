@@ -47,3 +47,8 @@ class WithdrawalStatus(enum.Enum):
     PENDING = "pending"
     FINALIZED = "finalized"
     REJECTED = "rejected"
+
+class SlotType(enum.Enum):
+    SOT = "sot"
+    WORKER = "worker"
+    MASTER = "master"

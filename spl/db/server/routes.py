@@ -577,6 +577,28 @@ app.route('/get_balance', methods=['GET'], endpoint='get_balance_endpoint')(
     )
 )
 
+# GET /get_free_instances_by_slot_type?slot_type=WORKER
+# => calls db_adapter_server.get_free_instances_by_slot_type(slot_type),
+#    returns a list of Instances with .job_id == None
+app.route('/get_free_instances_by_slot_type', methods=['GET'], endpoint='get_free_instances_by_slot_type_endpoint')(
+    create_get_route(
+        entity_name='FreeInstances',  # Just a label for logs
+        method=db_adapter_server.get_free_instances_by_slot_type,
+        params=['slot_type'],         # We'll pass ?slot_type=XYZ
+        auth_method=AuthMethod.KEY    # You can choose an appropriate auth
+    )
+)
+
+# POST /reserve_instance
+# => JSON { "instance_id": 123, "job_id": 999 }
+# => tries db_adapter_server.reserve_instance(instance_id, job_id)
+app.route('/reserve_instance', methods=['POST'], endpoint='reserve_instance_endpoint')(
+    create_post_route(
+        method=db_adapter_server.reserve_instance,
+        required_keys=['instance_id', 'job_id'],
+        auth_method=AuthMethod.KEY    # Or whichever auth you want
+    )
+)
 ################################################################
 # Updating / last nonce / iteration, etc.
 ################################################################

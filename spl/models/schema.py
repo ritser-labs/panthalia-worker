@@ -9,7 +9,7 @@ from sqlalchemy.orm import relationship
 from .enums import (
     ServiceType, PermType, OrderType, AccountTxnType, HoldType,
     CreditTxnType, EarningsTxnType, PlatformRevenueTxnType, WithdrawalStatus,
-    TaskStatus
+    TaskStatus, SlotType
 )
 from .base import Base
 import enum
@@ -140,6 +140,11 @@ class Instance(Serializable):
     pod_id = Column(String)
     process_id = Column(Integer)
     job = relationship("Job", back_populates="instances")
+    connection_info = Column(String, nullable=True)
+
+    # NEW columns:
+    gpu_enabled = Column(Boolean, default=False, nullable=False)       # <--- Worker uses GPU
+    slot_type = Column(Enum(SlotType), nullable=True)                  # <--- SOT vs. WORKER vs. MASTER
 
 class Account(Serializable):
     __tablename__ = 'accounts'

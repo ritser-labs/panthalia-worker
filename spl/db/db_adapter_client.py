@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typeguard import typechecked
 
 from ..models import (
-    Job, Plugin, Subnet, Task, TaskStatus, Perm, Sot, Instance, ServiceType, Base, PermType,
+    Job, Plugin, Subnet, Task, SlotType, Perm, Sot, Instance, ServiceType, Base, PermType,
     WithdrawalRequest
 )
 
@@ -656,3 +656,32 @@ class DBAdapterClient:
         if isinstance(response, list):
             return [self._deserialize(Job, job_dict) for job_dict in response]
         return []
+
+    @typechecked
+    async def get_free_instances_by_slot_type(self, slot_type: SlotType) -> List[dict]:
+        """
+        Calls GET /get_free_instances_by_slot_type?slot_type=XYZ,
+        returns list of instance dicts (with .as_dict fields).
+        """
+        endpoint = "/get_free_instances_by_slot_type"
+        params = {"slot_type": slot_type.name}
+        response = await self._authenticated_request("GET", endpoint, params=params)
+        if "error" in response:
+            logger.error(f"get_free_instances_by_slot_type => {response['error']}")
+            return []
+        if isinstance(response, list):
+            return response
+        return []
+
+    @typechecked
+    async def reserve_instance(self, instance_id: int, job_id: int) -> bool:
+        """
+        Calls POST /reserve_instance with JSON {instance_id, job_id}.
+        Returns True if success, else False.
+        """
+        endpoint = "/reserve_instance"
+        data = {"instance_id": instance_id, "job_id": job_id}
+        response = await self._authenticated_request("POST", endpoint, data=data)
+        if "success" in response:
+            return True
+        return False
