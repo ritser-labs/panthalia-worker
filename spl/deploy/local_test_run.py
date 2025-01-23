@@ -365,14 +365,16 @@ async def main():
     logging.info("Starting DB instance...")
     db_log = open(DB_LOG_FILE, 'w')
     public_key = Account.from_key(args.private_key).address
+    db_commands = [
+        'python', '-m', 'spl.db.server',
+        '--host', DB_HOST,
+        '--port', DB_PORT,
+        '--perm', str(GUESS_DB_PERM_ID),
+        '--root_wallet', public_key
+    ]
+    logging.info(f"Starting DB with command: {' '.join(db_commands)}")
     db_process = subprocess.Popen(
-        [
-            'python', '-m', 'spl.db.server',
-            '--host', DB_HOST,
-            '--port', DB_PORT,
-            '--perm', str(GUESS_DB_PERM_ID),
-            '--root_wallet', public_key
-        ],
+        db_commands,
         stdout=db_log, stderr=db_log, cwd=package_root_dir
     )
     await wait_for_health(db_url)
