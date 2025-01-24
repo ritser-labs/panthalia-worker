@@ -564,6 +564,9 @@ app.route('/create_state_update', methods=['POST'], endpoint='create_state_updat
 app.route('/create_instance', methods=['POST'], endpoint='create_instance_endpoint')(
     create_post_route_return_id(db_adapter_server.create_instance, ['name', 'service_type', 'job_id', 'private_key', 'pod_id', 'process_id'], 'instance_id')
 )
+app.route('/delete_instance', methods=['POST'], endpoint='delete_instance_endpoint')(
+    create_post_route(db_adapter_server.delete_instance, ['instance_id'], auth_method=AuthMethod.USER)
+)
 app.route('/create_sot', methods=['POST'], endpoint='create_sot_endpoint')(
     create_post_route_return_id(db_adapter_server.create_sot, ['job_id', 'address', 'url'], 'sot_id')
 )

@@ -35,6 +35,17 @@ class DBAdapterInstancesMixin:
             await session.commit()
             await session.refresh(new_instance)
             return new_instance.id
+    
+    async def delete_instance(self, instance_id: int) -> bool:
+        async with self.get_async_session() as session:
+            stmt = select(Instance).where(Instance.id == instance_id)
+            res = await session.execute(stmt)
+            inst = res.scalar_one_or_none()
+            if not inst:
+                return False
+            session.delete(inst)
+            await session.commit()
+            return True
 
     async def get_instance_by_service_type(self, service_type: ServiceType, job_id: int | None = None):
         async with self.get_async_session() as session:
