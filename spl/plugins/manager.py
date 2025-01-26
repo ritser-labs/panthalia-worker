@@ -183,6 +183,7 @@ def setup_plugin_files(plugin_package_dir):
         'db/db_adapter_client.py': 'db/db_adapter_client.py',
         'models': 'models',
         'auth/key_auth.py': 'auth/key_auth.py',
+        'auth/nonce_cache.py': 'auth/nonce_cache.py',
     }
 
     for local, global_target in resources.items():

@@ -7,20 +7,11 @@ from quart import request, jsonify, g
 from eth_account import Account
 from eth_account.messages import encode_defunct
 import time
-from cachetools import TTLCache
+from .nonce_cache import check_nonce
 
 EXPIRY_TIME = 10
 
 logger = logging.getLogger(__name__)
-
-cache = TTLCache(maxsize=100_000, ttl=300)  # e.g. store up to 100k items, each for 300s
-
-def check_nonce(address: str, nonce: str) -> bool:
-    key = f"{address}:{nonce}"
-    if key in cache:
-        return False  # replay
-    cache[key] = True
-    return True
 
 
 async def verify_signature(db_adapter, message: str, signature: str, perm_db_column: int):

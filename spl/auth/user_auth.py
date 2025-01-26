@@ -12,6 +12,7 @@ import time
 from .jwt_verification import verify_jwt
 from ..models.enums import PermType
 from .key_auth import requires_key_auth
+from .nonce_cache import check_nonce
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +47,14 @@ async def verify_signature(db_adapter, message, signature):
     # Parse the message to extract nonce and timestamp
     message_data = json.loads(message)
     timestamp = message_data.get('timestamp')
+    nonce = message_data.get('nonce')
 
     if not timestamp:
         logger.error("Message missing nonce or timestamp")
+        return None
+    
+    if not check_nonce(recovered_address.lower(), nonce):
+        logger.error("Nonce replay detected")
         return None
 
     # Check if the message has expired
