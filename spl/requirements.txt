@@ -22,6 +22,7 @@ PyQt5
 docker
 eth-account
 stripe
+cachetools
 
 aiosqlite
 sqlalchemy

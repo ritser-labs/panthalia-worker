@@ -385,16 +385,6 @@ class DBAdapterClient:
         return self._extract_id(response, 'perm_description_id')
 
     @typechecked
-    async def set_last_nonce(self, address: str, perm: int, last_nonce: str) -> bool:
-        data = {
-            'address': address,
-            'perm': perm,
-            'last_nonce': last_nonce
-        }
-        response = await self._authenticated_request('POST', '/set_last_nonce', data=data)
-        return isinstance(response, dict) and 'perm' in response
-
-    @typechecked
     async def get_sot_by_job_id(self, job_id: int) -> Optional[Sot]:
         return await self._fetch_entity('/get_sot_by_job_id', Sot, params={'job_id': job_id})
 

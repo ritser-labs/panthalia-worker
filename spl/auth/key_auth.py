@@ -7,10 +7,21 @@ from quart import request, jsonify, g
 from eth_account import Account
 from eth_account.messages import encode_defunct
 import time
+from cachetools import TTLCache
 
 EXPIRY_TIME = 10
 
 logger = logging.getLogger(__name__)
+
+cache = TTLCache(maxsize=100_000, ttl=300)  # e.g. store up to 100k items, each for 300s
+
+def check_nonce(address: str, nonce: str) -> bool:
+    key = f"{address}:{nonce}"
+    if key in cache:
+        return False  # replay
+    cache[key] = True
+    return True
+
 
 async def verify_signature(db_adapter, message: str, signature: str, perm_db_column: int):
     message = encode_defunct(text=message)
@@ -61,11 +72,9 @@ def requires_key_auth(get_db_adapter, get_perm_db):
                 return jsonify({'error': 'Invalid message format'}), 401
 
             # Check if the nonce has been used before
-            if nonce == perm.last_nonce:
+            if not check_nonce(perm.address.lower(), nonce):
                 logger.error("Nonce already used")
                 return jsonify({'error': 'Nonce already used'}), 403
-            else:
-                await db_adapter.set_last_nonce(perm.address, perm_db_column, nonce)
 
             # Check if the message has expired (validity period of 10 seconds)
             current_time = int(time.time())

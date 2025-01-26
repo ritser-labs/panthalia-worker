@@ -119,7 +119,6 @@ class Perm(Serializable):
     id = Column(Integer, primary_key=True, index=True)
     address = Column(String, nullable=False, index=True)
     perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
-    last_nonce = Column(String, nullable=False, default='0')
     perm_description = relationship("PermDescription", back_populates="perms")
 
 class Sot(Serializable):

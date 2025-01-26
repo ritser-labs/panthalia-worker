@@ -605,9 +605,6 @@ app.route('/reserve_instance', methods=['POST'], endpoint='reserve_instance_endp
 ################################################################
 # Updating / last nonce / iteration, etc.
 ################################################################
-app.route('/set_last_nonce', methods=['POST'], endpoint='set_last_nonce_endpoint')(
-    create_post_route_return_id(db_adapter_server.set_last_nonce, ['address', 'perm', 'last_nonce'], 'perm')
-)
 app.route('/update_job_iteration', methods=['POST'], endpoint='update_job_iteration_endpoint')(
     create_post_route_return_id(db_adapter_server.update_job_iteration, ['job_id', 'new_iteration'], 'success')
 )

@@ -11,23 +11,6 @@ class DBAdapterPermissionsMixin:
             perm_obj = result.scalar_one_or_none()
             return perm_obj
 
-    async def set_last_nonce(self, address: str, perm: int, last_nonce: str):
-        lower_address = address.lower()
-        async with self.get_async_session() as session:
-            stmt = (
-                update(Perm)
-                .where(Perm.address == lower_address, Perm.perm == perm)
-                .values(last_nonce=last_nonce)
-            )
-            await session.execute(stmt)
-            await session.commit()
-
-            updated_perm = await session.execute(
-                select(Perm).where(Perm.address == lower_address, Perm.perm == perm)
-            )
-            perm_obj = updated_perm.scalar_one_or_none()
-            return perm_obj.id
-
     async def create_perm(self, address: str, perm: int):
         lower_address = address.lower()
         async with self.get_async_session() as session:
