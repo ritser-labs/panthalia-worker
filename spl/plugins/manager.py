@@ -182,7 +182,7 @@ def setup_plugin_files(plugin_package_dir):
         'util': 'util',
         'db/db_adapter_client.py': 'db/db_adapter_client.py',
         'models': 'models',
-        'auth/api_auth.py': 'auth/api_auth.py',
+        'auth/key_auth.py': 'auth/key_auth.py',
     }
 
     for local, global_target in resources.items():

@@ -9,7 +9,6 @@ import json
 import torch
 from quart import Quart, request, jsonify, make_response, send_from_directory
 
-from ..auth.api_auth import requires_authentication
 from ..common import (
     get_future_version_number,
     TENSOR_NAME,
@@ -109,8 +108,8 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         db_adapter_lambda = lambda: self.db_adapter
         perm_db_lambda = lambda: self.perm_db
 
-        from ..auth.api_auth import requires_authentication
-        requires_auth = requires_authentication(db_adapter_lambda, perm_db_lambda)
+        from ..auth.key_auth import requires_key_auth
+        requires_auth = requires_key_auth(db_adapter_lambda, perm_db_lambda)
 
         @self.app.route('/health', methods=['GET'])
         async def health_check():

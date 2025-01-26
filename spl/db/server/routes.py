@@ -10,8 +10,8 @@ from typing import get_type_hints, Dict, Any, Union, get_origin, get_args
 import types
 
 from ...models import TaskStatus, PermType, ServiceType, WithdrawalStatus
-from ...auth.api_auth import requires_authentication
-from ...auth.server_auth import requires_user_auth, requires_sot_auth
+from ...auth.key_auth import requires_key_auth
+from ...auth.user_auth import requires_user_or_key_auth, requires_sot_auth
 from ...util.enums import str_to_enum
 
 from .app import app, db_adapter, logger, get_perm_modify_db
@@ -28,16 +28,16 @@ def get_db_adapter():
     return db_adapter_server
 
 def requires_auth(f):
-    return requires_authentication(
+    return requires_key_auth(
         get_db_adapter,
         get_perm_modify_db
     )(f)
 
 def requires_user_auth_with_adapter(f):
-    return requires_user_auth(get_db_adapter)(f)
+    return requires_user_or_key_auth(get_db_adapter, get_perm_modify_db)(f)
 
 def requires_admin_auth_with_adapter(f):
-    return requires_user_auth(get_db_adapter, True)(f)
+    return requires_user_or_key_auth(get_db_adapter, get_perm_modify_db, True)(f)
 
 def requires_sot_auth_with_adapter(f):
     return requires_sot_auth(get_db_adapter)(f)
@@ -285,10 +285,10 @@ app.route('/get_sot_by_job_id', methods=['GET'], endpoint='get_sot_by_job_id_end
     create_get_route('SOT', db_adapter_server.get_sot_by_job_id, ['job_id'], auth_method=AuthMethod.KEY)
 )
 app.route('/get_instance_by_service_type', methods=['GET'], endpoint='get_instance_by_service_type_endpoint')(
-    create_get_route('Instance', db_adapter_server.get_instance_by_service_type, ['service_type','job_id'])
+    create_get_route('Instance', db_adapter_server.get_instance_by_service_type, ['service_type','job_id'], auth_method=AuthMethod.KEY)
 )
 app.route('/get_instances_by_job', methods=['GET'], endpoint='get_instances_by_job_endpoint')(
-    create_get_route('Instance', db_adapter_server.get_instances_by_job, ['job_id'])
+    create_get_route('Instance', db_adapter_server.get_instances_by_job, ['job_id'], auth_method=AuthMethod.KEY)
 )
 app.route('/get_tasks_for_job', methods=['GET'], endpoint='get_tasks_for_job_endpoint')(
     create_get_route('Task', db_adapter_server.get_tasks_with_pagination_for_job, ['job_id','offset','limit'])

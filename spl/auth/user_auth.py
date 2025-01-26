@@ -2,7 +2,7 @@
 
 import traceback
 import logging
-from quart import jsonify, request, g
+from quart import jsonify, request, g, make_response
 from functools import wraps
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -11,10 +11,14 @@ import time
 
 from .jwt_verification import verify_jwt
 from ..models.enums import PermType
+from .key_auth import requires_key_auth
 
 logger = logging.getLogger(__name__)
 
 EXPIRY_TIME = 10  # Seconds for signature validity
+
+class AuthError(Exception):
+    pass
 
 async def verify_signature(db_adapter, message, signature):
     """
@@ -28,42 +32,33 @@ async def verify_signature(db_adapter, message, signature):
     Returns:
         user_id (str) if verification is successful, else None.
     """
-    try:
-        # Encode the message using EIP-191
-        message_encoded = encode_defunct(text=message)
-        # Recover the address from the signature
-        recovered_address = Account.recover_message(message_encoded, signature=signature)
-        logger.debug(f"Recovered address from signature: {recovered_address}")
+    # Encode the message using EIP-191
+    message_encoded = encode_defunct(text=message)
+    # Recover the address from the signature
+    recovered_address = Account.recover_message(message_encoded, signature=signature)
+    logger.debug(f"Recovered address from signature: {recovered_address}")
 
-        # Retrieve the AccountKey using the recovered address
-        account_key = await db_adapter.account_key_from_public_key(recovered_address)
-        if not account_key:
-            logger.error(f"No AccountKey found for address: {recovered_address}")
-            return None
+    # Retrieve the AccountKey using the recovered address
+    account_key = await db_adapter.account_key_from_public_key(recovered_address)
+    if not account_key:
+        raise AuthError(f"No AccountKey found for address: {recovered_address}")
 
-        # Parse the message to extract nonce and timestamp
-        message_data = json.loads(message)
-        timestamp = message_data.get('timestamp')
+    # Parse the message to extract nonce and timestamp
+    message_data = json.loads(message)
+    timestamp = message_data.get('timestamp')
 
-        if not timestamp:
-            logger.error("Message missing nonce or timestamp")
-            return None
-
-        # Check if the message has expired
-        current_time = int(time.time())
-        if current_time - timestamp > EXPIRY_TIME:
-            logger.error("Message expired")
-            return None
-
-        # Return the associated user_id
-        return account_key.user_id
-
-    except (ValueError, json.JSONDecodeError) as e:
-        logger.error(f"Error during signature verification: {e}")
+    if not timestamp:
+        logger.error("Message missing nonce or timestamp")
         return None
-    except Exception as e:
-        logger.error(f"Unexpected error during signature verification: {e}")
+
+    # Check if the message has expired
+    current_time = int(time.time())
+    if current_time - timestamp > EXPIRY_TIME:
+        logger.error("Message expired")
         return None
+
+    # Return the associated user_id
+    return account_key.user_id
 
 def requires_user_auth(get_db_adapter, require_admin=False):
     """
@@ -97,6 +92,7 @@ def requires_user_auth(get_db_adapter, require_admin=False):
                         'user_id': user_id,
                         'token_payload': payload
                     }
+                    g.auth_type = 'user-jwt'
                     logger.debug(f"Authenticated via JWT: {user_id}")
                 except Exception as e:
                     logger.error(f"JWT verification failed: {e}")
@@ -120,6 +116,7 @@ def requires_user_auth(get_db_adapter, require_admin=False):
                 g.user = {
                     'user_id': user_id
                 }
+                g.auth_type = 'user-signature'
                     
             # Ensure the user account exists in the database
             user_obj = await db_adapter.get_or_create_account(user_id)
@@ -235,5 +232,62 @@ def requires_sot_auth(get_db_adapter):
 
             # Optionally store g.sot = sot_obj, g.job_id = job_id, etc.
             return await f(*args, **kwargs)
+        return wrapper
+    return decorator
+
+def _unify_response(resp):
+    """
+    If `resp` is a tuple (response, status_code) or (response, status_code, headers),
+    unify it into a single Quart Response object with the appropriate status_code.
+    """
+    if not isinstance(resp, tuple):
+        # Already a single response object or None
+        return resp
+    
+    # resp might have up to 3 items: (response_body, status_code, headers)
+    length = len(resp)
+    
+    if length == 2:
+        response_body, code = resp
+        if hasattr(response_body, 'status_code'):
+            # It's already a Response, just update the code
+            unified = response_body
+            unified.status_code = code
+            return unified
+        else:
+            # It's probably a string or dict, so create a new Response
+            unified = make_response(response_body, code)
+            return unified
+    
+    elif length == 3:
+        response_body, code, headers = resp
+        unified = make_response(response_body, code)
+        if isinstance(headers, dict):
+            for k, v in headers.items():
+                unified.headers[k] = v
+        return unified
+    
+    # Fallback: return as-is if we can't parse
+    return resp
+
+def requires_user_or_key_auth(get_db_adapter, get_perm_db, require_admin=False):
+    def decorator(f):
+        @wraps(f)
+        async def wrapper(*args, **kwargs):
+            # 1) Attempt user authentication
+            try:
+                user_auth_func = requires_user_auth(get_db_adapter, require_admin)(f)
+                user_resp = await user_auth_func(*args, **kwargs)
+                # Normalize tuple => single Response
+                user_resp_unified = _unify_response(user_resp)
+                logger.debug(f"User auth response => {user_resp_unified} (code={user_resp_unified.status_code})")
+                return user_resp_unified
+            except AuthError as e:
+                key_auth_func = requires_key_auth(get_db_adapter, get_perm_db)(f)
+                key_resp = await key_auth_func(*args, **kwargs)
+                key_resp_unified = _unify_response(key_resp)
+                return key_resp_unified
+
+            # Otherwise user-auth succeeded (or some other code)
         return wrapper
     return decorator

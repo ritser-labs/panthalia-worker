@@ -15,7 +15,8 @@ from .balance_details import DBAdapterBalanceDetailsMixin
 from .withdrawals import DBAdapterWithdrawalsMixin
 
 # If you need user_id_getter from auth:
-from ....auth.view import get_user_id as default_get_user_id
+from ....auth.view import (get_user_id as default_get_user_id,
+                           is_key_auth as default_is_key_auth)
 
 class DBAdapterServer(
     DBAdapterAccountsMixin,
@@ -29,14 +30,20 @@ class DBAdapterServer(
     DBAdapterBalanceDetailsMixin,
     DBAdapterWithdrawalsMixin,
 ):
-    def __init__(self, user_id_getter=None):
+    def __init__(self, user_id_getter=None, is_key_auth=None):
         super().__init__()
         if user_id_getter is None:
             user_id_getter = default_get_user_id
+        if is_key_auth is None:
+            is_key_auth = default_is_key_auth
         self._user_id_getter = user_id_getter
+        self._is_key_auth = is_key_auth
 
     def get_user_id(self):
         return self._user_id_getter()
+    
+    def is_key_auth(self):
+        return self._is_key_auth()
 
     def get_async_session(self):
         """

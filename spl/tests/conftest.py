@@ -54,15 +54,15 @@ def patch_api_auth():
     """
     Disable actual authentication for all tests so we don't need real JWT/Eth keys.
     """
-    with patch("spl.auth.api_auth.requires_authentication", lambda get_db_adapter, get_perm_db: lambda f: f), \
-         patch("spl.auth.server_auth.requires_user_auth", lambda get_db_adapter: lambda f: f):
+    with patch("spl.auth.key_auth.requires_key_auth", lambda get_db_adapter, get_perm_db: lambda f: f), \
+         patch("spl.auth.user_auth.requires_user_auth", lambda get_db_adapter: lambda f: f):
         yield
 
 
 @pytest.fixture
 def db_adapter_server_fixture():
     """Use a DBAdapterServer but override user_id_getter => 'testuser' by default."""
-    server = DBAdapterServer(user_id_getter=lambda: "testuser")
+    server = DBAdapterServer(user_id_getter=lambda: "testuser", is_key_auth=lambda: False)
     return server
 
 

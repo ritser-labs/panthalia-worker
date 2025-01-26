@@ -3,7 +3,7 @@
 import functools
 import json
 import logging
-from quart import request, jsonify
+from quart import request, jsonify, g
 from eth_account import Account
 from eth_account.messages import encode_defunct
 import time
@@ -25,7 +25,7 @@ async def verify_signature(db_adapter, message: str, signature: str, perm_db_col
 
     return await db_adapter.get_perm(recovered_address, perm_db_column)
 
-def requires_authentication(get_db_adapter, get_perm_db):
+def requires_key_auth(get_db_adapter, get_perm_db):
     def decorator(f):
         @functools.wraps(f)
         async def decorated_function(*args, **kwargs):
@@ -72,7 +72,7 @@ def requires_authentication(get_db_adapter, get_perm_db):
             if current_time - timestamp > EXPIRY_TIME:
                 logger.error("Message expired")
                 return jsonify({'error': 'Message expired'}), 403
-
+            g.auth_type = 'key'
             return await f(*args, **kwargs)
         return decorated_function
     return decorator
