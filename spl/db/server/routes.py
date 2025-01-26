@@ -627,16 +627,13 @@ app.route('/finalize_sanity_check', methods=['POST'], endpoint='finalize_sanity_
     create_post_route(db_adapter_server.finalize_sanity_check, ['task_id', 'is_valid'], 'success')
 )
 
-
-@app.route('/update_job_active', methods=['POST'], endpoint='update_job_active_endpoint')
-@require_json_keys('job_id', 'new_active')
-@handle_errors
-async def update_job_active():
-    data = await request.get_json()
-    job_id = data['job_id']
-    new_active = bool(data['new_active'])
-    await db_adapter_server.update_job_active(job_id, new_active)
-    return jsonify({'success': True}), 200
+app.route('/update_job_active', methods=['POST'], endpoint='update_job_active_endpoint')(
+    create_post_route(
+        db_adapter_server.update_job_active,
+        ['job_id', 'new_active'],
+        auth_method=AuthMethod.KEY
+    )
+)
 
 app.route('/create_stripe_credits_session', methods=['POST'], endpoint='create_stripe_credits_session_endpoint')(
     create_post_route(
