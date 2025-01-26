@@ -294,7 +294,7 @@ app.route('/get_tasks_for_job', methods=['GET'], endpoint='get_tasks_for_job_end
     create_get_route('Task', db_adapter_server.get_tasks_with_pagination_for_job, ['job_id','offset','limit'])
 )
 app.route('/get_all_instances', methods=['GET'], endpoint='get_all_instances_endpoint')(
-    create_get_route('Instance', db_adapter_server.get_all_instances, [])
+    create_get_route('Instance', db_adapter_server.get_all_instances, [], auth_method=AuthMethod.KEY)
 )
 app.route('/get_jobs_without_instances', methods=['GET'], endpoint='get_jobs_without_instances_endpoint')(
     create_get_route('Job', db_adapter_server.get_jobs_without_instances, [])
