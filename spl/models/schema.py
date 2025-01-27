@@ -127,6 +127,7 @@ class Sot(Serializable):
     job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False, unique=True)
     perm = Column(Integer, ForeignKey('perm_descriptions.id'), nullable=False)
     url = Column(String)
+    active = Column(Boolean, nullable=False, default=True)
     job = relationship("Job", back_populates="sot")
 
 class Instance(Serializable):

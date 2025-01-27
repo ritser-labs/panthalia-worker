@@ -2,7 +2,7 @@
 
 import logging
 from sqlalchemy import select, update
-from ....models import Job, Plugin, Subnet, Task, TaskStatus
+from ....models import Job, Plugin, Subnet, Task, TaskStatus, Sot
 from sqlalchemy.orm import joinedload
 
 logger = logging.getLogger(__name__)
@@ -142,9 +142,9 @@ class DBAdapterJobsPluginsMixin:
             await session.commit()
             return {'success': True}
 
-    async def update_job_active(self, job_id: int, new_active: bool):
+    async def update_job_active(self, job_id: int, active: bool):
         """
-        Overwrite job.active. If new_active=True, also set job.queued=True
+        Overwrite job.active. If active=True, also set job.queued=True
         and assigned_master_id=None so the Master will pick it up.
         """
         async with self.get_async_session() as session:
@@ -153,8 +153,8 @@ class DBAdapterJobsPluginsMixin:
                 logger.warning(f"[update_job_active] job_id={job_id} not found.")
                 return
 
-            job.active = new_active
-            if new_active:
+            job.active = active
+            if active:
                 # <--- This is the crucial fix so Master sees the job
                 job.queued = True
                 job.assigned_master_id = None
@@ -162,9 +162,28 @@ class DBAdapterJobsPluginsMixin:
             await session.commit()
 
         # If we set the job to inactive, also set any SOT for that job to inactive:
-        if new_active is False:
+        if active is False:
             sot = await self.get_sot_by_job_id(job_id)
             if sot and sot.active:  # Only if it's currently active
+                await self.update_sot_active(sot.id, False)
+    
+    async def stop_job(self, job_id: int):
+        async with self.get_async_session() as session:
+            user_id = self.get_user_id()
+            job = await session.get(Job, job_id)
+            if not job:
+                logger.warning(f"[stop_job] job_id={job_id} not found.")
+                return
+            if job.user_id != user_id:
+                logger.warning(f"[stop_job] job_id={job_id} does not belong to user_id={user_id}.")
+                return
+            
+            job.active = False
+            await session.commit()
+            
+            # Also stop the SOT if it exists
+            sot = await self.get_sot_by_job_id(job_id)
+            if sot and sot.active:
                 await self.update_sot_active(sot.id, False)
 
     async def get_jobs_in_progress(self):
@@ -241,14 +260,18 @@ class DBAdapterJobsPluginsMixin:
             jobs = result.scalars().all()
             return jobs
 
-    # The following placeholders assume you have update_sot_active or get_sot_by_job_id, etc.
     async def update_sot_active(self, sot_id: int, new_active: bool):
-        """
-        If you have a separate 'active' field for SOT, you'd do it here.
-        For now, we just log a placeholder.
-        """
-        # Example placeholder
-        logger.info(f"[update_sot_active] Setting SOT {sot_id} active={new_active} (Not fully implemented)")
+        async with self.get_async_session() as session:
+            stmt = (
+                update(Sot)
+                .where(Sot.id == sot_id)
+                .values(active=new_active)
+            )
+            await session.execute(stmt)
+            await session.commit()
+
+        self.logger.info(f"[update_sot_active] SOT {sot_id} set active={new_active}")
+
 
     async def get_sot_by_job_id(self, job_id: int):
         async with self.get_async_session() as session:

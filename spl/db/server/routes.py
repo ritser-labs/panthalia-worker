@@ -5,17 +5,16 @@ import traceback
 from functools import wraps
 from quart import request, jsonify
 from enum import Enum
-from inspect import signature
 from typing import get_type_hints, Dict, Any, Union, get_origin, get_args
 import types
 
 from ...models import TaskStatus, PermType, ServiceType, WithdrawalStatus
 from ...auth.key_auth import requires_key_auth
 from ...auth.user_auth import requires_user_or_key_auth, requires_sot_auth
-from ...util.enums import str_to_enum
 
 from .app import app, db_adapter, logger, get_perm_modify_db
 from .adapter import db_adapter_server
+from .parse import parse_args_with_types
 
 class AuthMethod(Enum):
     NONE = 0
@@ -77,74 +76,6 @@ def require_json_keys(*required_keys):
             return await f(*args, **kwargs, data=data)
         return wrapper
     return decorator
-
-def convert_to_type(value, expected_type):
-    if value is None:
-        # Check if expected_type can accept None, i.e. Union[..., None]
-        if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
-            if type(None) in get_args(expected_type):
-                return None
-        raise ValueError(f"Cannot convert None to {expected_type}")
-
-    # If it's an Enum, convert by name
-    if isinstance(expected_type, type) and issubclass(expected_type, Enum):
-        return str_to_enum(expected_type, value)
-
-    # If it's a list type (List[X]), recurse for each item
-    if get_origin(expected_type) is list:
-        inner_type = expected_type.__args__[0]
-        return [convert_to_type(v, inner_type) for v in value]
-
-    # If it's a Union, try each of the subtypes in turn
-    if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
-        for sub_type in get_args(expected_type):
-            try:
-                return convert_to_type(value, sub_type)
-            except ValueError:
-                continue
-        raise ValueError(f"Cannot convert {value} to any of {get_args(expected_type)}")
-
-    # Special check for booleans from string
-    if expected_type is bool and isinstance(value, str):
-        lower_val = value.lower()
-        if lower_val in ['true', '1']:
-            return True
-        elif lower_val in ['false', '0']:
-            return False
-        else:
-            raise ValueError(f"Cannot convert {value} to bool")
-
-    # Otherwise, just cast the value directly
-    try:
-        return expected_type(value)
-    except Exception as e:
-        raise ValueError(f"Error converting {value} to {expected_type}: {e}")
-
-def parse_args_with_types(func, args: Dict[str, Any]):
-    """
-    Utility that inspects the function signature and type hints, then
-    converts query/JSON parameters to the right Python types.
-    """
-    sig = signature(func)
-    hints = get_type_hints(func)
-    parsed_args = {}
-    for param_name, param in sig.parameters.items():
-        if param_name == 'self':
-            continue
-        if param_name in args:
-            if param_name in hints:
-                expected_type = hints[param_name]
-                value = args[param_name]
-                parsed_args[param_name] = convert_to_type(value, expected_type)
-            else:
-                parsed_args[param_name] = args[param_name]
-        else:
-            # If the function param has a default, we can skip
-            if param.default is not param.empty:
-                parsed_args[param_name] = param.default
-            else:
-                raise ValueError(f"Missing required parameter: '{param_name}'")
-    return parsed_args
 
 def create_route(
     handler_func,
@@ -580,6 +511,15 @@ app.route('/get_balance', methods=['GET'], endpoint='get_balance_endpoint')(
     )
 )
 
+app.route('/get_unmatched_orders_for_job', methods=['GET'], endpoint='get_unmatched_orders_for_job_endpoint')(
+    create_get_route(
+        'Order',
+        db_adapter_server.get_unmatched_orders_for_job,
+        ['job_id'],
+        auth_method=AuthMethod.KEY
+    )
+)
+
 # GET /get_free_instances_by_slot_type?slot_type=WORKER
 # => calls db_adapter_server.get_free_instances_by_slot_type(slot_type),
 #    returns a list of Instances with .job_id == None
@@ -589,6 +529,15 @@ app.route('/get_free_instances_by_slot_type', methods=['GET'], endpoint='get_fre
         method=db_adapter_server.get_free_instances_by_slot_type,
         params=['slot_type'],         # We'll pass ?slot_type=XYZ
         auth_method=AuthMethod.KEY    # You can choose an appropriate auth
+    )
+)
+
+app.route('/get_instance', methods=['GET'], endpoint='get_instance_endpoint')(
+    create_get_route(
+        entity_name='Instance',
+        method=db_adapter_server.get_instance,
+        params=['instance_id'],
+        auth_method=AuthMethod.KEY
     )
 )
 
@@ -617,9 +566,31 @@ app.route('/mark_job_as_done', methods=['POST'], endpoint='mark_job_as_done_endp
 app.route('/update_task_status', methods=['POST'], endpoint='update_task_status_endpoint')(
     create_post_route_return_id(db_adapter_server.update_task_status, ['task_id', 'job_id', 'status'], 'success')
 )
-app.route('/update_instance', methods=['POST'], endpoint='update_instance_endpoint')(
-    create_post_route_return_id(db_adapter_server.update_instance, ['instance_id'], 'success')
-)
+
+@app.route('/update_instance', methods=['POST'], endpoint='update_instance_endpoint')
+@requires_auth
+@handle_errors
+async def update_instance_endpoint():
+    """
+    Example partial-update route:
+      - 'instance_id' is mandatory
+      - everything else is optional; 
+        if present with 'null', sets DB to NULL
+        if omitted, leaves DB column alone
+    """
+    data = await request.get_json()
+    if not data:
+        return jsonify({'error': 'Missing JSON body'}), 400
+
+    # At minimum, 'instance_id' must be present:
+    if 'instance_id' not in data:
+        return jsonify({'error': 'Missing "instance_id" in JSON'}), 400
+
+    # Now forward the entire dict to your DB adapter
+    result = await db_adapter_server.update_instance(data)
+    # 'result' is typically a bool. Return a success JSON
+    return jsonify({'success': bool(result)}), 200
+
 app.route('/update_sot', methods=['POST'], endpoint='update_sot_endpoint')(
     create_post_route_return_id(db_adapter_server.update_sot, ['sot_id', 'url'], 'success')
 )
@@ -632,6 +603,14 @@ app.route('/update_job_active', methods=['POST'], endpoint='update_job_active_en
         db_adapter_server.update_job_active,
         ['job_id', 'new_active'],
         auth_method=AuthMethod.KEY
+    )
+)
+
+app.route('/stop_job', methods=['POST'], endpoint='stop_job_endpoint')(
+    create_post_route(
+        db_adapter_server.stop_job,
+        ['job_id'],
+        auth_method=AuthMethod.USER
     )
 )
 

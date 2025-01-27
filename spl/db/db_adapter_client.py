@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typeguard import typechecked
 
 from ..models import (
-    Job, Plugin, Subnet, Task, SlotType, Perm, Sot, Instance, ServiceType, Base, PermType,
+    Job, Plugin, Subnet, Task, SlotType, Perm, Sot, Instance, Order, Base, PermType,
     WithdrawalRequest
 )
 
@@ -220,6 +220,28 @@ class DBAdapterClient:
         return response.get('num_orders')
 
     @typechecked
+    async def get_unmatched_orders_for_job(self, job_id: int) -> list[Order]:
+        """
+        Calls GET /get_unmatched_orders_for_job?job_id=XYZ
+        and returns a list of Order objects that are unmatched
+        for the given job_id.
+        """
+        endpoint = "/get_unmatched_orders_for_job"
+        params = {"job_id": str(job_id)}
+        
+        response = await self._authenticated_request("GET", endpoint, params=params)
+        if "error" in response:
+            logging.error(f"Error fetching unmatched orders for job {job_id}: {response['error']}")
+            return []
+        
+        # Expecting a JSON array of orders
+        orders_list = []
+        for order_dict in response:
+            deserialized = self._deserialize(Order, order_dict)
+            orders_list.append(deserialized)
+        return orders_list
+
+    @typechecked
     async def get_tasks_for_job(self, job_id: int, offset: int = 0, limit: int = 20) -> Optional[List[Task]]:
         params = {'job_id': job_id, 'offset': offset, 'limit': limit}
         response = await self._authenticated_request('GET', '/get_tasks_for_job', params=params)
@@ -419,6 +441,10 @@ class DBAdapterClient:
             logger.error(response['error'])
             return None
         return [self._deserialize(Instance, instance) for instance in response]
+    
+    @typechecked
+    async def get_instance(self, instance_id: int) -> Optional[Instance]:
+        return await self._fetch_entity('/get_instance', Instance, params={'instance_id': instance_id})
 
     @typechecked
     async def get_all_instances(self) -> Optional[List[Instance]]:
@@ -442,13 +468,17 @@ class DBAdapterClient:
         return self._extract_id(response, 'instance_id')
 
     @typechecked
-    async def update_instance(self, instance_id: int, **kwargs: Any) -> bool:
-        data = {
-            'instance_id': instance_id,
-            **kwargs
-        }
-        response = await self._authenticated_request('POST', '/update_instance', data=data)
-        return 'success' in response
+    async def update_instance(self, update_data: dict) -> bool:
+        # e.g. ensure at least "instance_id" is present
+        if "instance_id" not in update_data:
+            raise ValueError("Missing instance_id")
+
+        response = await self._authenticated_request(
+            "POST",
+            "/update_instance",
+            data=update_data
+        )
+        return "success" in response
 
     @typechecked
     async def get_total_state_updates_for_job(self, job_id: int) -> Optional[int]:

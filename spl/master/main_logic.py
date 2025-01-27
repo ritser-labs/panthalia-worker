@@ -101,54 +101,49 @@ class Master:
 
     async def run_main(self):
         """
-        Keep spawning iteration tasks if job is "in-progress".
-        If job toggles inactive & has no tasks => Master stops.
+        Keep spawning iteration tasks if job is "active". If the job becomes
+        inactive, we don't forcibly stop; we just refrain from spawning new tasks.
+        If there are no tasks left, we exit. That exit notifies check_for_new_jobs
+        that the Master is done -> frees processes.
         """
         while not self.done:
-            # 1) Possibly check if job is still "active" for new tasks
             job_obj = await self.db_adapter.get_job(self.job_id)
             if not job_obj:
-                self.logger.info(f"[Master.run_main] job {self.job_id} no longer in DB? Stopping.")
+                self.logger.info(f"[Master.run_main] job {self.job_id} missing in DB -> stop.")
                 self.done = True
                 break
-            if not job_obj.active:
-                self.logger.debug(f"Job {self.job_id} inactive => no new iteration tasks, just finishing existing.")
 
-            # 2) concurrency logic
-            if job_obj.active and (len(self.tasks) < self.max_concurrent_iterations):
+            # If job is inactive, do not spawn more tasks. We'll only finish existing tasks:
+            can_spawn = (job_obj.active and (len(self.tasks) < self.max_concurrent_iterations))
+
+            if can_spawn:
                 new_task = asyncio.create_task(self.main_iteration(self.iteration))
                 self.tasks.append(new_task)
-                self.iteration += 1  # increment iteration index
+                self.iteration += 1
+            else:
+                await asyncio.sleep(1)
 
-            # 3) Wait for at least one task to finish or short timeout
+            # Check if any iteration tasks completed
             if self.tasks:
                 done_set, pending_set = await asyncio.wait(
                     self.tasks,
-                    timeout=1.0,
+                    timeout=0.5,
                     return_when=asyncio.FIRST_COMPLETED
                 )
                 for t in done_set:
                     self.tasks.remove(t)
             else:
-                await asyncio.sleep(1)
+                # If no tasks remain, check if the job is inactive or we reached max_iterations
+                if (not job_obj.active) or (self.iteration >= self.max_iterations):
+                    self.done = True
 
-            # 4) If job is inactive & no tasks => done
-            if not job_obj.active and not self.tasks:
-                self.logger.info(f"[Master.run_main] job {self.job_id} inactive, no tasks => done.")
-                self.done = True
-
-            # 5) If iteration >= self.max_iterations => finish tasks, stop
-            if self.iteration >= self.max_iterations:
-                self.logger.info(f"[Master.run_main] job {self.job_id} reached max_iterations => finishing tasks.")
-                if self.tasks:
-                    await asyncio.wait(self.tasks)
-                self.done = True
-        
-        # final wait if tasks remain
+        # Once the loop ends, if we still have tasks in flight, wait for them:
         if self.tasks:
-            self.logger.info(f"[Master.run_main] loop ended => waiting for {len(self.tasks)} tasks to finish.")
+            self.logger.info(f"[Master.run_main] finishing {len(self.tasks)} leftover tasks.")
             await asyncio.wait(self.tasks)
-        self.logger.info(f"[Master.run_main] All done for job {self.job_id}.")
+
+        self.logger.info(f"[Master.run_main] Master done for job {self.job_id}.")
+
 
     async def main_iteration(self, iteration_number):
         """

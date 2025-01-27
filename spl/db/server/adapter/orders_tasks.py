@@ -2,8 +2,8 @@
 
 import logging
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import select, update, desc, func, or_
-from sqlalchemy.orm import joinedload
+from sqlalchemy import select, update, desc, func, or_, and_
+from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List, Dict
 import json
@@ -222,10 +222,18 @@ class DBAdapterOrdersTasksMixin:
     async def delete_order(self, order_id: int):
         async with self.get_async_session() as session:
             try:
-                order_stmt = select(Order).where(Order.id == order_id)
+                order_stmt = (
+                    select(Order)
+                    .where(Order.id == order_id)
+                    .options(
+                        selectinload(Order.hold),
+                        selectinload(Order.bid_task).selectinload(Task.ask),
+                        selectinload(Order.ask_task).selectinload(Task.bid),
+                    )
+                )
                 res = await session.execute(order_stmt)
                 order = res.scalar_one_or_none()
-                if not order or order.user_id != self.get_user_id():
+                if not order or (not self.is_key_auth() and order.user_id != self.get_user_id()):
                     raise PermissionError("No access to delete this order.")
 
                 if (order.order_type == OrderType.Bid and order.bid_task and order.bid_task.ask) or \
@@ -247,7 +255,7 @@ class DBAdapterOrdersTasksMixin:
                     raise ValueError("No hold found for this order.")
                 await self.free_funds_from_hold(session, order.hold, freed_amount, order)
 
-                session.delete(order)
+                await session.delete(order)
                 await self.match_bid_ask_orders(session, order.subnet_id)
                 await session.commit()
 
@@ -692,3 +700,49 @@ class DBAdapterOrdersTasksMixin:
             orders = result.scalars().all()
             # convert each to as_dict if you want to return it directly
             return [o.as_dict() for o in orders]
+        
+    async def get_unmatched_orders_for_job(self, job_id: int):
+        """
+        Return all unmatched Orders (both Bid and Ask) whose Task is associated 
+        with the given job_id.
+
+        "Unmatched" means:
+        - Bid: the Task has no .ask (Task.ask == None)
+        - Ask: the Task has no .bid (Task.bid == None)
+
+        We exclude any Ask whose ask_task_id is NULL because that can't be tied 
+        back to a specific job_id (there's no Task).
+        """
+        async with self.get_async_session() as session:
+            # 1) Unmatched Bids:
+            #   Join Orders -> Task on (Order.bid_task_id == Task.id),
+            #   check (Task.ask == None) => no corresponding Ask order,
+            #   filter by job_id to ensure it belongs to that job.
+            stmt_bids = (
+                select(Order)
+                .join(Task, Task.id == Order.bid_task_id)
+                .where(
+                    Order.order_type == OrderType.Bid,
+                    Task.job_id == job_id,
+                    Task.ask == None    # unmatched => no Ask referencing this Task
+                )
+            )
+            unmatched_bids = (await session.execute(stmt_bids)).scalars().all()
+
+            # 2) Unmatched Asks:
+            #   Join Orders -> Task on (Order.ask_task_id == Task.id),
+            #   check (Task.bid == None) => no corresponding Bid order,
+            #   filter by job_id to ensure it belongs to that job.
+            stmt_asks = (
+                select(Order)
+                .join(Task, Task.id == Order.ask_task_id)
+                .where(
+                    Order.order_type == OrderType.Ask,
+                    Task.job_id == job_id,
+                    Task.bid == None    # unmatched => no Bid referencing this Task
+                )
+            )
+            unmatched_asks = (await session.execute(stmt_asks)).scalars().all()
+
+            # Combine & return. (No duplicates, since Bids & Asks are disjoint.)
+            return unmatched_bids + unmatched_asks
