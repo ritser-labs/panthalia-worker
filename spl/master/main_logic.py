@@ -399,7 +399,8 @@ class Master:
         """
         Return price for your tasks. (Hard-coded to 1 for now.)
         """
-        return 1
+        subnet_db = await self.db_adapter.get_subnet(self.subnet_id)
+        return subnet_db.target_price
 
     def generate_message(self, endpoint):
         import uuid

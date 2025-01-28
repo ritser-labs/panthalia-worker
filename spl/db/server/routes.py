@@ -487,7 +487,10 @@ app.route('/delete_account_key', methods=['POST'], endpoint='delete_account_key_
     create_post_route(db_adapter_server.delete_account_key, ['account_key_id'], auth_method=AuthMethod.USER)
 )
 app.route('/create_subnet', methods=['POST'], endpoint='create_subnet_endpoint')(
-    create_post_route_return_id(db_adapter_server.create_subnet, ['dispute_period', 'solve_period', 'stake_multiplier'], 'subnet_id')
+    create_post_route_return_id(db_adapter_server.create_subnet, ['dispute_period', 'solve_period', 'stake_multiplier', 'target_price'], 'subnet_id')
+)
+app.route('/set_subnet_target_price', methods=['POST'], endpoint='set_subnet_target_price_endpoint')(
+    create_post_route(db_adapter_server.set_subnet_target_price, ['subnet_id', 'target_price'], auth_method=AuthMethod.KEY)
 )
 app.route('/create_state_update', methods=['POST'], endpoint='create_state_update_endpoint')(
     create_post_route_return_id(db_adapter_server.create_state_update, ['job_id', 'data'], 'state_update_id')

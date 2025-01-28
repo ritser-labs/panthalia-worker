@@ -76,8 +76,8 @@ def quantize_gradients_int8(tensor):
 
 
 async def get_ask_price():
-    return 1
-
+    subnet_db = await db_adapter.get_subnet(args.subnet_id)
+    return subnet_db.target_price
 
 async def deposit_stake():
     """

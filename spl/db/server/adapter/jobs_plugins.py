@@ -25,17 +25,28 @@ class DBAdapterJobsPluginsMixin:
             await session.refresh(new_job)
             return new_job.id
 
-    async def create_subnet(self, dispute_period: int, solve_period: int, stake_multiplier: float):
+    async def create_subnet(self, dispute_period: int, solve_period: int, stake_multiplier: float, target_price: float=1):
         async with self.get_async_session() as session:
             new_subnet = Subnet(
                 dispute_period=dispute_period,
                 solve_period=solve_period,
-                stake_multiplier=stake_multiplier
+                stake_multiplier=stake_multiplier,
+                target_price=target_price
             )
             session.add(new_subnet)
             await session.commit()
             await session.refresh(new_subnet)
             return new_subnet.id
+    
+    async def set_subnet_target_price(self, subnet_id: int, target_price: float):
+        async with self.get_async_session() as session:
+            stmt = (
+                update(Subnet)
+                .where(Subnet.id == subnet_id)
+                .values(target_price=target_price)
+            )
+            await session.execute(stmt)
+            await session.commit()
 
     async def create_plugin(self, name: str, code: str):
         async with self.get_async_session() as session:

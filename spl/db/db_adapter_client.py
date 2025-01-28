@@ -184,14 +184,24 @@ class DBAdapterClient:
         return await self._fetch_entity('/get_subnet', Subnet, params={'subnet_id': subnet_id})
 
     @typechecked
-    async def create_subnet(self, dispute_period: int, solve_period: int, stake_multiplier: float) -> Optional[int]:
+    async def create_subnet(self, dispute_period: int, solve_period: int, stake_multiplier: float, target_price: int=1) -> Optional[int]:
         data = {
             'dispute_period': dispute_period,
             'solve_period': solve_period,
-            'stake_multiplier': stake_multiplier
+            'stake_multiplier': stake_multiplier,
+            'target_price': target_price
         }
         response = await self._authenticated_request('POST', '/create_subnet', data=data)
         return self._extract_id(response, 'subnet_id')
+
+    @typechecked
+    async def set_subnet_target_price(self, subnet_id: int, target_price: int) -> bool:
+        data = {
+            'subnet_id': subnet_id,
+            'target_price': target_price
+        }
+        response = await self._authenticated_request('POST', '/set_subnet_target_price', data=data)
+        return 'success' in response
 
     @typechecked
     async def get_task(self, task_id: int) -> Optional[Task]:
