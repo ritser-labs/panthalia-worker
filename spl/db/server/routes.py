@@ -1,4 +1,4 @@
-# spl/db/server/routes.py
+# file: spl/db/server/routes.py
 
 import logging
 import traceback
@@ -41,7 +41,6 @@ def requires_admin_auth_with_adapter(f):
 def requires_sot_auth_with_adapter(f):
     return requires_sot_auth(get_db_adapter)(f)
 
-
 def handle_errors(f):
     @wraps(f)
     async def wrapper(*args, **kwargs):
@@ -77,6 +76,10 @@ def require_json_keys(*required_keys):
         return wrapper
     return decorator
 
+###############################################################################
+# Patching create_post_route(...) and create_post_route_return_id(...) so that
+# any bool return is wrapped in { "success": boolval }
+###############################################################################
 def create_route(
     handler_func,
     method,
@@ -88,8 +91,9 @@ def create_route(
 ):
     """
     Helper that creates a route handler that parses either query params or JSON,
-    calls `method`, and returns JSON. 
+    calls `method`, and returns JSON.
     """
+
     def recursive_as_dict(obj):
         if isinstance(obj, dict):
             return {k: recursive_as_dict(v) for k, v in obj.items()}
@@ -113,16 +117,35 @@ def create_route(
                         return jsonify({
                             'error': f'Missing parameters: {", ".join(missing)}'
                         }), 400
+
                 parsed_data = parse_args_with_types(method, data)
                 result = await method(**parsed_data)
-                if id_key:
+
+                # Ensure consistent JSON responses:
+                if isinstance(result, bool):
+                    # Wrap bool in { 'success': boolval }
+                    return jsonify({'success': result}), 200
+                elif id_key and isinstance(result, (int, str)):
+                    # For routes returning an ID
                     return jsonify({id_key: result}), 200
-                return jsonify(result or {'success': True}), 200
+                elif result is None:
+                    # default
+                    if id_key:
+                        return jsonify({id_key: None}), 200
+                    else:
+                        return jsonify({'success': True}), 200
+                elif isinstance(result, dict):
+                    return jsonify(result), 200
+                else:
+                    # e.g. a list or something else => wrap it
+                    return jsonify(result), 200
+
             else:
                 # For GET, parse query params
                 query_params = {p: request.args.get(p) for p in (params or [])}
                 parsed_params = parse_args_with_types(method, query_params)
                 result = await method(**parsed_params)
+
                 if isinstance(result, list):
                     return jsonify([recursive_as_dict(item) for item in result]), 200
                 if isinstance(result, dict):
@@ -130,6 +153,7 @@ def create_route(
                 if result:
                     return jsonify(recursive_as_dict(result)), 200
                 return jsonify({'error': f'{method.__name__} not found'}), 404
+
         except ValueError as ve:
             logging.error(f"Validation error in {method.__name__}: {ve}")
             return jsonify({'error': str(ve)}), 400
@@ -158,8 +182,6 @@ def create_route(
 
     return handle_errors(handler)
 
-
-# Shortcut: create routes for GET & POST quickly
 def create_get_route(entity_name, method, params, auth_method=AuthMethod.NONE):
     return create_route(
         None, method,
@@ -183,7 +205,6 @@ def create_post_route_return_id(method, required_keys, id_key, auth_method=AuthM
         auth_method=auth_method,
         is_post=True
     )
-
 
 ################################################################
 # Basic GET routes for reading Job, Plugin, etc.
@@ -264,10 +285,31 @@ async def get_task_count_for_job():
 @handle_errors
 async def get_task_count_by_status_for_job():
     job_id = request.args.get('job_id', type=int)
-    status_list = request.args.getlist('statuses')
-    statuses = [TaskStatus[status] for status in status_list]
+    
+    # Gather whatever came in as 'statuses'
+    raw_list = request.args.getlist('statuses')
+    if not raw_list:
+        return jsonify({'error': 'No statuses provided'}), 400
+
+    # Each raw_list entry might be a single item ("SolutionSubmitted") or a comma-list ("SolutionSubmitted,ResolvedCorrect")
+    # We'll flatten them all out:
+    all_status_parts = []
+    for item in raw_list:
+        # Split on commas, strip whitespace
+        parts = [p.strip() for p in item.split(',')]
+        all_status_parts.extend(parts)
+
+    # Convert each recognized string to a TaskStatus
+    statuses = []
+    for st_str in all_status_parts:
+        if st_str not in TaskStatus.__members__:
+            return jsonify({'error': f'Invalid status: {st_str}'}), 400
+        statuses.append(TaskStatus[st_str])
+
+    # Now pass the list of TaskStatus enum values to your DB method
     task_count_by_status = await db_adapter_server.get_task_count_by_status_for_job(job_id, statuses)
     return jsonify(task_count_by_status), 200
+
 
 @app.route('/get_total_state_updates_for_job', methods=['GET'], endpoint='get_total_state_updates_for_job_endpoint')
 @require_params('job_id')
@@ -282,8 +324,26 @@ async def get_total_state_updates_for_job():
 @handle_errors
 async def get_last_task_with_status():
     job_id = request.args.get('job_id', type=int)
-    status_list = request.args.getlist('statuses')
-    statuses = [TaskStatus[status] for status in status_list]
+
+    # Gather whatever came in as 'statuses'
+    raw_list = request.args.getlist('statuses')
+    if not raw_list:
+        return jsonify({'error': 'No statuses provided'}), 400
+
+    # Flatten out comma-separated values
+    all_status_parts = []
+    for item in raw_list:
+        parts = [p.strip() for p in item.split(',')]
+        all_status_parts.extend(parts)
+
+    # Convert each recognized string to a TaskStatus enum
+    statuses = []
+    for st_str in all_status_parts:
+        if st_str not in TaskStatus.__members__:
+            return jsonify({'error': f'Invalid status: {st_str}'}), 400
+        statuses.append(TaskStatus[st_str])
+
+    # Now pass the list of enum values to your DB method
     last_task = await db_adapter_server.get_last_task_with_status(job_id, statuses)
     if last_task:
         return jsonify(last_task.as_dict()), 200
@@ -528,10 +588,10 @@ app.route('/get_unmatched_orders_for_job', methods=['GET'], endpoint='get_unmatc
 #    returns a list of Instances with .job_id == None
 app.route('/get_free_instances_by_slot_type', methods=['GET'], endpoint='get_free_instances_by_slot_type_endpoint')(
     create_get_route(
-        entity_name='FreeInstances',  # Just a label for logs
+        entity_name='FreeInstances',
         method=db_adapter_server.get_free_instances_by_slot_type,
-        params=['slot_type'],         # We'll pass ?slot_type=XYZ
-        auth_method=AuthMethod.KEY    # You can choose an appropriate auth
+        params=['slot_type'],
+        auth_method=AuthMethod.KEY
     )
 )
 
@@ -544,18 +604,17 @@ app.route('/get_instance', methods=['GET'], endpoint='get_instance_endpoint')(
     )
 )
 
-# POST /reserve_instance
-# => JSON { "instance_id": 123, "job_id": 999 }
-# => tries db_adapter_server.reserve_instance(instance_id, job_id)
+# POST /reserve_instance => JSON { "instance_id": 123, "job_id": 999 }
 app.route('/reserve_instance', methods=['POST'], endpoint='reserve_instance_endpoint')(
     create_post_route(
         method=db_adapter_server.reserve_instance,
         required_keys=['instance_id', 'job_id'],
-        auth_method=AuthMethod.KEY    # Or whichever auth you want
+        auth_method=AuthMethod.KEY
     )
 )
+
 ################################################################
-# Updating / last nonce / iteration, etc.
+# Updating / iteration, etc.
 ################################################################
 app.route('/update_job_iteration', methods=['POST'], endpoint='update_job_iteration_endpoint')(
     create_post_route_return_id(db_adapter_server.update_job_iteration, ['job_id', 'new_iteration'], 'success')
@@ -566,32 +625,75 @@ app.route('/update_job_sot_url', methods=['POST'], endpoint='update_job_sot_url_
 app.route('/mark_job_as_done', methods=['POST'], endpoint='mark_job_as_done_endpoint')(
     create_post_route_return_id(db_adapter_server.mark_job_as_done, ['job_id'], 'success')
 )
+
+
+############################################################################
+# FIXED: If the user sends "SolutionSubmitted,ResolvedCorrect,ResolvedIncorrect"
+#        we now take the LAST item, e.g. "ResolvedIncorrect", not the first.
+############################################################################
+async def _update_task_status_wrapper(task_id: int, job_id: int, status: str):
+    """
+    If the user sends something like 'SolutionSubmitted,ResolvedCorrect,ResolvedIncorrect',
+    we parse from right-to-left, ignoring any pieces not in TaskStatus. 
+    Once we find a valid piece, we update using that.
+    
+    Also logs extra debug info about the error if no piece is recognized.
+    """
+    from ...models import TaskStatus
+    from .adapter import db_adapter_server
+
+    # Log what we actually received
+    logger.info(f"[_update_task_status_wrapper] Received status string={status!r}")
+
+    # Split on commas
+    parts = [p.strip() for p in status.split(',')]
+    logger.debug(f"[_update_task_status_wrapper] Split parts => {parts}")
+
+    recognized_status = None
+
+    # Try from the last piece (right) to the first (left):
+    for piece in reversed(parts):
+        if piece in TaskStatus.__members__:
+            recognized_status = TaskStatus[piece]
+            logger.info(f"[_update_task_status_wrapper] Found recognized status piece={piece!r}")
+            break
+        else:
+            logger.debug(f"[_update_task_status_wrapper] Ignoring unknown piece={piece!r}")
+
+    if not recognized_status:
+        # Log an error with the full original string:
+        logger.error(
+            "[_update_task_status_wrapper] FAILED to parse a valid TaskStatus "
+            f"from {status!r}. Split parts={parts}"
+        )
+        raise ValueError(f"No recognized TaskStatus in {status!r}")
+
+    # Now we have a recognized_status from the enum
+    return await db_adapter_server.update_task_status(
+        task_id, job_id, recognized_status.name
+    )
+
+
 app.route('/update_task_status', methods=['POST'], endpoint='update_task_status_endpoint')(
-    create_post_route_return_id(db_adapter_server.update_task_status, ['task_id', 'job_id', 'status'], 'success')
+    create_post_route_return_id(
+        _update_task_status_wrapper,
+        ['task_id', 'job_id', 'status'],
+        'success'
+    )
 )
 
 @app.route('/update_instance', methods=['POST'], endpoint='update_instance_endpoint')
 @requires_auth
 @handle_errors
 async def update_instance_endpoint():
-    """
-    Example partial-update route:
-      - 'instance_id' is mandatory
-      - everything else is optional; 
-        if present with 'null', sets DB to NULL
-        if omitted, leaves DB column alone
-    """
     data = await request.get_json()
     if not data:
         return jsonify({'error': 'Missing JSON body'}), 400
 
-    # At minimum, 'instance_id' must be present:
     if 'instance_id' not in data:
         return jsonify({'error': 'Missing "instance_id" in JSON'}), 400
 
-    # Now forward the entire dict to your DB adapter
     result = await db_adapter_server.update_instance(data)
-    # 'result' is typically a bool. Return a success JSON
     return jsonify({'success': bool(result)}), 200
 
 app.route('/update_sot', methods=['POST'], endpoint='update_sot_endpoint')(
@@ -637,7 +739,6 @@ app.route('/create_stripe_auth_session', methods=['POST'], endpoint='create_stri
 async def stripe_webhook_route():
     payload = await request.get_data()
     sig_header = request.headers.get("Stripe-Signature", "")
-
     db_adapter = get_db_adapter()
     response = await db_adapter.handle_stripe_webhook(payload, sig_header)
     if "error" in response:
@@ -647,22 +748,19 @@ async def stripe_webhook_route():
 app.route('/debug_invariant', methods=['GET'], endpoint='debug_invariant_endpoint')(
     create_get_route(
         entity_name='InvariantResult',
-        method=db_adapter_server.check_invariant, 
+        method=db_adapter_server.check_invariant,
         params=[],
         auth_method=AuthMethod.NONE
     )
 )
 
-
 #
 # POST /update_job_queue_status
-#
-# ★ FIXED: We now expect "new_queued" instead of "queued" to match the client code. ★
 #
 app.route('/update_job_queue_status', methods=['POST'], endpoint='update_job_queue_status_endpoint')(
     create_post_route(
         method=db_adapter_server.update_job_queue_status,
-        required_keys=['job_id', 'new_queued', 'assigned_master_id'],  # <-- changed from 'queued' to 'new_queued'
+        required_keys=['job_id', 'new_queued', 'assigned_master_id'],
         auth_method=AuthMethod.KEY
     )
 )
@@ -680,7 +778,7 @@ app.route('/get_unassigned_queued_jobs', methods=['GET'], endpoint='get_unassign
 )
 
 #
-# GET /get_jobs_assigned_to_master?master_id=XXXX
+# GET /get_jobs_assigned_to_master?master_id=XYZ
 #
 app.route('/get_jobs_assigned_to_master', methods=['GET'], endpoint='get_jobs_assigned_to_master_endpoint')(
     create_get_route(
@@ -691,7 +789,7 @@ app.route('/get_jobs_assigned_to_master', methods=['GET'], endpoint='get_jobs_as
     )
 )
 
-app.route('/get_unassigned_unqueued_active_jobs', methods=['GET'], endpoint='get_unassighned_unqueued_active_jobs_endpoint')(
+app.route('/get_unassigned_unqueued_active_jobs', methods=['GET'], endpoint='get_unassigned_unqueued_active_jobs_endpoint')(
     create_get_route(
         entity_name='Job',
         method=db_adapter_server.get_unassigned_unqueued_active_jobs,
