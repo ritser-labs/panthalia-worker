@@ -8,6 +8,7 @@ import aiohttp
 
 from ..models import TaskStatus
 from .config import args
+from ..db.db_adapter_client import DBAdapterClient
 
 logger = logging.getLogger(__name__)
 
@@ -218,21 +219,11 @@ async def _find_iteration_for_task(db_adapter, job_id: int, old_task_id: int):
 ###############################################################################
 # finalize_sanity_check
 ###############################################################################
-async def _finalize_sanity_check(db_adapter, job_id: int, task_id: int, is_valid: bool):
-    """
-    Called inside wait_for_result(...) if the Task is in SanityCheckPending
-    and has a result. We simply POST to /finalize_sanity_check to set it
-    ResolvedCorrect or ResolvedIncorrect.
-    """
-    import aiohttp
+async def _finalize_sanity_check(db_adapter: DBAdapterClient, job_id: int, task_id: int, is_valid: bool):
+    success = await db_adapter.finalize_sanity_check(task_id, is_valid)
+    if not success:
+        logger.error("[_finalize_sanity_check] finalize_sanity_check call failed")
 
-    url = f"{db_adapter.base_url}/finalize_sanity_check"
-    payload = {"task_id": task_id, "is_valid": is_valid}
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                logger.error(f"[_finalize_sanity_check] error => {text}")
 
 
 ###############################################################################

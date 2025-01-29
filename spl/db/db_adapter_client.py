@@ -715,3 +715,20 @@ class DBAdapterClient:
         if "success" in response:
             return True
         return False
+
+    @typechecked
+    async def finalize_sanity_check(self, task_id: int, is_valid: bool) -> bool:
+        """
+        Finalizes sanity check for a task by POSTing to /finalize_sanity_check with
+        an Authorization header. Returns True on success, otherwise False.
+        """
+        data = {
+            "task_id": task_id,
+            "is_valid": is_valid
+        }
+        response = await self._authenticated_request(
+            method="POST",
+            endpoint="/finalize_sanity_check",
+            data=data
+        )
+        return response.get("success", False)
