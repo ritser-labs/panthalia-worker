@@ -236,16 +236,22 @@ class DBAdapterOrdersTasksMixin:
                 if not order or (not self.is_key_auth() and order.user_id != self.get_user_id()):
                     raise PermissionError("No access to delete this order.")
 
-                if (order.order_type == OrderType.Bid and order.bid_task and order.bid_task.ask) or \
-                   (order.order_type == OrderType.Ask and order.ask_task and order.ask_task.bid):
+                # Ensure order is unmatched:
+                if (
+                    (order.order_type == OrderType.Bid and order.bid_task and order.bid_task.ask)
+                    or
+                    (order.order_type == OrderType.Ask and order.ask_task and order.ask_task.bid)
+                ):
                     raise ValueError("Cannot delete an order that is already matched.")
 
+                # Grab the subnet for stake multiplier
                 subnet_stmt = select(Subnet).where(Subnet.id == order.subnet_id)
                 subnet_res = await session.execute(subnet_stmt)
                 subnet = subnet_res.scalar_one_or_none()
                 if not subnet:
                     raise ValueError("Subnet not found")
 
+                # Figure out how much we free from the hold
                 if order.order_type == OrderType.Bid:
                     freed_amount = order.price
                 else:
@@ -253,10 +259,24 @@ class DBAdapterOrdersTasksMixin:
 
                 if not order.hold:
                     raise ValueError("No hold found for this order.")
+
+                # Free the reserved funds
                 await self.free_funds_from_hold(session, order.hold, freed_amount, order)
 
+                # ───────────────────────────────────────────────────────────
+                # NEW LOGIC: Also delete the corresponding Task, if any
+                # ───────────────────────────────────────────────────────────
+                if order.order_type == OrderType.Bid and order.bid_task:
+                    session.delete(order.bid_task)
+                elif order.order_type == OrderType.Ask and order.ask_task:
+                    session.delete(order.ask_task)
+
+                # Now delete the actual Order
                 await session.delete(order)
+
+                # Attempt any new bid/ask matching if needed
                 await self.match_bid_ask_orders(session, order.subnet_id)
+
                 await session.commit()
 
             except Exception:
