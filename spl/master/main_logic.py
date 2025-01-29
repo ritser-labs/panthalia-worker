@@ -1,24 +1,36 @@
-# spl/master/main_logic.py
+# file: spl/master/main_logic.py
 
 import asyncio
 import json
-import time  # <-- ADDED to store last_task_creation_time
+import time
 import datetime
-import math
 import logging
 import aiohttp
 import os
-from eth_account.messages import encode_defunct
 from eth_account import Account
+from eth_account.messages import encode_defunct
+
 from .config import args
 from ..db.db_adapter_client import DBAdapterClient
 from ..plugins.manager import get_plugin
-from ..models import TaskStatus, ServiceType, OrderType
+from ..models import TaskStatus
 from ..common import (
-    MAX_SUBMIT_TASK_RETRY_DURATION, TENSOR_NAME,
+    MAX_SUBMIT_TASK_RETRY_DURATION,
+    TENSOR_NAME,
 )
 
-logging.getLogger(__name__)
+# Import iteration helpers from iteration_logic.py
+from .iteration_logic import (
+    wait_for_result,
+    get_input_url_with_persist,
+    submit_task_with_persist,
+    get_iteration_state,
+    save_iteration_state,
+    remove_iteration_entry,
+)
+
+logger = logging.getLogger(__name__)
+
 
 class Master:
     def __init__(
@@ -26,11 +38,20 @@ class Master:
         sot_url: str,
         job_id: int,
         subnet_id: int,
-        db_adapter,
+        db_adapter: DBAdapterClient,
         max_iterations: float,
         detailed_logs: bool,
         max_concurrent_iterations: int = 4
     ):
+        """
+        :param sot_url:  The SOT base URL (e.g. http://localhost:5001)
+        :param job_id:   The Job ID in the DB
+        :param subnet_id:The Subnet ID
+        :param db_adapter: DBAdapterClient instance for DB queries
+        :param max_iterations: Max iteration count
+        :param detailed_logs:  If True, set logger to DEBUG
+        :param max_concurrent_iterations: concurrency limit
+        """
         self.sot_url = sot_url
         self.job_id = job_id
         self.subnet_id = subnet_id
@@ -41,18 +62,15 @@ class Master:
 
         self.logger = logging.getLogger(__name__)
         self.done = False
-        self.iteration_count = 0
-        self.tasks = []
+        self.iteration = None
+        self.losses = []
+        self.tasks = []  # each is an asyncio.Task for an iteration
+
+        # The key in master_state_json where iteration sub-states live
+        self.state_key = "master_iteration_state"
 
         if detailed_logs:
             logging.getLogger().setLevel(logging.DEBUG)
-
-        # We'll track iteration in code, but also store in DB
-        self.iteration = None
-        self.losses = []  # store running losses in memory & DB
-
-        # We'll store iteration sub-states in DB under key = "master_iteration_state"
-        self.state_key = "master_iteration_state"
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.join(script_dir, "..", "data", "state")
@@ -61,69 +79,61 @@ class Master:
 
     async def initialize(self):
         """
-        Load iteration tracking from DB:
-          - job.iteration
-          - master_losses
-          - any incomplete iteration in job.state_json["master_iteration_state"]
+        Fetch the job & plugin from DB, load iteration & existing loss array from master_state_json.
         """
-        self.plugin = await get_plugin(
-            (await self.db_adapter.get_job(self.job_id)).plugin_id,
-            self.db_adapter
-        )
-        job = await self.db_adapter.get_job(self.job_id)
-        if not job:
-            raise ValueError(f"No job found with ID {self.job_id}")
+        job_obj = await self.db_adapter.get_job(self.job_id)
+        if not job_obj:
+            raise ValueError(f"No job found with ID={self.job_id}")
 
-        self.iteration = job.iteration
+        self.plugin = await get_plugin(job_obj.plugin_id, self.db_adapter)
+        self.iteration = job_obj.iteration
 
-        # Load known data from job.state_json
+        # Load stored master_state_json from DB
         state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
         self.losses = state_data.get("master_losses", [])
 
-        # Possibly resume an unfinished iteration from the DB
+        # Possibly resume an unfinished iteration
         iteration_state_obj = state_data.get(self.state_key, {})
-        last_unfinished_iteration = None
+        last_unfinished = None
         for it_str, stage_info in iteration_state_obj.items():
             try:
                 it_num = int(it_str)
                 if stage_info.get("stage") != "done":
-                    last_unfinished_iteration = (it_num, stage_info)
+                    last_unfinished = (it_num, stage_info)
             except:
                 pass
 
-        if last_unfinished_iteration:
-            it_num, stage_info = last_unfinished_iteration
+        if last_unfinished:
+            it_num, stage_info = last_unfinished
             if it_num > self.iteration:
                 self.iteration = it_num
-            logging.info(f"Resuming iteration {it_num} from stage {stage_info.get('stage')}")
+            logger.info(f"[Master.initialize] Resuming iteration={it_num}, stage={stage_info.get('stage')}")
 
-        logging.info(f"Master init complete. iteration={self.iteration}, losses={self.losses}")
+        logger.info(f"[Master.initialize] iteration={self.iteration}, known_losses={self.losses}")
 
     async def run_main(self):
         """
-        Keep spawning iteration tasks if job is "active". If the job becomes
-        inactive, we don't forcibly stop; we just refrain from spawning new tasks.
-        If there are no tasks left, we exit. That exit notifies check_for_new_jobs
-        that the Master is done -> frees processes.
+        Loop to spawn iteration tasks if job is active. If job is inactive or we 
+        hit max_iterations, we eventually end. Also waits for all iteration tasks.
         """
         while not self.done:
             job_obj = await self.db_adapter.get_job(self.job_id)
             if not job_obj:
-                self.logger.info(f"[Master.run_main] job {self.job_id} missing in DB -> stop.")
+                logger.info(f"[Master.run_main] job {self.job_id} missing => stop.")
                 self.done = True
                 break
 
-            # If job is inactive, do not spawn more tasks. We'll only finish existing tasks:
             can_spawn = (job_obj.active and (len(self.tasks) < self.max_concurrent_iterations))
-
             if can_spawn:
+                # Spawn a new iteration
                 new_task = asyncio.create_task(self.main_iteration(self.iteration))
                 self.tasks.append(new_task)
                 self.iteration += 1
             else:
+                # if we can't spawn, rest briefly
                 await asyncio.sleep(1)
 
-            # Check if any iteration tasks completed
+            # See if any iteration tasks are done
             if self.tasks:
                 done_set, pending_set = await asyncio.wait(
                     self.tasks,
@@ -133,48 +143,53 @@ class Master:
                 for t in done_set:
                     self.tasks.remove(t)
             else:
-                # If no tasks remain, check if the job is inactive or we reached max_iterations
+                # If no tasks remain, check for inactivity or max iteration
                 if (not job_obj.active) or (self.iteration >= self.max_iterations):
                     self.done = True
 
-        # Once the loop ends, if we still have tasks in flight, wait for them:
+        # Wait for leftover tasks
         if self.tasks:
-            self.logger.info(f"[Master.run_main] finishing {len(self.tasks)} leftover tasks.")
+            logger.info(f"[Master.run_main] finishing leftover {len(self.tasks)} iteration tasks.")
             await asyncio.wait(self.tasks)
 
-        self.logger.info(f"[Master.run_main] Master done for job {self.job_id}.")
+        logger.info(f"[Master.run_main] Master done for job {self.job_id}.")
 
-
-    async def main_iteration(self, iteration_number):
+    async def main_iteration(self, iteration_number: int):
         """
-        Single iteration: states are:
-          - pending_get_input
-          - pending_submit_task
-          - pending_wait_for_result
-          - done
+        One iteration’s state machine: pending_get_input -> pending_submit_task -> pending_wait_for_result -> done
+        We store the sub-state in job.master_state_json["master_iteration_state"][str(iteration_number)].
         """
         if iteration_number > self.max_iterations:
             self.done = True
             return
 
-        iteration_state = await self._get_iteration_state(iteration_number)
+        iteration_state = await get_iteration_state(
+            db_adapter=self.db_adapter,
+            job_id=self.job_id,
+            state_key=self.state_key,
+            iteration_number=iteration_number
+        )
         stage = iteration_state.get("stage", "pending_get_input")
 
         while stage != "done":
             if stage == "pending_get_input":
                 input_url = iteration_state.get("input_url")
                 if not input_url:
-                    logging.info(f"Iteration {iteration_number}: retrieving input URL from SOT.")
-                    input_url = await self._get_input_url_with_persist(iteration_number)
+                    self.logger.info(f"Iteration {iteration_number} => retrieving input from SOT.")
+                    input_url = await get_input_url_with_persist(
+                        self.sot_url, self.db_adapter, iteration_number
+                    )
                 iteration_state["input_url"] = input_url
                 iteration_state["stage"] = "pending_submit_task"
-                await self._save_iteration_state(iteration_number, iteration_state)
+                await save_iteration_state(
+                    self.db_adapter, self.job_id, self.state_key,
+                    iteration_number, iteration_state
+                )
                 stage = "pending_submit_task"
 
             elif stage == "pending_submit_task":
                 task_id_info = iteration_state.get("task_id_info")
                 if not task_id_info:
-                    logging.info(f"Iteration {iteration_number}: creating a new DB task + bid.")
                     learning_params = await self.plugin.get_master_learning_hyperparameters()
                     iteration_state["learning_params"] = learning_params
 
@@ -183,176 +198,125 @@ class Master:
                         "input_url": input_url,
                         **learning_params,
                     })
-                    # Create tasks
-                    task_id_info = await self._submit_task_with_persist(params_json, iteration_number)
-
-                    # If we failed to create tasks => set job to inactive
+                    # Create a DB task+bid
+                    task_id_info = await submit_task_with_persist(
+                        self.db_adapter, self.job_id, iteration_number, params_json
+                    )
                     if not task_id_info or len(task_id_info) < 1:
-                        self.logger.error(
-                            f"[main_iteration] Could not create tasks for job {self.job_id}. "
-                            "Marking job as inactive."
+                        logger.error(
+                            f"[main_iteration] create_bids_and_tasks returned empty => job inactive."
                         )
                         await self.db_adapter.update_job_active(self.job_id, False)
-
                         iteration_state["stage"] = "done"
-                        await self._save_iteration_state(iteration_number, iteration_state)
-                        break  # or return
+                        await save_iteration_state(
+                            self.db_adapter, self.job_id, self.state_key,
+                            iteration_number, iteration_state
+                        )
+                        break
 
                 iteration_state["task_id_info"] = task_id_info
                 iteration_state["stage"] = "pending_wait_for_result"
-                await self._save_iteration_state(iteration_number, iteration_state)
+                await save_iteration_state(
+                    self.db_adapter, self.job_id, self.state_key,
+                    iteration_number, iteration_state
+                )
                 stage = "pending_wait_for_result"
 
             elif stage == "pending_wait_for_result":
-                logging.info(f"Iteration {iteration_number}: waiting for result.")
-                task_id_info = iteration_state.get("task_id_info")
+                logger.info(f"Iteration {iteration_number} => waiting for result.")
+                task_id_info = iteration_state.get("task_id_info", [])
                 if not task_id_info or len(task_id_info) < 1:
-                    self.logger.error("[main_iteration] No `task_id_info` found, cannot wait for result. Aborting iteration.")
+                    logger.error("[main_iteration] No task_id_info => can't wait. Marking done.")
                     iteration_state["stage"] = "done"
-                    await self._save_iteration_state(iteration_number, iteration_state)
+                    await save_iteration_state(
+                        self.db_adapter, self.job_id, self.state_key,
+                        iteration_number, iteration_state
+                    )
                     break
 
-                if not isinstance(task_id_info[0], dict) or "task_id" not in task_id_info[0]:
-                    self.logger.error("[main_iteration] Unexpected `task_id_info` structure, aborting iteration.")
+                actual_task_id = task_id_info[0].get("task_id")
+                if not actual_task_id:
+                    logger.error("[main_iteration] task_id_info missing 'task_id'.")
                     iteration_state["stage"] = "done"
-                    await self._save_iteration_state(iteration_number, iteration_state)
+                    await save_iteration_state(
+                        self.db_adapter, self.job_id, self.state_key,
+                        iteration_number, iteration_state
+                    )
                     break
 
-                task_id = task_id_info[0]["task_id"]
                 result = iteration_state.get("result")
                 if not result:
-                    result = await self.wait_for_result(task_id)
-                iteration_state["result"] = result
+                    # This call can re-create tasks if forcibly deleted
+                    result = await wait_for_result(
+                        self.db_adapter, self.plugin, self.sot_url,
+                        self.job_id, actual_task_id
+                    )
+                iteration_state["result"] = result or {}
 
-                # Extract the loss & record it
-                loss_val = result["loss"]
-                self.losses.append(loss_val)
-                await self.update_latest_loss(loss_val, result["version_number"])
-                # Bump the job iteration
+                # If no result => bail out
+                if not result:
+                    logger.warning(f"Iteration {iteration_number}: no result => bail.")
+                    iteration_state["stage"] = "done"
+                    await save_iteration_state(
+                        self.db_adapter, self.job_id, self.state_key,
+                        iteration_number, iteration_state
+                    )
+                    break
+
+                # Record the loss
+                loss_val = result.get("loss")
+                version_num = result.get("version_number")
+                if loss_val is not None:
+                    self.losses.append(loss_val)
+                    await self.update_latest_loss(loss_val, version_num)
+
+                # Bump iteration in DB
                 await self.db_adapter.update_job_iteration(self.job_id, iteration_number + 1)
 
-                # Update DB with new master_losses
+                # Save new master_losses
                 state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
                 state_data["master_losses"] = self.losses
                 await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
 
-                # Possibly update SOT with new gradient data
+                # Possibly update SOT with new grads
                 learning_params = iteration_state.get("learning_params", {})
                 input_url = iteration_state["input_url"]
-                await self.update_sot(learning_params, TENSOR_NAME, result, input_url)
+                if loss_val is not None and version_num is not None:
+                    await self.update_sot(learning_params, TENSOR_NAME, result, input_url)
 
-                # Mark iteration done
+                # Done with iteration
                 iteration_state["stage"] = "done"
-                await self._save_iteration_state(iteration_number, iteration_state)
-                # Remove iteration from DB so we keep no finished states
-                await self._remove_iteration_entry(iteration_number)
-
-                stage = "done"
-
-    async def _get_input_url_with_persist(self, iteration_number):
-        """
-        Retrieve input_url from SOT's /get_batch endpoint, with retries.
-        """
-        url = os.path.join(self.sot_url, "get_batch")
-        retry_delay = 1
-        max_retries = 400
-        retries = 0
-        while retries < max_retries:
-            try:
-                logging.info(f"Iteration {iteration_number}: calling {url}")
-                message = self.generate_message("get_batch")
-                signature = self.sign_message(message)
-                headers = {"Authorization": f"{message}:{signature}"}
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            if "input_url" in data:
-                                return self.sot_url + data["input_url"]
-                            else:
-                                logging.error("No input_url in JSON response.")
-                        else:
-                            logging.error(f"Got HTTP {response.status} from get_batch.")
-            except Exception as e:
-                logging.error(f"Failed to retrieve input_url: {e}")
-            retries += 1
-            await asyncio.sleep(retry_delay)
-        raise RuntimeError("Cannot get input_url after repeated retries.")
-
-    async def _submit_task_with_persist(self, params_str, iteration_number):
-        """
-        Create a DB task + Bid. If we crash, we can pick up from the same info next time.
-        Also, if creation succeeds, store the last_task_creation_time in the job's master_state
-        so we can measure inactivity time later in jobs.py.
-        """
-        max_duration = datetime.timedelta(seconds=MAX_SUBMIT_TASK_RETRY_DURATION)
-        start_time = datetime.datetime.now()
-        attempt = 0
-        retry_delay = 1
-        while True:
-            attempt += 1
-            elapsed_time = datetime.datetime.now() - start_time
-            if elapsed_time >= max_duration:
-                raise RuntimeError(f"No solver assigned within {max_duration}!")
-
-            try:
-                price = await self.get_bid_price()
-                bid_info = await self.db_adapter.create_bids_and_tasks(
-                    self.job_id, 1, price, params_str, None
+                await save_iteration_state(
+                    self.db_adapter, self.job_id, self.state_key,
+                    iteration_number, iteration_state
                 )
-                if not bid_info or len(bid_info) == 0:
-                    logging.error(f"[submit_task_with_persist] create_bids_and_tasks returned empty. iteration={iteration_number}")
-                    return None
-
-                # ADDED: If tasks were created successfully => track last creation time
-                state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
-                state_data["last_task_creation_time"] = time.time()  # store epoch seconds
-                await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
-
-                return bid_info
-            except Exception as e:
-                logging.error(f"Failure creating Bids/Tasks (attempt #{attempt}): {e}")
-                logging.info(f"Retrying in {retry_delay}s...")
-                retry_delay = min(2 * retry_delay, 60)
-                await asyncio.sleep(retry_delay)
-
-    async def wait_for_result(self, task_id):
-        """
-        Keep polling the DB for final result. If we see SanityCheckPending, do local check, finalize.
-        """
-        while True:
-            task = await self.db_adapter.get_task(task_id)
-            if not task:
-                await asyncio.sleep(0.5)
-                continue
-
-            if task.status == TaskStatus.SanityCheckPending.name:
-                if task.result:
-                    is_valid = await self.plugin.call_submodule("model_adapter", "run_sanity_check", task.result)
-                    await self.finalize_sanity_check(task_id, is_valid)
-
-            if task.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
-                return task.result
-
-            await asyncio.sleep(0.5)
+                await remove_iteration_entry(
+                    self.db_adapter, self.job_id, self.state_key,
+                    iteration_number
+                )
+                stage = "done"
 
     async def finalize_sanity_check(self, task_id: int, is_valid: bool):
         """
-        POST to /finalize_sanity_check to finalize a pending solution.
+        If we see a task is 'SanityCheckPending', we finalize it as correct/incorrect.
         """
         url = f"{self.db_adapter.base_url}/finalize_sanity_check"
         payload = {"task_id": task_id, "is_valid": is_valid}
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    logging.error(f"finalize_sanity_check error: {text}")
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    logger.error(f"[finalize_sanity_check] error => {text}")
 
     async def update_sot(self, learning_params, tensor_name, result, input_url):
         """
-        Upload new gradient updates to SOT via /update_state.
+        Upload new gradients to the SOT's /update_state
         """
-        params = {
+        if "grads_url" not in result or "version_number" not in result:
+            logger.error("[update_sot] result missing grads_url or version_number.")
+            return
+
+        payload = {
             "result_url": result["grads_url"],
             "tensor_name": tensor_name,
             "version_number": result["version_number"],
@@ -364,82 +328,46 @@ class Master:
         headers = {"Authorization": f"{msg}:{sig}"}
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self.sot_url}/update_state", json=params, headers=headers) as resp:
+            update_url = f"{self.sot_url}/update_state"
+            async with session.post(update_url, json=payload, headers=headers) as resp:
                 if resp.status != 200:
-                    logging.error(f"Failed to update SOT for iteration results: {await resp.text()}")
+                    logger.error(f"[update_sot] error => {await resp.text()}")
                 else:
-                    logging.info("SOT updated with new grads.")
+                    logger.info("[update_sot] SOT updated with new grads.")
 
     async def update_latest_loss(self, loss_val, version_num):
         """
-        Save latest loss in SOT for monitoring convenience.
+        POST to SOT /update_loss so we can track the latest loss in the SOT as well
         """
         data = {"loss": loss_val, "version_number": version_num}
         url = os.path.join(self.sot_url, "update_loss")
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=data) as resp:
                 if resp.status != 200:
-                    logging.error(f"update_loss error: {await resp.text()}")
+                    logger.error(f"[update_latest_loss] error => {await resp.text()}")
 
-    async def _remove_iteration_entry(self, iteration_num: int):
+    async def get_bid_price(self) -> int:
         """
-        Remove iteration sub-dict from state_json["master_iteration_state"] after finishing.
-        """
-        state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
-        iteration_state_obj = state_data.get(self.state_key, {})
-
-        key_str = str(iteration_num)
-        if key_str in iteration_state_obj:
-            del iteration_state_obj[key_str]
-            state_data[self.state_key] = iteration_state_obj
-            await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
-            logging.info(f"Iteration {iteration_num} state removed from DB; not stored once done.")
-
-    async def get_bid_price(self):
-        """
-        Return price for your tasks. (Hard-coded to 1 for now.)
+        Retrieve or compute the next bid price. Default: just use subnet_db.target_price
         """
         subnet_db = await self.db_adapter.get_subnet(self.subnet_id)
         return subnet_db.target_price
 
-    def generate_message(self, endpoint):
+    def generate_message(self, endpoint: str) -> str:
         import uuid
         nonce = str(uuid.uuid4())
-        timestamp = int(time.time())
+        ts = int(time.time())
         return json.dumps({
             "endpoint": endpoint,
             "nonce": nonce,
-            "timestamp": timestamp
+            "timestamp": ts
         }, sort_keys=True)
 
-    def sign_message(self, message):
+    def sign_message(self, msg: str) -> str:
         """
-        Sign a message with our private key for SOT authentication.
+        Sign the JSON message with the Master’s private key (args.private_key).
         """
-        from eth_account.messages import encode_defunct
+        msg_defunct = encode_defunct(text=msg)
         account = Account.from_key(args.private_key)
-        msg_defunct = encode_defunct(text=message)
         signed = account.sign_message(msg_defunct)
         return signed.signature.hex()
-
-    async def _get_iteration_state(self, iteration_number):
-        """
-        Retrieve or initialize job.state_json["master_iteration_state"][str(iteration_number)].
-        """
-        state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
-        iteration_state_obj = state_data.get(self.state_key, {})
-        if str(iteration_number) not in iteration_state_obj:
-            iteration_state_obj[str(iteration_number)] = {"stage": "pending_get_input"}
-            state_data[self.state_key] = iteration_state_obj
-            await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
-        return iteration_state_obj[str(iteration_number)]
-
-    async def _save_iteration_state(self, iteration_number, iteration_state):
-        """
-        Save iteration sub-dict in DB so we can resume on crash.
-        """
-        state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
-        iteration_state_obj = state_data.get(self.state_key, {})
-        iteration_state_obj[str(iteration_number)] = iteration_state
-        state_data[self.state_key] = iteration_state_obj
-        await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
