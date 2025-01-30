@@ -44,8 +44,8 @@ def mock_auth_decorators():
     """
     Globally disable or patch out real auth decorators so tests can run without credentials.
     """
-    with patch("spl.db.server.routes.requires_user_auth_with_adapter", lambda f: f), \
-         patch("spl.db.server.routes.requires_auth", lambda f: f):
+    with patch("spl.db.server.routes.common.requires_user_auth_with_adapter", lambda f: f), \
+         patch("spl.db.server.routes.common.requires_auth", lambda f: f):
         yield
 
 
