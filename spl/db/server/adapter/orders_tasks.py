@@ -93,30 +93,44 @@ class DBAdapterOrdersTasksMixin:
                 if order_type == OrderType.Bid:
                     if task_id is None:
                         raise ValueError("task_id required for bid")
-                    task_stmt = select(Task).where(Task.id == task_id).options(joinedload(Task.job))
+
+                    task_stmt = (
+                        select(Task)
+                        .where(Task.id == task_id)
+                        .options(joinedload(Task.job))
+                    )
                     task_res = await session.execute(task_stmt)
                     task = task_res.scalar_one_or_none()
                     if not task or task.job.user_id != user_id:
-                        raise PermissionError("Only the job owner can submit bids for this task.")
+                        raise PermissionError(
+                            "Only the job owner can submit bids for this task."
+                        )
 
-                    hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
+                    hold = await self.select_hold_for_order(
+                        session, account, subnet, order_type, price, hold_id
+                    )
                     new_order = Order(
                         order_type=order_type,
                         price=price,
                         subnet_id=subnet_id,
                         user_id=user_id,
                         account_id=account.id,
-                        bid_task_id=task_id
+                        bid_task_id=task_id,
                     )
                     session.add(new_order)
                     await session.flush()
+
+                    # Reserve the buyer’s deposit, which is equal to `price`:
                     await self.reserve_funds_on_hold(session, hold, price, new_order)
                     new_order.hold_id = hold.id
 
                 elif order_type == OrderType.Ask:
                     if task_id is not None:
                         raise ValueError("task_id must be None for an ask")
-                    hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
+
+                    hold = await self.select_hold_for_order(
+                        session, account, subnet, order_type, price, hold_id
+                    )
                     new_order = Order(
                         order_type=order_type,
                         price=price,
@@ -126,6 +140,8 @@ class DBAdapterOrdersTasksMixin:
                     )
                     session.add(new_order)
                     await session.flush()
+
+                    # FIX: Reserve the solver’s entire stake:
                     stake_amount = subnet.stake_multiplier * price
                     await self.reserve_funds_on_hold(session, hold, stake_amount, new_order)
                     new_order.hold_id = hold.id
@@ -133,13 +149,16 @@ class DBAdapterOrdersTasksMixin:
                 else:
                     raise ValueError("Invalid order type")
 
+                # Attempt bid/ask matching after the new order
                 await self.match_bid_ask_orders(session, subnet_id)
+
                 await session.commit()
                 return new_order.id
 
             except Exception:
                 await session.rollback()
                 raise
+
 
     async def get_num_orders(self, subnet_id: int, order_type: str, matched: Optional[bool]):
         async with self.get_async_session() as session:
