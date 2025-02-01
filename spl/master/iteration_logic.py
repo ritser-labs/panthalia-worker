@@ -9,6 +9,7 @@ import aiohttp
 from ..models import TaskStatus
 from .config import args
 from ..db.db_adapter_client import DBAdapterClient
+from ..models import Job
 
 logger = logging.getLogger(__name__)
 
@@ -64,52 +65,93 @@ async def remove_iteration_entry(db_adapter, job_id: int, state_key: str, iterat
 ###############################################################################
 # Wait for the final result, re-creating forcibly deleted tasks if needed
 ###############################################################################
-async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, task_id: int) -> dict:
+async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_task_id: int):
     """
-    Keep polling DB for final result. If forcibly deleted for >TASK_MISSING_THRESHOLD
-    times in a row, re-create a new Task ID (assuming job is still active).
+    Polls the original solver Task until it is either:
+      - Forcibly deleted from the DB => return None
+      - Finalized as ResolvedCorrect or ResolvedIncorrect => return task.result
+      - Moves to SanityCheckPending => we do local check; if fails => finalize INCORRECT, return result
+        if passes => we attempt replication with some probability => manage chain => finalize original accordingly
+        => return the final result.
+
+    This function now includes all logic for replication chaining
+    and for finalizing the original Task. The caller simply gets
+    the final result or None if forcibly deleted or something else.
     """
-    missing_count = 0
+    from .replicate import should_replicate, spawn_replica_task, manage_replication_chain, compare_results_locally
 
     while True:
-        task = await db_adapter.get_task(task_id)
-        if not task:
-            missing_count += 1
+        # 1) Check if the original task is missing
+        task_obj = await db_adapter.get_task(original_task_id)
+        if not task_obj:
+            # Forcibly deleted => we can't do anything => return None
+            return None
 
-            # ─────────────────────────────────────────────────────────
-            # NEW CHECK: Ensure the job is still active before re-creating.
-            # ─────────────────────────────────────────────────────────
-            job_obj = await db_adapter.get_job(job_id)
-            if not job_obj or not job_obj.active:
-                logger.info(
-                    f"[wait_for_result] Job {job_id} inactive => skipping re-creation of deleted task {task_id}."
-                )
-                return {}
+        # 2) If it's already in a final status => just return its result
+        if task_obj.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
+            return task_obj.result
 
-            if missing_count >= TASK_MISSING_THRESHOLD:
-                logger.warning(f"[wait_for_result] Task {task_id} missing => re-create.")
-                new_task_id = await _handle_recreate_missing_task(db_adapter, plugin, sot_url, job_id, task_id)
-                if not new_task_id:
-                    # If re-creation fails or job is inactive => no result
-                    return {}
-                task_id = new_task_id
-                missing_count = 0
-            else:
-                await asyncio.sleep(0.5)
+        # 3) If it's waiting for solver => continue polling
+        if task_obj.status not in [TaskStatus.SanityCheckPending.name, TaskStatus.ReplicationPending.name]:
+            await asyncio.sleep(0.5)
             continue
+
+        # 4) If we get here => task is either SanityCheckPending or ReplicationPending
+        #    We need to do a local check if it hasn't been validated yet.
+        if not task_obj.result:
+            # no solver result => can't do local check => wait
+            await asyncio.sleep(0.5)
+            continue
+
+        # 4.1) We run the local check if we haven't already
+        is_valid = await plugin.call_submodule("model_adapter", "run_sanity_check", task_obj.result)
+        if not is_valid:
+            # => finalize incorrect & return
+            await db_adapter.finalize_sanity_check(task_obj.id, is_valid=False)
+            return task_obj.result
+
+        # 4.2) If local check passes => we replicate with some probability. If skip => finalize correct.
+        #      If replicate => indefinite chain.
+        await db_adapter.update_task_status(task_obj.id, job_id, TaskStatus.ReplicationPending.name)
+        # Decide whether to replicate
+        do_replicate = await should_replicate()
+        if not do_replicate:
+            # finalize correct => return
+            await db_adapter.finalize_sanity_check(task_obj.id, is_valid=True)
+            return task_obj.result
+
+        # 4.3) Attempt to spawn the first replicate child
+        child_id = await spawn_replica_task(db_adapter, parent_task_id=task_obj.id)
+        if not child_id:
+            # If we can't spawn => finalize original as correct
+            await db_adapter.finalize_sanity_check(task_obj.id, is_valid=True)
+            return task_obj.result
+
+        # 4.4) Manage the indefinite replication chain
+        chain_outcome = await manage_replication_chain(db_adapter, plugin, job_id, task_obj.id, child_id)
+        # If chain_outcome == 'chain_fail' => child eventually was INCORRECT => original => CORRECT
+        if chain_outcome == "chain_fail":
+            await db_adapter.finalize_sanity_check(task_obj.id, True)
+            return task_obj.result
+
+        # If chain_outcome == 'chain_correct'
+        # => final replicate child is correct. Compare child's result w/ original's result
+        final_child = await db_adapter.get_task(child_id)
+        if not final_child or not final_child.result:
+            # can't get child's final result => default original => CORRECT
+            await db_adapter.finalize_sanity_check(task_obj.id, True)
+            return task_obj.result
+
+        matched = await compare_results_locally(plugin, task_obj.result, final_child.result)
+        if matched:
+            # => finalize original => CORRECT
+            await db_adapter.finalize_sanity_check(task_obj.id, True)
         else:
-            missing_count = 0
+            # => mismatch => finalize original => INCORRECT
+            await db_adapter.finalize_sanity_check(task_obj.id, False)
 
-        # If we found the Task, check status
-        if task.status == TaskStatus.SanityCheckPending.name:
-            if task.result:
-                is_valid = await plugin.call_submodule("model_adapter", "run_sanity_check", task.result)
-                await _finalize_sanity_check(db_adapter, job_id, task.id, is_valid)
+        return task_obj.result
 
-        if task.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
-            return task.result
-
-        await asyncio.sleep(0.5)
 
 
 ###############################################################################

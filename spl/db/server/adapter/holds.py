@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from ....models import (
-    Account, Hold, HoldTransaction, HoldType, CreditTransaction, CreditTxnType
+    OrderType, Hold, HoldTransaction, HoldType, CreditTransaction, CreditTxnType
 )
 from typing import Optional
 
@@ -17,71 +17,56 @@ class DBAdapterHoldsMixin:
     async def select_hold_for_order(
         self,
         session: AsyncSession,
-        account: Account,
+        account,
         subnet,
-        order_type,
+        order_type: OrderType,
         price: int,
         specified_hold_id: Optional[int] = None
     ) -> Hold:
         """
-        Fetches a suitable Hold for placing an order (either 'bid' or 'ask'), 
-        allowing both 'Credits' and 'CreditCard' hold types. If a specific 
-        hold_id is given, we'll first see if that particular Hold satisfies 
-        the leftover requirement.
-
-        :param session: Current database session.
-        :param account: The Account object for the user.
-        :param subnet: The relevant Subnet object (for stake_multiplier on asks).
-        :param order_type: The OrderType enum value ('bid' or 'ask').
-        :param price: The price or stake we need to reserve.
-        :param specified_hold_id: If provided, we'll try to use that hold directly.
-        :return: A Hold object that can cover the needed amount.
-        :raises ValueError: If no suitable hold is found.
+        For Bid orders, the required amount is simply `price`.
+        For Ask orders, it is `subnet.stake_multiplier * price`.
+        If a hold is explicitly specified via `specified_hold_id`, it must have enough leftover;
+        otherwise a ValueError is raised. If not specified, then choose the first hold with
+        enough leftover.
         """
-        # The required amount depends on whether it's a 'bid' or 'ask'
-        required_amount = price if order_type.value == 'bid' else (subnet.stake_multiplier * price)
+        required_amount = price if order_type == OrderType.Bid else subnet.stake_multiplier * price
 
-        # 1. If user explicitly passed a particular hold_id, check that first.
         if specified_hold_id is not None:
             stmt = (
                 select(Hold)
                 .where(
                     Hold.id == specified_hold_id,
                     Hold.account_id == account.id,
-                    # ALLOW either Credits or CreditCard here:
-                    Hold.hold_type.in_([HoldType.Credits, HoldType.CreditCard]),
+                    Hold.hold_type.in_([HoldType.CreditCard, HoldType.Credits]),
                     (Hold.total_amount - Hold.used_amount) >= required_amount
                 )
                 .options(selectinload(Hold.hold_transactions))
             )
             hold = (await session.execute(stmt)).scalar_one_or_none()
-            if hold:
-                return hold
-            else:
-                logger.debug(
-                    f"[select_hold_for_order] specified hold_id={specified_hold_id} "
-                    "was insufficient or invalid. Falling back to a suitable hold."
+            if not hold:
+                raise ValueError(
+                    f"Specified hold_id={specified_hold_id} is invalid or does not have enough leftover "
+                    f"(requires at least {required_amount})."
                 )
+            return hold
 
-        # 2. Fallback: locate any valid hold with enough leftover (Credits or CreditCard).
         query = (
             select(Hold)
             .where(
                 Hold.account_id == account.id,
-                Hold.hold_type.in_([HoldType.Credits, HoldType.CreditCard]),
+                Hold.hold_type.in_([HoldType.CreditCard, HoldType.Credits]),
                 (Hold.total_amount - Hold.used_amount) >= required_amount
             )
             .options(selectinload(Hold.hold_transactions))
         )
         hold = (await session.execute(query)).scalars().first()
-
-        # 3. Fail if none found.
         if not hold:
             raise ValueError(
-                "No suitable hold (Credits or CreditCard) found with enough leftover to place this order."
+                f"No suitable hold found with leftover ≥ {required_amount} to place this {order_type} order."
             )
-
         return hold
+
 
 
     async def reserve_funds_on_hold(self, session: AsyncSession, hold: Hold, amount: int, order):

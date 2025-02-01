@@ -719,8 +719,11 @@ class DBAdapterClient:
     @typechecked
     async def finalize_sanity_check(self, task_id: int, is_valid: bool) -> bool:
         """
-        Finalizes sanity check for a task by POSTing to /finalize_sanity_check with
-        an Authorization header. Returns True on success, otherwise False.
+        Finalizes the sanity check for a given task by POSTing to /finalize_sanity_check,
+        marking the task as ResolvedCorrect or ResolvedIncorrect on the server.
+
+        Returns:
+            bool: True if the operation succeeded, False otherwise.
         """
         data = {
             "task_id": task_id,
@@ -729,6 +732,27 @@ class DBAdapterClient:
         response = await self._authenticated_request(
             method="POST",
             endpoint="/finalize_sanity_check",
+            data=data
+        )
+        return response.get("success", False)
+
+
+    @typechecked
+    async def update_replicated_parent(self, child_task_id: int, parent_task_id: int) -> bool:
+        """
+        Sets the `replicated_parent_id` on a child task to point back to its parent task.
+        Useful for forming a replication chain to track indefinite replicate tasks.
+
+        Returns:
+            bool: True if the update succeeded, False otherwise.
+        """
+        data = {
+            "child_task_id": child_task_id,
+            "parent_task_id": parent_task_id
+        }
+        response = await self._authenticated_request(
+            method="POST",
+            endpoint="/update_replicated_parent",
             data=data
         )
         return response.get("success", False)

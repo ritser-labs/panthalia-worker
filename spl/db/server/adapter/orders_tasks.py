@@ -13,7 +13,7 @@ from ....models import (
     Order, Account, OrderType, HoldType, CreditTxnType, EarningsTxnType, PlatformRevenueTxnType,
     CreditTransaction, HoldTransaction, Hold, EarningsTransaction
 )
-from .holds import DBAdapterHoldsMixin
+import secrets
 
 logger = logging.getLogger(__name__)
 PLATFORM_FEE_PERCENTAGE = 0.1
@@ -73,91 +73,68 @@ class DBAdapterOrdersTasksMixin:
 
     async def create_order(
         self,
-        task_id: int | None,
+        task_id: Optional[int],
         subnet_id: int,
         order_type: OrderType,
         price: int,
         hold_id: Optional[int] = None
-    ):
+    ) -> Optional[int]:
+        """
+        Creates a bid (if task_id is provided) or ask order (if task_id is None).
+        For an Ask order, the solver’s entire stake (stake_multiplier * price) must be reserved.
+        """
         async with self.get_async_session() as session:
-            try:
-                user_id = self.get_user_id()
-                account = await self.get_or_create_account(user_id, session)
+            user_id = self.get_user_id()
+            account = await self.get_or_create_account(user_id, session)
 
-                subnet_stmt = select(Subnet).where(Subnet.id == subnet_id)
-                subnet_res = await session.execute(subnet_stmt)
-                subnet = subnet_res.scalar_one_or_none()
-                if not subnet:
-                    raise ValueError("Subnet not found")
+            # Fetch the subnet from DB (assumes you have a get_subnet method)
+            subnet = await self.get_subnet(subnet_id)
+            if not subnet:
+                raise ValueError(f"Subnet with id {subnet_id} not found.")
 
-                if order_type == OrderType.Bid:
-                    if task_id is None:
-                        raise ValueError("task_id required for bid")
+            if order_type == OrderType.Bid:
+                if task_id is None:
+                    raise ValueError("task_id is required for a bid")
+                # (Bid branch: use price directly)
+                hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
+                new_order = Order(
+                    order_type=order_type,
+                    price=price,
+                    subnet_id=subnet_id,
+                    user_id=user_id,
+                    account_id=account.id,
+                    bid_task_id=task_id
+                )
+                session.add(new_order)
+                await session.flush()
+                # Reserve funds equal to the bid price
+                await self.reserve_funds_on_hold(session, hold, price, new_order)
+                new_order.hold_id = hold.id
 
-                    task_stmt = (
-                        select(Task)
-                        .where(Task.id == task_id)
-                        .options(joinedload(Task.job))
-                    )
-                    task_res = await session.execute(task_stmt)
-                    task = task_res.scalar_one_or_none()
-                    if not task or task.job.user_id != user_id:
-                        raise PermissionError(
-                            "Only the job owner can submit bids for this task."
-                        )
+            elif order_type == OrderType.Ask:
+                if task_id is not None:
+                    raise ValueError("task_id must be None for an ask")
+                # For an Ask, the required reservation is stake_multiplier * price.
+                hold = await self.select_hold_for_order(session, account, subnet, order_type, price, hold_id)
+                new_order = Order(
+                    order_type=order_type,
+                    price=price,
+                    subnet_id=subnet_id,
+                    user_id=user_id,
+                    account_id=account.id,
+                )
+                session.add(new_order)
+                await session.flush()
+                stake_amount = subnet.stake_multiplier * price
+                await self.reserve_funds_on_hold(session, hold, stake_amount, new_order)
+                new_order.hold_id = hold.id
 
-                    hold = await self.select_hold_for_order(
-                        session, account, subnet, order_type, price, hold_id
-                    )
-                    new_order = Order(
-                        order_type=order_type,
-                        price=price,
-                        subnet_id=subnet_id,
-                        user_id=user_id,
-                        account_id=account.id,
-                        bid_task_id=task_id,
-                    )
-                    session.add(new_order)
-                    await session.flush()
+            else:
+                raise ValueError("Invalid order type provided.")
 
-                    # Reserve the buyer’s deposit, which is equal to `price`:
-                    await self.reserve_funds_on_hold(session, hold, price, new_order)
-                    new_order.hold_id = hold.id
+            await session.commit()
+            return new_order.id
 
-                elif order_type == OrderType.Ask:
-                    if task_id is not None:
-                        raise ValueError("task_id must be None for an ask")
-
-                    hold = await self.select_hold_for_order(
-                        session, account, subnet, order_type, price, hold_id
-                    )
-                    new_order = Order(
-                        order_type=order_type,
-                        price=price,
-                        subnet_id=subnet_id,
-                        user_id=user_id,
-                        account_id=account.id,
-                    )
-                    session.add(new_order)
-                    await session.flush()
-
-                    # FIX: Reserve the solver’s entire stake:
-                    stake_amount = subnet.stake_multiplier * price
-                    await self.reserve_funds_on_hold(session, hold, stake_amount, new_order)
-                    new_order.hold_id = hold.id
-
-                else:
-                    raise ValueError("Invalid order type")
-
-                # Attempt bid/ask matching after the new order
-                await self.match_bid_ask_orders(session, subnet_id)
-
-                await session.commit()
-                return new_order.id
-
-            except Exception:
-                await session.rollback()
-                raise
 
 
     async def get_num_orders(self, subnet_id: int, order_type: str, matched: Optional[bool]):
@@ -241,6 +218,7 @@ class DBAdapterOrdersTasksMixin:
     async def delete_order(self, order_id: int):
         async with self.get_async_session() as session:
             try:
+                logger.info(f"Deleting order {order_id}")
                 order_stmt = (
                     select(Order)
                     .where(Order.id == order_id)
@@ -442,9 +420,21 @@ class DBAdapterOrdersTasksMixin:
             session.add(task)
             await session.commit()
             return {'success': True}
+    
+    async def update_replicated_parent(self, child_task_id: int, parent_task_id: int) -> bool:
+        async with self.get_async_session() as session:
+            child = await session.get(Task, child_task_id)
+            if not child:
+                return False
+            child.replicated_parent_id = parent_task_id
+            session.add(child)
+            await session.commit()
+            return True
+
 
     async def finalize_sanity_check(self, task_id: int, is_valid: bool, force: bool = False):
         async with self.get_async_session() as session:
+            logger.info(f"[finalize_sanity_check] Finalizing task {task_id} with is_valid={is_valid}")
             stmt = (
                 select(Task)
                 .where(Task.id == task_id)
@@ -464,8 +454,8 @@ class DBAdapterOrdersTasksMixin:
                     f"[finalize_sanity_check] Task {task_id} is already in {task.status} => skipping re-finalization."
                 )
                 return
-            if not force and task.status != TaskStatus.SanityCheckPending:
-                raise ValueError(f"Task {task_id} must be in SanityCheckPending to finalize sanity check.")
+            if not force and task.status not in [TaskStatus.SanityCheckPending, TaskStatus.ReplicationPending]:
+                raise ValueError(f"Task {task_id} must be in SanityCheckPending or ReplicationPending to finalize sanity check.")
 
             if is_valid:
                 task.status = TaskStatus.ResolvedCorrect
@@ -479,18 +469,8 @@ class DBAdapterOrdersTasksMixin:
             await session.flush()
             await session.commit()
 
-    async def finalize_check(self, task_id: int):
-        pass
-
-    async def resolve_task(self, session: AsyncSession, task: Task, result: str, correct: bool):
-        if correct:
-            task.status = TaskStatus.ResolvedCorrect
-            await self.handle_correct_resolution_scenario(session, task)
-        else:
-            task.status = TaskStatus.ResolvedIncorrect
-            await self.handle_incorrect_resolution_scenario(session, task)
-
     async def handle_correct_resolution_scenario(self, session: AsyncSession, task: Task):
+        logger.info(f"[handle_correct_resolution_scenario] Handling correct resolution for task {task.id}")
         bid_order = task.bid
         ask_order = task.ask
         if not bid_order or not bid_order.hold:

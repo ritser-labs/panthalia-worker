@@ -14,9 +14,11 @@ class DBAdapterStateUpdatesMixin:
             await session.refresh(new_state_update)
             return new_state_update.id
 
-    async def get_total_state_updates_for_job(self, job_id: int):
+    async def get_total_state_updates_for_job(self, job_id: int) -> int:
         async with self.get_async_session() as session:
             stmt = select(func.count(StateUpdate.id)).filter_by(job_id=job_id)
             result = await session.execute(stmt)
-            total_state_updates = result.scalar_one()
+            total_state_updates = result.scalar()  # This returns None if no row is found
+            if total_state_updates is None:
+                return 0
             return total_state_updates

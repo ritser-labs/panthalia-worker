@@ -128,47 +128,9 @@ async def create_bids_and_tasks_route():
 
 @app.route('/update_task_status', methods=['POST'], endpoint='update_task_status_endpoint')
 async def update_task_status_route():
-    """
-    Handles POST /update_task_status with JSON:
-      {
-        "task_id": int,
-        "job_id": int,
-        "status": str  # e.g. "SolutionSubmitted,ResolvedCorrect"
-      }
-
-    We'll parse the status from right-to-left, picking the first recognized TaskStatus piece.
-    Then call db_adapter_server.update_task_status(...)
-    Returns { "success": true/false } as JSON.
-    """
-    # We'll define a small wrapper that does the multi-piece parse:
-    from .common import create_post_route_return_id
-
-    async def _update_task_status_wrapper(task_id: int, job_id: int, status: str):
-        from ....models import TaskStatus
-
-        logger.info(f"[update_task_status] Received status={status!r}")
-        parts = [p.strip() for p in status.split(',')]
-        recognized = None
-        # from right to left:
-        for piece in reversed(parts):
-            if piece in TaskStatus.__members__:
-                recognized = TaskStatus[piece].name  # The .name is the string for DB
-                logger.info(f"[update_task_status] Using recognized status={recognized}")
-                break
-        if not recognized:
-            raise ValueError(
-                f"No recognized TaskStatus in {status!r} (tried {parts})"
-            )
-        # Now call the DB:
-        return await db_adapter_server.update_task_status(
-            task_id, job_id, recognized
-        )
-
-    # Wrap it with create_post_route_return_id to unify response:
-    route_func = create_post_route_return_id(
-        _update_task_status_wrapper,
+    route_func = create_post_route(
+        db_adapter_server.update_task_status,
         required_keys=['task_id','job_id','status'],
-        id_key='success',
         auth_method=AuthMethod.KEY
     )
     return await route_func()
@@ -195,5 +157,20 @@ async def get_assigned_tasks_route():
         method=db_adapter_server.get_assigned_tasks,
         params=['subnet_id'],
         auth_method=AuthMethod.USER
+    )
+    return await route_func()
+
+@app.route('/update_replicated_parent', methods=['POST'])
+async def update_replicated_parent_route():
+    """
+    POST /update_replicated_parent
+      JSON: { "child_task_id": <int>, "parent_task_id": <int> }
+    Returns { "success": true } on success
+    """
+    # typical route:
+    route_func = create_post_route(
+        db_adapter_server.update_replicated_parent,
+        required_keys=['child_task_id','parent_task_id'],
+        auth_method=AuthMethod.KEY
     )
     return await route_func()

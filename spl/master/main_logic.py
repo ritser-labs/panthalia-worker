@@ -28,6 +28,12 @@ from .iteration_logic import (
     save_iteration_state,
     remove_iteration_entry,
 )
+from .replicate import (
+    spawn_replica_task,
+    manage_replication_chain,
+    compare_results_locally,
+    should_replicate
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,13 +162,15 @@ class Master:
 
     async def main_iteration(self, iteration_number: int):
         """
-        One iteration’s state machine: pending_get_input -> pending_submit_task -> pending_wait_for_result -> done
-        We store the sub-state in job.master_state_json["master_iteration_state"][str(iteration_number)].
-        """
-        if iteration_number > self.max_iterations:
-            self.done = True
-            return
+        Each iteration attempts to:
+        1) Retrieve (or reuse) SOT input => "pending_get_input".
+        2) Create a new (Task+Bid) => "pending_submit_task".
+        3) Wait for that Task's final resolution => "pending_wait_for_result".
 
+        The logic of local sanity check, replication, and final finalize now lives
+        entirely in `wait_for_result`. We simply receive the final result (or None),
+        record it, and mark iteration done.
+        """
         iteration_state = await get_iteration_state(
             db_adapter=self.db_adapter,
             job_id=self.job_id,
@@ -173,128 +181,84 @@ class Master:
 
         while stage != "done":
             if stage == "pending_get_input":
-                input_url = iteration_state.get("input_url")
-                if not input_url:
-                    self.logger.info(f"Iteration {iteration_number} => retrieving input from SOT.")
-                    input_url = await get_input_url_with_persist(
-                        self.sot_url, self.db_adapter, iteration_number
-                    )
-                iteration_state["input_url"] = input_url
+                if "input_url" not in iteration_state:
+                    self.logger.info(f"[main_iteration] Iter={iteration_number} => fetching input from SOT.")
+                    input_url = await get_input_url_with_persist(self.sot_url, self.db_adapter, iteration_number)
+                    iteration_state["input_url"] = input_url
+
                 iteration_state["stage"] = "pending_submit_task"
-                await save_iteration_state(
-                    self.db_adapter, self.job_id, self.state_key,
-                    iteration_number, iteration_state
-                )
+                await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
                 stage = "pending_submit_task"
 
             elif stage == "pending_submit_task":
-                task_id_info = iteration_state.get("task_id_info")
-                if not task_id_info:
+                if "task_id_info" not in iteration_state:
+                    self.logger.info(f"[main_iteration] Iter={iteration_number} => creating a new Task+Bid.")
                     learning_params = await self.plugin.get_master_learning_hyperparameters()
                     iteration_state["learning_params"] = learning_params
 
-                    input_url = iteration_state["input_url"]
-                    params_json = json.dumps({
-                        "input_url": input_url,
-                        **learning_params,
+                    params_str = json.dumps({
+                        "input_url": iteration_state["input_url"],
+                        **learning_params
                     })
-                    # Create a DB task+bid
-                    task_id_info = await submit_task_with_persist(
-                        self.db_adapter, self.job_id, iteration_number, params_json
+                    created = await submit_task_with_persist(
+                        self.db_adapter,
+                        self.job_id,
+                        iteration_number,
+                        params_str
                     )
-                    if not task_id_info or len(task_id_info) < 1:
-                        logger.error(
-                            f"[main_iteration] create_bids_and_tasks returned empty => job inactive."
-                        )
-                        await self.db_adapter.update_job_active(self.job_id, False)
+                    if not created or len(created) < 1:
+                        self.logger.error(f"[main_iteration] Iter={iteration_number} => failed to create tasks.")
                         iteration_state["stage"] = "done"
-                        await save_iteration_state(
-                            self.db_adapter, self.job_id, self.state_key,
-                            iteration_number, iteration_state
-                        )
+                        await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
                         break
 
-                iteration_state["task_id_info"] = task_id_info
+                    iteration_state["task_id_info"] = created
+
                 iteration_state["stage"] = "pending_wait_for_result"
-                await save_iteration_state(
-                    self.db_adapter, self.job_id, self.state_key,
-                    iteration_number, iteration_state
-                )
+                await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
                 stage = "pending_wait_for_result"
 
             elif stage == "pending_wait_for_result":
-                logger.info(f"Iteration {iteration_number} => waiting for result.")
-                task_id_info = iteration_state.get("task_id_info", [])
-                if not task_id_info or len(task_id_info) < 1:
-                    logger.error("[main_iteration] No task_id_info => can't wait. Marking done.")
+                self.logger.info(f"[main_iteration] Iter={iteration_number} => delegating to wait_for_result.")
+                tasks_info = iteration_state.get("task_id_info", [])
+                if not tasks_info:
+                    self.logger.warning(f"[main_iteration] Iter={iteration_number} => missing task info, no result.")
                     iteration_state["stage"] = "done"
-                    await save_iteration_state(
-                        self.db_adapter, self.job_id, self.state_key,
-                        iteration_number, iteration_state
-                    )
+                    await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
                     break
 
-                actual_task_id = task_id_info[0].get("task_id")
-                if not actual_task_id:
-                    logger.error("[main_iteration] task_id_info missing 'task_id'.")
-                    iteration_state["stage"] = "done"
-                    await save_iteration_state(
-                        self.db_adapter, self.job_id, self.state_key,
-                        iteration_number, iteration_state
-                    )
-                    break
+                # We'll only handle the single newly created task in this iteration
+                original_task_id = tasks_info[0]["task_id"]
 
-                result = iteration_state.get("result")
-                if not result:
-                    # This call can re-create tasks if forcibly deleted
-                    result = await wait_for_result(
-                        self.db_adapter, self.plugin, self.sot_url,
-                        self.job_id, actual_task_id
-                    )
-                iteration_state["result"] = result or {}
+                # The new wait_for_result now handles final sanity checks, replication, & finalization.
+                # If the solver's entire chain is forcibly deleted or fails, we get None.
+                final_result = await wait_for_result(
+                    db_adapter=self.db_adapter,
+                    plugin=self.plugin,
+                    sot_url=self.sot_url,
+                    job_id=self.job_id,
+                    original_task_id=original_task_id
+                )
+                iteration_state["result"] = final_result or {}
 
-                # If no result => bail out
-                if not result:
-                    logger.warning(f"Iteration {iteration_number}: no result => bail.")
-                    iteration_state["stage"] = "done"
-                    await save_iteration_state(
-                        self.db_adapter, self.job_id, self.state_key,
-                        iteration_number, iteration_state
-                    )
-                    break
-
-                # Record the loss
-                loss_val = result.get("loss")
-                version_num = result.get("version_number")
-                if loss_val is not None:
+                # If final_result included a 'loss', store it in self.losses & optionally update SOT
+                if final_result and "loss" in final_result:
+                    loss_val = final_result["loss"]
                     self.losses.append(loss_val)
+                    version_num = final_result.get("version_number")
                     await self.update_latest_loss(loss_val, version_num)
 
-                # Bump iteration in DB
+                # Bump job iteration in DB, mark iteration as done
                 await self.db_adapter.update_job_iteration(self.job_id, iteration_number + 1)
-
-                # Save new master_losses
-                state_data = await self.db_adapter.get_master_state_for_job(self.job_id)
-                state_data["master_losses"] = self.losses
-                await self.db_adapter.update_master_state_for_job(self.job_id, state_data)
-
-                # Possibly update SOT with new grads
-                learning_params = iteration_state.get("learning_params", {})
-                input_url = iteration_state["input_url"]
-                if loss_val is not None and version_num is not None:
-                    await self.update_sot(learning_params, TENSOR_NAME, result, input_url)
-
-                # Done with iteration
                 iteration_state["stage"] = "done"
-                await save_iteration_state(
-                    self.db_adapter, self.job_id, self.state_key,
-                    iteration_number, iteration_state
-                )
-                await remove_iteration_entry(
-                    self.db_adapter, self.job_id, self.state_key,
-                    iteration_number
-                )
-                stage = "done"
+                await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
+                # Optionally remove iteration's subdict from job.master_state_json if you prefer a clean DB
+                await remove_iteration_entry(self.db_adapter, self.job_id, self.state_key, iteration_number)
+                break
+
+        self.logger.info(f"[main_iteration] Iteration {iteration_number} => DONE.")
+
+
 
     async def finalize_sanity_check(self, task_id: int, is_valid: bool):
         """

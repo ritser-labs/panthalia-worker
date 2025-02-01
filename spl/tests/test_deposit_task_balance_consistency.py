@@ -152,6 +152,11 @@ async def test_deposit_task_balance_consistency(db_adapter_server_fixture):
             hold_id=None
         )
 
+        # IMPORTANT: we must commit after match_bid_ask_orders
+        async with server.get_async_session() as session:
+            await server.match_bid_ask_orders(session, subnet_id)
+            await session.commit()  # ensures the matched Task.ask is actually saved
+
         # Confirm solver leftover => 200 - (2*50) => 100
         balance_info_solver_after_ask = await server.get_balance_details_for_user()
         leftover_solver_after_ask = balance_info_solver_after_ask["credits_balance"]
@@ -190,4 +195,4 @@ async def test_deposit_task_balance_consistency(db_adapter_server_fixture):
             f"Final invariant broken: {final_invariant}"
         )
 
-        # Done! We no longer do partial arithmetic because check_invariant handles all sums.
+        print("[test_deposit_task_balance_consistency] => PASS")

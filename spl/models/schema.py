@@ -85,6 +85,17 @@ class Task(TimestampMixin, Serializable):
     time_solved = Column(DateTime, nullable=True)
     time_solver_selected = Column(DateTime, nullable=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=True)
+    replicated_parent_id = Column(
+        Integer,
+        ForeignKey('tasks.id', ondelete="SET NULL"),
+        unique=True,
+        nullable=True
+    )
+    replicated_parent = relationship(
+        "Task",
+        remote_side="Task.id",
+        uselist=False
+    )
     job = relationship("Job", back_populates="tasks")
     bid = relationship(
         "Order",

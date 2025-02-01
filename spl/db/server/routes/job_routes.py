@@ -134,3 +134,12 @@ async def update_job_sot_url_route():
         auth_method=AuthMethod.KEY
     )
     return await route_func()
+
+@app.route('/get_total_state_updates_for_job', methods=['GET'], endpoint='get_total_state_updates_for_job_endpoint')
+async def get_total_state_updates_for_job_route():
+    route_func = create_get_route(
+        method=db_adapter_server.get_total_state_updates_for_job,
+        params=['job_id'],
+        auth_method=AuthMethod.NONE
+    )
+    return await route_func()
