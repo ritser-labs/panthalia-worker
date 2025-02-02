@@ -118,7 +118,7 @@ def create_route(method, params=None, required_keys=None, id_key=None,
                 return jsonify([recursive_as_dict(item) for item in result]), 200
             if isinstance(result, dict):
                 return jsonify(recursive_as_dict(result)), 200
-            if result:
+            if result is not None:
                 return jsonify(recursive_as_dict(result)), 200
             return jsonify({'error': f'{method.__name__} not found'}), 404
 
