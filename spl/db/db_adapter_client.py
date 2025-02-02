@@ -288,13 +288,11 @@ class DBAdapterClient:
         return self._extract_id(response, 'task_id')
 
     @typechecked
-    async def update_task_status(self, task_id: int, job_id: int, status: str, result: Optional[str] = None, solver_address: Optional[str] = None) -> bool:
+    async def update_task_status(self, task_id: int, job_id: int, status: str) -> bool:
         data = {
             'task_id': task_id,
             'job_id': job_id,
             'status': status,
-            'result': result,
-            'solver_address': solver_address
         }
         response = await self._authenticated_request('POST', '/update_task_status', data=data)
         return 'success' in response

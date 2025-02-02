@@ -64,10 +64,10 @@ class DBAdapterOrdersTasksMixin:
             await session.commit()
             return new_task.id
 
-    async def update_task_status(self, task_id: int, job_id: int, status: TaskStatus, result=None, solver_address=None):
+    async def update_task_status(self, task_id: int, job_id: int, status: TaskStatus):
         async with self.get_async_session() as session:
             stmt = update(Task).where(Task.id == task_id, Task.job_id == job_id)
-            stmt = stmt.values(status=status, result=result)
+            stmt = stmt.values(status=status)
             await session.execute(stmt)
             await session.commit()
 
@@ -413,6 +413,7 @@ class DBAdapterOrdersTasksMixin:
                 result_data = json.loads(result)
             except json.JSONDecodeError:
                 result_data = None
+                logger.error(f"Failed to parse JSON result for task {task_id}")
 
             task.result = result_data
             task.status = TaskStatus.SanityCheckPending
