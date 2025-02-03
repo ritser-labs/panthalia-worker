@@ -13,7 +13,7 @@ from ....models import (
     Order, Account, OrderType, HoldType, CreditTxnType, EarningsTxnType, PlatformRevenueTxnType,
     CreditTransaction, HoldTransaction, Hold, EarningsTransaction
 )
-import secrets
+import time
 
 logger = logging.getLogger(__name__)
 PLATFORM_FEE_PERCENTAGE = 0.1
@@ -386,42 +386,100 @@ class DBAdapterOrdersTasksMixin:
     async def check_invalid(self, task: Task):
         return False
 
-    async def submit_task_result(self, task_id: int, result: str) -> bool:
+    async def submit_partial_result(self, task_id: int, partial_result: dict, final: bool = False) -> dict:
+        """
+        Updates the Task.result JSON field by merging in a new key/value pair.
+        
+        The new key is the current submission time (as a string of the UNIX timestamp),
+        and its value is the provided partial_result dictionary.
+        
+        In addition, if final is True, the task status is updated (here set to "finalized")
+        and task.time_solved is recorded (using the current UTC time).
+        
+        Importantly, before updating, the function verifies:
+        - The Task exists.
+        - The Task has an associated 'ask' (i.e. a solver assignment).
+        - The current authenticated user (via self.get_user_id())
+            matches the ask's user_id.
+        
+        Auth checks (e.g. via route wrappers) are expected to be in place as well.
+        
+        :param task_id: The ID of the task to update.
+        :param partial_result: A dictionary containing the partial result data.
+                            (For example, {"loss": 0.45, "grads_url": "http://..."}).
+        :param final: Boolean flag indicating if this is the final submission.
+                    If True, update the task status and record time_solved.
+        :return: A dictionary indicating success.
+        :raises ValueError: If the task is not found.
+        :raises PermissionError: If the task does not have an ask assignment or if the
+                                authenticated user is not allowed to submit.
+        """
+        # Use the current time (as an integer timestamp) as the key for this submission.
+        submission_time = int(time.time())
+        timestamp_key = str(submission_time)
+
+        # Get the currently authenticated user ID.
+        user_id = self.get_user_id()
+
         async with self.get_async_session() as session:
-            q = (
+            # Eagerly load the 'ask' relationship to avoid lazy-loading outside this session:
+            stmt = (
                 select(Task)
+                .options(joinedload(Task.ask))
                 .where(Task.id == task_id)
-                .options(
-                    joinedload(Task.job).joinedload(Job.subnet),
-                    joinedload(Task.bid).joinedload(Order.hold),
-                    joinedload(Task.ask).joinedload(Order.hold)
-                )
             )
-            r = await session.execute(q)
-            task = r.scalar_one_or_none()
+            result = await session.execute(stmt)
+            task = result.scalar_one_or_none()
+
             if not task:
-                raise ValueError(f"Task {task_id} not found")
+                logger.error(f"submit_partial_result: Task {task_id} not found.")
+                raise ValueError(f"Task {task_id} not found.")
 
-            if not task.ask:
+            # Check that the task has an associated 'ask' and that the solver's user_id matches.
+            if not getattr(task, 'ask', None):
+                logger.error(f"submit_partial_result: Task {task_id} does not have a solver assignment.")
                 raise PermissionError("No solver assignment, cannot submit result.")
-            if task.ask.user_id != self.get_user_id():
+
+            if task.ask.user_id != user_id:
+                logger.error(
+                    f"submit_partial_result: Authenticated user {user_id} "
+                    f"is not permitted to submit result for task {task_id}."
+                )
                 raise PermissionError("Not your task to submit a result for.")
-            if task.status != TaskStatus.SolverSelected:
-                raise ValueError(f"Task {task_id} is not in SolverSelected status")
 
-            try:
-                result_data = json.loads(result)
-            except json.JSONDecodeError:
-                result_data = None
-                logger.error(f"Failed to parse JSON result for task {task_id}")
+            # Retrieve the existing result stored in the task (if any).
+            current_results = {}
+            if task.result:
+                try:
+                    if isinstance(task.result, str):
+                        current_results = json.loads(task.result)
+                    elif isinstance(task.result, dict):
+                        current_results = task.result
+                    else:
+                        current_results = {}
+                except Exception as e:
+                    logger.error(f"Error parsing task.result for task {task_id}: {e}")
+                    current_results = {}
 
-            task.result = result_data
-            task.status = TaskStatus.SanityCheckPending
-            task.time_solved = datetime.now(timezone.utc)
+            # Insert the new partial result using the submission time as the key.
+            current_results[timestamp_key] = partial_result
+
+            # Save the updated results back into the task as a JSON string.
+            task.result = json.dumps(current_results)
+
+            # If this is the final submission, update task status and record time_solved.
+            if final:
+                task.status = TaskStatus.SanityCheckPending
+                task.time_solved = datetime.now(timezone.utc)
+
             session.add(task)
             await session.commit()
-            return {'success': True}
-    
+
+        logger.info(f"Task {task_id}: submitted partial result at key {timestamp_key} (final={final}).")
+        return {"success": True}
+
+
+        
     async def update_replicated_parent(self, child_task_id: int, parent_task_id: int) -> bool:
         async with self.get_async_session() as session:
             child = await session.get(Task, child_task_id)

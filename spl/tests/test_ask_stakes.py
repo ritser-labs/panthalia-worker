@@ -88,7 +88,7 @@ async def test_ask_order_reserves_full_stake(db_adapter_server_fixture):
             await session.commit()
 
         # 4) Solver => submit => finalize => incorrect => leftover_amount=bid.price => freed to buyer, solver stake is charged
-        await server.submit_task_result(task_id, result=json.dumps({"outcome": "incorrect"}))
+        await server.submit_partial_result(task_id, json.dumps({"outcome": "incorrect"}), final=True)
         await server.finalize_sanity_check(task_id, is_valid=False, force=True)
 
         # Final check:

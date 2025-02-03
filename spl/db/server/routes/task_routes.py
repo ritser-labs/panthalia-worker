@@ -34,11 +34,11 @@ async def create_task_route():
     return await route_func()
 
 
-@app.route('/submit_task_result', methods=['POST'], endpoint='submit_task_result_endpoint')
-async def submit_task_result_route():
+@app.route('/submit_partial_result', methods=['POST'], endpoint='submit_partial_result_endpoint')
+async def submit_partial_result():
     route_func = create_post_route(
-        db_adapter_server.submit_task_result,
-        ['task_id','result'],
+        db_adapter_server.submit_partial_result,
+        ['task_id','partial_result', 'final'],
         auth_method=AuthMethod.USER
     )
     return await route_func()

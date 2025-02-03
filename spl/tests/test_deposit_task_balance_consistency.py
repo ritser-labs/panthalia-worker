@@ -174,7 +174,7 @@ async def test_deposit_task_balance_consistency(db_adapter_server_fixture):
         # 7) Solver => submit => buyer => finalize => correct => cleanup
         #
         solver_result_data = {"test_result": "ok", "loss": 0.123}
-        await server.submit_task_result(task_id, result=json.dumps(solver_result_data))
+        await server.submit_partial_result(task_id, json.dumps(solver_result_data), final=True)
 
         # Switch to buyer to finalize
         server._user_id_getter = lambda: buyer_user_id

@@ -85,7 +85,7 @@ async def test_earnings_and_balances_scenario():
         assert balance_solver_2["credits_balance"] == 300.0
 
         # 6) Solve => correct => solver stake freed => leftover => 500 + new earnings
-        await solver_server.submit_task_result(task_id, result=json.dumps({"output": "correct"}))
+        await solver_server.submit_partial_result(task_id, json.dumps({"output": "correct"}), final=True)
         await buyer_server.finalize_sanity_check(task_id, True)
 
         balance_buyer_3 = await buyer_server.get_balance_details_for_user()
@@ -124,7 +124,7 @@ async def test_earnings_and_balances_scenario():
             await solver_server.match_bid_ask_orders(sess2, subnet_id)
             await sess2.commit()
 
-        await solver_server.submit_task_result(task_id_2, result=json.dumps({"output": "incorrect"}))
+        await solver_server.submit_partial_result(task_id_2, json.dumps({"output": "incorrect"}), final=True)
         await buyer_server.finalize_sanity_check(task_id_2, False)
 
         # Buyer leftover returns from 900-150 => 750 + 150 => 900
