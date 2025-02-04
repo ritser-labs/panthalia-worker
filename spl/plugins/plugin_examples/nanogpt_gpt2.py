@@ -48,9 +48,5 @@ exported_plugin = StandardPlugin(
     tensor_version_interval=870,
     expected_worker_time=850,
     max_concurrent_iterations=14,
-    inner_max_lr=6e-4,
-    inner_min_lr=6e-4,
-    inner_T_0=200,
-    inner_weight_decay=0.1,
     preload_batch_count=4
 )

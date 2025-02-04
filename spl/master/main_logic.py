@@ -240,12 +240,19 @@ class Master:
                     original_task_id=original_task_id
                 )
                 iteration_state["result"] = final_result or {}
+                
+                last_key = max([int(k) for k in iteration_state.keys() if k.isdigit()])
+                last_result = iteration_state.get(str(last_key), {})
 
                 # If final_result included a 'loss', store it in self.losses & optionally update SOT
-                if final_result and "loss" in final_result:
-                    loss_val = final_result["loss"]
+                if last_result and "loss" in last_result and "version_number" in last_result:
+                    if type(last_result["loss"]) != float:
+                        self.logger.error(f"[main_iteration] Iter={iteration_number} => invalid loss value.")
+                    if type(last_result["version_number"]) != int:
+                        self.logger.error(f"[main_iteration] Iter={iteration_number} => invalid version number.")
+                    loss_val = last_result["loss"]
                     self.losses.append(loss_val)
-                    version_num = final_result.get("version_number")
+                    version_num = last_result.get("version_number")
                     await self.update_latest_loss(loss_val, version_num)
 
                 # Bump job iteration in DB, mark iteration as done

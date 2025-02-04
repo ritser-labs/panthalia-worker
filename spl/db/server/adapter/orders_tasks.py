@@ -13,7 +13,12 @@ from ....models import (
     Order, Account, OrderType, HoldType, CreditTxnType, EarningsTxnType, PlatformRevenueTxnType,
     CreditTransaction, HoldTransaction, Hold, EarningsTransaction
 )
-import time
+import time, uuid
+import aiohttp
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from ..ephemeral_key import get_db_sot_private_key  # ephemeral key from app.py
+
 
 logger = logging.getLogger(__name__)
 PLATFORM_FEE_PERCENTAGE = 0.1
@@ -386,97 +391,147 @@ class DBAdapterOrdersTasksMixin:
     async def check_invalid(self, task: Task):
         return False
 
-    async def submit_partial_result(self, task_id: int, partial_result: dict, final: bool = False) -> dict:
+    async def submit_partial_result(self, task_id: int, partial_result: str, final: bool = False) -> dict:
         """
-        Updates the Task.result JSON field by merging in a new key/value pair.
-        
-        The new key is the current submission time (as a string of the UNIX timestamp),
-        and its value is the provided partial_result dictionary.
-        
-        In addition, if final is True, the task status is updated (here set to "finalized")
-        and task.time_solved is recorded (using the current UTC time).
-        
-        Importantly, before updating, the function verifies:
-        - The Task exists.
-        - The Task has an associated 'ask' (i.e. a solver assignment).
-        - The current authenticated user (via self.get_user_id())
-            matches the ask's user_id.
-        
-        Auth checks (e.g. via route wrappers) are expected to be in place as well.
-        
-        :param task_id: The ID of the task to update.
-        :param partial_result: A dictionary containing the partial result data.
-                            (For example, {"loss": 0.45, "grads_url": "http://..."}).
-        :param final: Boolean flag indicating if this is the final submission.
-                    If True, update the task status and record time_solved.
-        :return: A dictionary indicating success.
-        :raises ValueError: If the task is not found.
-        :raises PermissionError: If the task does not have an ask assignment or if the
-                                authenticated user is not allowed to submit.
+        Updates the Task.result JSON by merging in the new partial_result. If `final` is True,
+        moves the Task to SanityCheckPending. Also posts partial_result to the SOT if relevant.
         """
-        # Use the current time (as an integer timestamp) as the key for this submission.
-        submission_time = int(time.time())
-        timestamp_key = str(submission_time)
-
-        # Get the currently authenticated user ID.
-        user_id = self.get_user_id()
+        # Convert partial_result to a dict if it's a JSON string
+        if isinstance(partial_result, str):
+            partial_data = json.loads(partial_result)
+        else:
+            partial_data = partial_result
 
         async with self.get_async_session() as session:
-            # Eagerly load the 'ask' relationship to avoid lazy-loading outside this session:
+            # Eager-load everything we need: ask, bid, job, etc.
             stmt = (
                 select(Task)
-                .options(joinedload(Task.ask))
                 .where(Task.id == task_id)
+                .options(
+                    selectinload(Task.ask),
+                    selectinload(Task.bid),
+                    selectinload(Task.job)  # or joinedload if you prefer
+                )
             )
             result = await session.execute(stmt)
             task = result.scalar_one_or_none()
 
             if not task:
-                logger.error(f"submit_partial_result: Task {task_id} not found.")
                 raise ValueError(f"Task {task_id} not found.")
-
-            # Check that the task has an associated 'ask' and that the solver's user_id matches.
             if not getattr(task, 'ask', None):
-                logger.error(f"submit_partial_result: Task {task_id} does not have a solver assignment.")
-                raise PermissionError("No solver assignment, cannot submit result.")
+                # If you truly require an ask for partial submission:
+                raise PermissionError("No solver assignment => cannot submit partial result.")
 
-            if task.ask.user_id != user_id:
-                logger.error(
-                    f"submit_partial_result: Authenticated user {user_id} "
-                    f"is not permitted to submit result for task {task_id}."
-                )
-                raise PermissionError("Not your task to submit a result for.")
-
-            # Retrieve the existing result stored in the task (if any).
+            # Merge partial_result into task.result
             current_results = {}
             if task.result:
                 try:
-                    if isinstance(task.result, str):
-                        current_results = json.loads(task.result)
-                    elif isinstance(task.result, dict):
-                        current_results = task.result
-                    else:
-                        current_results = {}
-                except Exception as e:
-                    logger.error(f"Error parsing task.result for task {task_id}: {e}")
+                    current_results = (
+                        json.loads(task.result) if isinstance(task.result, str)
+                        else task.result
+                    )
+                except Exception:
                     current_results = {}
 
-            # Insert the new partial result using the submission time as the key.
-            current_results[timestamp_key] = partial_result
-
-            # Save the updated results back into the task as a JSON string.
+            # Use a timestamp key or whatever structure you want
+            import time
+            timestamp_key = str(int(time.time()))
+            current_results[timestamp_key] = partial_data
             task.result = json.dumps(current_results)
 
-            # If this is the final submission, update task status and record time_solved.
+            # If final => push it to SanityCheckPending
             if final:
                 task.status = TaskStatus.SanityCheckPending
                 task.time_solved = datetime.now(timezone.utc)
 
+            await self._update_sot_with_partial(task_id, partial_data)
+
             session.add(task)
             await session.commit()
 
-        logger.info(f"Task {task_id}: submitted partial result at key {timestamp_key} (final={final}).")
+        # Return something to the caller
         return {"success": True}
+
+
+    async def _update_sot_with_partial(self, task_id: int, partial_data: dict):
+        """
+        POSTs directly to SOT’s /update_state endpoint, signing with the ephemeral
+        DB key that lives in app.py.
+        """
+        # 1) Fetch the job => we need job.sot_url
+        async with self.get_async_session() as session:
+            stmt = (
+                select(Task, Job)
+                .join(Job, Job.id == Task.job_id)
+                .where(Task.id == task_id)
+            )
+            row = (await session.execute(stmt)).first()
+            if not row:
+                logger.warning(f"[_update_sot_with_partial] No Job found for task_id={task_id}.")
+                return
+            task_obj, job_obj = row
+            sot_url = (job_obj.sot_url or "").rstrip("/")
+            if not sot_url:
+                logger.warning(f"[_update_sot_with_partial] job {job_obj.id} has no sot_url set.")
+                return
+
+        # 2) Build the payload you want to send to /update_state
+        #    Typically includes at least version_number, result_url, etc.
+        payload = {
+            "version_number": partial_data["version_number"],
+            "result_url": partial_data["result_url"],
+            "tensor_name": "model",
+        }
+        if "loss" in partial_data:
+            payload["loss"] = partial_data["loss"]
+        if "input_url" in partial_data:
+            payload["input_url"] = partial_data["input_url"]
+
+        # 3) Generate a signature with the ephemeral DB key
+        #    i.e. the standard "<message>:<signature>" format
+        def _sign_sot_request(endpoint: str, data_dict: dict) -> dict:
+            # Construct the "message" portion
+            msg_obj = {
+                "endpoint": endpoint,   # "update_state"
+                "nonce": str(uuid.uuid4()),
+                "timestamp": int(time.time()),
+                "data": data_dict,
+            }
+            msg_str = json.dumps(msg_obj, sort_keys=True)
+
+            # Sign with ephemeral private key
+            pk = get_db_sot_private_key()
+            if not pk:
+                raise RuntimeError("Ephemeral DB key not found (did you generate it at startup?)")
+
+            acct = Account.from_key(pk)
+            sign_res = acct.sign_message(encode_defunct(text=msg_str))
+            sig_hex = sign_res.signature.hex()
+
+            # Return as an Authorization header
+            return {"Authorization": f"{msg_str}:{sig_hex}"}
+
+        headers = _sign_sot_request("update_state", payload)
+        update_url = f"{sot_url}/update_state"
+
+        # 4) Make the POST request
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.post(update_url, json=payload, headers=headers, timeout=30) as resp:
+                    if resp.status == 200:
+                        logger.info(
+                            f"[_update_sot_with_partial] SOT update succeeded for task={task_id}, "
+                            f"version={payload['version_number']}"
+                        )
+                    else:
+                        err_txt = await resp.text()
+                        logger.error(
+                            f"[_update_sot_with_partial] SOT /update_state failed: "
+                            f"HTTP {resp.status}, body={err_txt}"
+                        )
+        except Exception as e:
+            logger.error(f"[_update_sot_with_partial] SOT call crashed: {e}")
+
 
 
         
@@ -492,30 +547,31 @@ class DBAdapterOrdersTasksMixin:
 
 
     async def finalize_sanity_check(self, task_id: int, is_valid: bool, force: bool = False):
+        """
+        Moves a task from SanityCheckPending => ResolvedCorrect/ResolvedIncorrect, etc.
+        Then calls handle_correct_resolution_scenario or handle_incorrect_resolution_scenario
+        to adjust holds, fees, etc.
+        """
         async with self.get_async_session() as session:
-            logger.info(f"[finalize_sanity_check] Finalizing task {task_id} with is_valid={is_valid}")
+            # Eager-load ask, bid, job->subnet, plus hold
             stmt = (
                 select(Task)
                 .where(Task.id == task_id)
                 .options(
-                    joinedload(Task.bid).joinedload(Order.hold),
-                    joinedload(Task.ask).joinedload(Order.hold),
-                    joinedload(Task.job).joinedload(Job.subnet)
+                    selectinload(Task.bid).selectinload(Order.hold),
+                    selectinload(Task.ask).selectinload(Order.hold),
+                    selectinload(Task.job).selectinload(Job.subnet)
                 )
             )
-            r = await session.execute(stmt)
-            task = r.scalar_one_or_none()
+            res = await session.execute(stmt)
+            task = res.scalar_one_or_none()
             if not task:
                 raise ValueError("Task not found.")
 
-            if task.status in [TaskStatus.ResolvedCorrect, TaskStatus.ResolvedIncorrect]:
-                logger.warning(
-                    f"[finalize_sanity_check] Task {task_id} is already in {task.status} => skipping re-finalization."
-                )
-                return
+            # If we’re not forcing, ensure it’s in the correct status
             if not force and task.status not in [TaskStatus.SanityCheckPending, TaskStatus.ReplicationPending]:
-                raise ValueError(f"Task {task_id} must be in SanityCheckPending or ReplicationPending to finalize sanity check.")
-
+                raise ValueError(f"Task {task_id} must be in SanityCheckPending or ReplicationPending to finalize.")
+            
             if is_valid:
                 task.status = TaskStatus.ResolvedCorrect
                 await self.handle_correct_resolution_scenario(session, task)
@@ -525,7 +581,7 @@ class DBAdapterOrdersTasksMixin:
 
             task.time_solved = datetime.now(timezone.utc)
             session.add(task)
-            await session.flush()
+            await session.flush()  # in case handle_* changed anything
             await session.commit()
 
     async def handle_correct_resolution_scenario(self, session: AsyncSession, task: Task):

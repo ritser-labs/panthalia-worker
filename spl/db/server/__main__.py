@@ -1,20 +1,31 @@
+# file: spl/db/server/__main__.py
+
 import argparse
 import asyncio
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
 import logging
 
-from .app import app, logger, set_perm_modify_db, get_perm_modify_db
-from .adapter import db_adapter_server, init_db  # Import init_db
+from .app import (
+    app, 
+    logger, 
+    set_perm_modify_db, 
+    get_perm_modify_db,
+    generate_ephemeral_db_sot_key,
+    get_db_sot_address
+)
+from .adapter import init_db
+from .db_server_instance import db_adapter_server
+
 
 async def background_tasks():
-    # Run a periodic background loop to ensure open orders still meet hold expiry criteria
     while True:
         try:
             await db_adapter_server.check_and_cleanup_holds()
         except Exception as e:
             logger.error(f"Error in check_and_cleanup_holds: {e}")
-        await asyncio.sleep(5)  # Wait 5 seconds
+        await asyncio.sleep(5)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Database Server")
@@ -27,18 +38,22 @@ if __name__ == "__main__":
     set_perm_modify_db(args.perm)
 
     async def main():
+        # 1) create ephemeral DB key
+        generate_ephemeral_db_sot_key()
+        ephemeral_addr = get_db_sot_address()
+
         await init_db()
+        # Possibly create a perm for the root wallet
         await db_adapter_server.create_perm(args.root_wallet, get_perm_modify_db())
 
         config = Config()
         config.bind = [f'{args.host}:{args.port}']
 
-        # Run background tasks concurrently with the main server
         server_task = asyncio.create_task(serve(app, config))
         bg_task = asyncio.create_task(background_tasks())
-        logger.info(f"Starting DB Server on {args.host}:{args.port}...")
-        logger.info(f"Permission ID: {args.perm}")
-        logger.info(f"Root wallet address: {args.root_wallet}")
+
+        logger.info(f"Starting DB Server on {args.host}:{args.port}")
+        logger.info(f"DB ephemeral address for SOT: {ephemeral_addr}")
 
         await asyncio.gather(server_task, bg_task)
 

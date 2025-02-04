@@ -1,7 +1,8 @@
 # spl/db/server/routes/sot_routes.py
 
 from .common import create_get_route, create_post_route_return_id, create_post_route, AuthMethod
-from ..app import app, db_adapter_server
+from ..app import app
+from ..db_server_instance import db_adapter_server
 
 @app.route('/sot/get_job_state', methods=['GET'], endpoint='sot_get_job_state_endpoint')
 async def sot_get_job_state_route():
