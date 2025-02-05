@@ -487,10 +487,29 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         final_grads = aggregator_sum / float(updates_count)
 
+        # -- NEW LOG LINES START
+        logging.info(
+            f"[_finalize_aggregator] aggregator_sum shape={aggregator_sum.shape}, "
+            f"updates_count={updates_count}, aggregator_sum.norm={aggregator_sum.norm().item():.6f}"
+        )
+        logging.info(
+            f"[_finalize_aggregator] final_grads shape={final_grads.shape}, "
+            f"final_grads.norm={final_grads.norm().item():.6f}"
+        )
+        # -- NEW LOG LINES END
+
         old_params_path = os.path.join(self.base_dir, f"{tensor_name}_{old_version}.pt")
         if not os.path.exists(old_params_path):
             logging.error(f"[_finalize_aggregator] Missing old params => cannot finalize from v={old_version}")
             return None, None
+
+        old_params_data = torch.load(old_params_path, map_location=device)
+
+        # -- NEW LOG
+        logging.info(
+            f"[_finalize_aggregator] old_params shape={old_params_data.shape}, "
+            f"old_params_data.norm={old_params_data.norm().item():.6f}"
+        )
 
         # fetch hyperparams if provided
         if self.hyperparams_getter:
@@ -521,6 +540,12 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             self.base_dir
         )
 
+        # -- NEW LOG
+        logging.info(
+            f"[_finalize_aggregator] new_params shape={new_params.shape}, "
+            f"new_params.norm={new_params.norm().item():.6f}"
+        )
+
         new_params_path = os.path.join(self.base_dir, f"{tensor_name}_{new_version}.pt")
         torch.save(new_params, new_params_path + ".tmp")
         os.rename(new_params_path + ".tmp", new_params_path)
@@ -531,7 +556,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         os.rename(future_m_path + ".tmp", future_m_path)
 
         # produce chunked-DCT diff
-        old_params_data = torch.load(old_params_path, map_location=device)
         diff = new_params - old_params_data
         (
             freq_idxs,
@@ -546,6 +570,12 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             k=k_for_encoding,
             prev_error=None,
             norm='ortho'
+        )
+
+        # -- NEW LOG
+        logging.info(
+            f"[_finalize_aggregator] diff shape={diff.shape}, "
+            f"diff.norm={diff.norm().item():.6f}, diff.max_abs={diff.abs().max().item():.6f}"
         )
 
         diff_dict = {
@@ -575,6 +605,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             pass
 
         return new_params_path, diff_file_path
+
 
     async def _cleanup_old_files(self):
         """

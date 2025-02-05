@@ -65,6 +65,13 @@ class ModelAdapter(ABC):
 
 
 class StandardModelAdapter(ModelAdapter):
+    # -------------------------------------------------------------
+    # Added constructor to store a persistent "prev_error"
+    # -------------------------------------------------------------
+    def __init__(self, model_config):
+        super().__init__(model_config)
+        self.prev_error = None  # <-- NEW: track residual error across calls
+
     @abstractmethod
     def loss_fn(self, logits, targets) -> torch.Tensor:
         pass
@@ -115,6 +122,8 @@ class StandardModelAdapter(ModelAdapter):
         """
         We do forward/backward => chunked-DCT encode the gradient => return it.
         We'll rely on the worker code to apply any param diffs from the SOT.
+
+        NOTE: This version reuses self.prev_error for compressed residual tracking.
         """
         steps = task_params['steps']
         model = self.tensor_to_model(current_param_tensor)
@@ -147,7 +156,7 @@ class StandardModelAdapter(ModelAdapter):
                 grads_list.append(torch.zeros_like(p).view(-1))
         full_grads = torch.cat(grads_list, dim=0).detach()
 
-        # chunked-DCT encode
+        # chunked-DCT encode, reusing self.prev_error so residual accumulates
         chunk_shape = task_params['chunk_shape']
         k_for_encoding = task_params['k']
         (
@@ -161,11 +170,14 @@ class StandardModelAdapter(ModelAdapter):
             full_grads,
             chunk_shape=chunk_shape,
             k=k_for_encoding,
-            prev_error=None,
+            prev_error=self.prev_error,     # <-- pass in previous residual
             norm='ortho'
         )
 
-        # build final encoded payload
+        # Update self.prev_error for the next step
+        self.prev_error = new_error
+
+        # build final encoded payload (new_error is NOT sent up; we keep it locally)
         encoded_dict = {
             'freq_idxs': freq_idxs.cpu(),
             'freq_vals_int8': freq_vals_int8.cpu(),
@@ -302,7 +314,7 @@ class FairscaleModelAdapter(ModelAdapter):
             dist.init_process_group(backend=backend)
 
 
-class TransformerModelAdapter(StandardModelAdapter):
+class TransformerModelAdapter(StandardModelAdapter, ABC):
     def loss_fn(self, logits, targets) -> torch.Tensor:
         return F.cross_entropy(logits, targets, ignore_index=self.model_config.tokenizer.pad_id)
 

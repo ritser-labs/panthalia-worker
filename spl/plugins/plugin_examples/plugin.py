@@ -42,7 +42,7 @@ dataset = ShakespeareDataLoader(
 ################################################################
 # 2) Create the "DefaultSOTAdapter"
 ################################################################
-TENSOR_VERSION_INTERVAL = 10
+TENSOR_VERSION_INTERVAL = 7
 sot_adapter = DefaultSOTAdapter(
     model_adapter=model_adapter,
     dataset=dataset,
@@ -67,6 +67,8 @@ exported_plugin = StandardPlugin(
     tensor_version_interval=TENSOR_VERSION_INTERVAL,
     expected_worker_time=3,
     max_concurrent_iterations=4,
+    chunk_shape=(32, 32),
+    k=8,
 )
 
 sot_adapter.hyperparams_getter = exported_plugin.get_sot_learning_hyperparameters

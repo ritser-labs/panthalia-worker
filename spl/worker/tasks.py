@@ -252,6 +252,14 @@ async def process_tasks():
                                 diff_url = f"{sot_url}{diff_url}"
                                 logger.debug(f"Downloading and decoding diff: {diff_url}")
                                 diff_tensor = await download_and_decode_diff(diff_url)
+
+                                # -- NEW LOG: check diff norm
+                                logger.info(
+                                    f"{task_id}: Step={step_idx} "
+                                    f"Fetched diff norm={diff_tensor.norm().item():.6f}, "
+                                    f"max_abs={diff_tensor.abs().max().item():.6f}"
+                                )
+
                                 param_tensor = param_tensor + diff_tensor
                                 local_version += 1
 
@@ -287,6 +295,7 @@ async def process_tasks():
     finally:
         async with concurrent_tasks_counter_lock:
             concurrent_tasks_counter -= 1
+
 
 
 async def get_diffs_since(local_version, sot_url):
