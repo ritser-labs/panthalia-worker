@@ -34,11 +34,8 @@ upload_lock = AsyncQueuedLock()
 
 task_queue = TaskQueue()
 
-# We'll import decode logic from demo.py for the chunked diffs
-from ..util import demo
-
 # -------------------------------------------------------------------------
-# NEW: Helper to quickly fetch the SOT's *current* version
+# Helper to quickly fetch the SOT's *current* version
 # -------------------------------------------------------------------------
 async def fetch_current_sot_version(sot_url: str) -> int:
     """
@@ -56,7 +53,7 @@ async def fetch_current_sot_version(sot_url: str) -> int:
             return data.get("version_number", 0)
 
 # -------------------------------------------------------------------------
-# NEW: Helper that loops briefly until SOT version > local_version
+# Helper that loops briefly until SOT version > local_version
 # -------------------------------------------------------------------------
 async def wait_for_version_advance(
     local_version: int,
@@ -66,7 +63,7 @@ async def wait_for_version_advance(
 ) -> int:
     """
     Loops for up to poll_interval*max_attempts seconds, calling fetch_current_sot_version(sot_url).
-    If the SOT’s version_number becomes > local_version, we return it immediately.
+    If the SOT's version_number becomes > local_version, we return it immediately.
     If it never advances, we return the old local_version after logging a warning.
     """
     for attempt in range(max_attempts):
@@ -187,18 +184,18 @@ async def process_tasks():
                 try:
                     plugin = await get_plugin(next_task['plugin_id'], db_adapter)
 
-                    # 2a) Initialize => download param from SOT (once)
-                    init_tensor, version_number = await plugin.call_submodule(
+                    # 2a) Initialize => download param from SOT (once).
+                    #     We only store version_number locally; the plugin caches the param internally.
+                    version_number = await plugin.call_submodule(
                         'model_adapter',
                         'initialize_tensor',
                         TENSOR_NAME,
                         sot_url,
                         task_params
                     )
-                    param_tensor = init_tensor.clone().detach()
                     local_version = version_number  # track local version
 
-                    # 2b) Load the input
+                    # 2b) Load the input (resets any leftover input/residual in the plugin).
                     await plugin.call_submodule(
                         'model_adapter',
                         'load_input_tensor',
@@ -209,19 +206,18 @@ async def process_tasks():
                     steps = task_params['steps']
 
                     for step_idx in range(steps):
-                        # i) Compute gradient => chunked-DCT
+                        # i) Compute gradient => plugin does chunked-DCT encode internally
                         encoded_grad, loss_val = await plugin.call_submodule(
                             'model_adapter',
                             'execute_step',
-                            param_tensor,
                             task_params,
                             step_idx
                         )
 
-                        # -- FIX HERE: fetch the current SOT version
+                        # Fetch the current SOT version
                         local_version = await fetch_current_sot_version(sot_url)
 
-                        # ii) Store gradient into partial_result => triggers SOT update_state
+                        # ii) Store gradient => triggers SOT update_state
                         grads_url = await upload_tensor(encoded_grad, 'grads', sot_url)
 
                         partial_result = {
@@ -249,18 +245,39 @@ async def process_tasks():
                                 f'{local_version}'
                             )
                             for diff_url in new_diffs:
-                                diff_url = f"{sot_url}{diff_url}"
-                                logger.debug(f"Downloading and decoding diff: {diff_url}")
-                                diff_tensor = await download_and_decode_diff(diff_url)
+                                full_diff_url = f"{sot_url}{diff_url}"
+                                logger.debug(f"Downloading diff: {full_diff_url}")
+                                diff_data = await download_file(
+                                    full_diff_url,
+                                    download_type='tensor',
+                                    chunk_timeout=20
+                                )
+                                if not isinstance(diff_data, dict):
+                                    logger.warning(
+                                        f"Downloaded diff data from {full_diff_url} is not a dict. "
+                                        "Skipping..."
+                                    )
+                                    diff_tensor = torch.zeros(0)
+                                else:
+                                    # Decode the diff
+                                    diff_tensor = await plugin.call_submodule(
+                                        'model_adapter',
+                                        'decode_diff',
+                                        diff_data
+                                    )
 
-                                # -- NEW LOG: check diff norm
                                 logger.info(
                                     f"{task_id}: Step={step_idx} "
                                     f"Fetched diff norm={diff_tensor.norm().item():.6f}, "
                                     f"max_abs={diff_tensor.abs().max().item():.6f}"
                                 )
 
-                                param_tensor = param_tensor + diff_tensor
+                                # Apply the diff to the plugin's in-memory param
+                                await plugin.call_submodule(
+                                    'model_adapter',
+                                    'apply_diff',
+                                    diff_tensor
+                                )
                                 local_version += 1
 
                 finally:
@@ -297,11 +314,10 @@ async def process_tasks():
             concurrent_tasks_counter -= 1
 
 
-
 async def get_diffs_since(local_version, sot_url):
     """
     Calls GET /get_diffs_since?from_version=local_version
-    returns a list of URLs to diff .pt files we can decode
+    returns a list of URLs to diff .pt files we can download (as dict).
     """
     endpoint = f"{sot_url}/get_diffs_since?from_version={local_version}"
 
@@ -314,43 +330,6 @@ async def get_diffs_since(local_version, sot_url):
             diffs_list = await resp.json()
             # Each item is something like /data/state/diff_10_to_11.pt
             return diffs_list
-
-
-async def download_and_decode_diff(diff_url):
-    """
-    Download the .pt diff from SOT, decode chunked-DCT => return param_diff
-    """
-    full_data = await download_file(diff_url, download_type='tensor', chunk_timeout=20)
-    if not isinstance(full_data, dict):
-        logger.warning(f"download_and_decode_diff: got non-dict from {diff_url}")
-        return torch.zeros(0)
-
-    freq_idxs = full_data['freq_idxs']
-    freq_vals_int8 = full_data['freq_vals_int8']
-    freq_scales = full_data['freq_scales']
-    freq_zero_points = full_data['freq_zero_points']
-    chunk_shape = tuple(full_data['chunk_shape'])
-    orig_shape = tuple(full_data['orig_shape'])
-
-    # NEW: read pad_count
-    pad_count = full_data.get('pad_count', 0)
-
-    freq_idxs_t = torch.tensor(freq_idxs, dtype=torch.int64)
-    freq_vals_int8_t = torch.tensor(freq_vals_int8, dtype=torch.int8)
-    freq_scales_t = torch.tensor(freq_scales, dtype=torch.float32)
-    freq_zero_points_t = torch.tensor(freq_zero_points, dtype=torch.float32)
-
-    param_diff = demo.chunked_dct_decode_int8(
-        freq_idxs_t,
-        freq_vals_int8_t,
-        freq_scales_t,
-        freq_zero_points_t,
-        x_shape=orig_shape,
-        chunk_shape=chunk_shape,
-        norm='ortho',
-        pad_count=pad_count
-    )
-    return param_diff.to(torch.float32)
 
 
 async def submit_solution(task_id, result: dict, final: bool):
