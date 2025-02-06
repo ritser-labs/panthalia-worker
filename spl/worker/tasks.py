@@ -143,6 +143,9 @@ async def handle_task(task, time_invoked):
     await process_tasks()
 
 
+# -------------------------------------------------------------------------
+# Below is the fully changed process_tasks function with the relevant lines updated
+# -------------------------------------------------------------------------
 async def process_tasks():
     global task_queue, concurrent_tasks_counter
     retry_attempt = 0
@@ -175,7 +178,6 @@ async def process_tasks():
                 )
 
                 # 1) Download the input data
-                #    CHANGED => explicitly chunk_timeout=300
                 predownloaded_data = await download_file(task_params['input_url'], chunk_timeout=300)
                 if predownloaded_data is None:
                     raise Exception("Predownloaded data is None unexpectedly.")
@@ -185,8 +187,7 @@ async def process_tasks():
                 try:
                     plugin = await get_plugin(next_task['plugin_id'], db_adapter)
 
-                    # 2a) Initialize => download param from SOT (once).
-                    #     We only store version_number locally; the plugin caches the param internally.
+                    # 2a) Initialize => fetch param from SOT
                     version_number = await plugin.call_submodule(
                         'model_adapter',
                         'initialize_tensor',
@@ -194,9 +195,9 @@ async def process_tasks():
                         sot_url,
                         task_params
                     )
-                    local_version = version_number  # track local version
+                    local_version = version_number
 
-                    # 2b) Load the input (resets any leftover input/residual in the plugin).
+                    # 2b) Load the input 
                     await plugin.call_submodule(
                         'model_adapter',
                         'load_input_tensor',
@@ -207,7 +208,7 @@ async def process_tasks():
                     steps = task_params['steps']
 
                     for step_idx in range(steps):
-                        # i) Compute gradient => plugin does chunked-DCT encode internally
+                        # i) Compute gradient
                         encoded_grad, loss_val = await plugin.call_submodule(
                             'model_adapter',
                             'execute_step',
@@ -215,7 +216,7 @@ async def process_tasks():
                             step_idx
                         )
 
-                        # Fetch the current SOT version
+                        # Re-check from SOT for concurrency safety
                         local_version = await fetch_current_sot_version(sot_url)
 
                         # ii) Store gradient => triggers SOT update_state
@@ -232,23 +233,24 @@ async def process_tasks():
                         await submit_solution(task_id, partial_result, final=is_final)
 
                         # iii) Wait for the SOT to finalize next version
-                        new_global_version = await wait_for_version_advance(
-                            local_version, sot_url
-                        )
+                        new_global_version = await wait_for_version_advance(local_version, sot_url)
                         if new_global_version > local_version:
                             logger.debug(
-                                f"Local version advanced from {local_version} "
-                                f"to {new_global_version}"
+                                f"Local version advanced from {local_version} to {new_global_version}"
                             )
-                            new_diffs = await get_diffs_since(local_version, sot_url)
+                            # *** CHANGED to use get_diffs_in_range *** 
+                            new_diffs, used_end_time = await get_diffs_in_range(
+                                start_version=local_version,
+                                end_time=None,   # means "until now"
+                                sot_url=sot_url
+                            )
                             logger.debug(
-                                f'Obtained {len(new_diffs)} diffs since version '
-                                f'{local_version}'
+                                f"Obtained {len(new_diffs)} diffs in range from "
+                                f"version {local_version} to {used_end_time}"
                             )
                             for diff_url in new_diffs:
                                 full_diff_url = f"{sot_url}{diff_url}"
                                 logger.debug(f"Downloading diff: {full_diff_url}")
-                                # CHANGED => increased chunk_timeout=300
                                 diff_data = await download_file(
                                     full_diff_url,
                                     download_type='tensor',
@@ -256,12 +258,10 @@ async def process_tasks():
                                 )
                                 if not isinstance(diff_data, dict):
                                     logger.warning(
-                                        f"Downloaded diff data from {full_diff_url} is not a dict. "
-                                        "Skipping..."
+                                        f"Downloaded diff data from {full_diff_url} is not a dict. Skipping..."
                                     )
                                     diff_tensor = torch.zeros(0)
                                 else:
-                                    # Decode the diff
                                     diff_tensor = await plugin.call_submodule(
                                         'model_adapter',
                                         'decode_diff',
@@ -273,14 +273,17 @@ async def process_tasks():
                                     f"Fetched diff norm={diff_tensor.norm().item():.6f}, "
                                     f"max_abs={diff_tensor.abs().max().item():.6f}"
                                 )
-
-                                # Apply the diff to the plugin's in-memory param
                                 await plugin.call_submodule(
                                     'model_adapter',
                                     'apply_diff',
                                     diff_tensor
                                 )
                                 local_version += 1
+
+                            # If the "used_end_time" from SOT is still ahead
+                            # (it *should* match local_version after applying all diffs),
+                            # set local_version explicitly just to be safe:
+                            local_version = max(local_version, used_end_time)
 
                 finally:
                     await task_processing_lock.release()
@@ -316,22 +319,39 @@ async def process_tasks():
             concurrent_tasks_counter -= 1
 
 
-async def get_diffs_since(local_version, sot_url):
+
+
+async def get_diffs_in_range(start_version, end_time, sot_url):
     """
-    Calls GET /get_diffs_since?from_version=local_version
-    returns a list of URLs to diff .pt files we can download (as dict).
+    Fetches diffs from the SOT in a version range [start_version+1 .. end_time].
+    If end_time is None, the SOT will interpret that as "up to the current version."
+
+    Returns:
+      (diffs_list, used_end_time)
+
+    where diffs_list is a list of diff URLs (strings), and used_end_time is the
+    actual version up to which we fetched the diffs (the SOT returns this).
     """
-    endpoint = f"{sot_url}/get_diffs_since?from_version={local_version}"
+    if end_time is not None:
+        endpoint = f"{sot_url}/get_diffs_since?from_version={start_version}&end_time={end_time}"
+    else:
+        endpoint = f"{sot_url}/get_diffs_since?from_version={start_version}"
+
+    import aiohttp
 
     async with aiohttp.ClientSession() as session:
         async with session.get(endpoint) as resp:
             if resp.status != 200:
                 txt = await resp.text()
-                logger.warning(f"get_diffs_since => {resp.status}, {txt}")
-                return []
-            diffs_list = await resp.json()
-            # Each item is something like /data/state/diff_10_to_11.pt
-            return diffs_list
+                logger.warning(f"get_diffs_in_range => status={resp.status}, body={txt}")
+                # Return an empty list and the same start_version on error
+                return [], start_version
+
+            data = await resp.json()
+            diffs_list = data.get("diffs", [])
+            used_end_time = data.get("used_end_time", start_version)
+            return diffs_list, used_end_time
+
 
 
 async def submit_solution(task_id, result: dict, final: bool):

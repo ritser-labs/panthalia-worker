@@ -264,37 +264,70 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         @self.app.route('/get_diffs_since', methods=['GET'])
         async def get_diffs_since():
+            """
+            Now returns the diffs in the version range (from_version+1) ... (end_time),
+            where end_time defaults to the SOT's current version if not provided.
+            
+            Sample JSON response:
+            {
+                "diffs": [...],
+                "used_end_time": <int>
+            }
+            """
             from_version_str = request.args.get('from_version', None)
+            end_time_str = request.args.get('end_time', None)
+
             if from_version_str is None:
                 return jsonify({'error': 'missing from_version'}), 400
+
             try:
                 from_version = int(from_version_str)
             except ValueError:
                 return jsonify({'error': 'invalid from_version'}), 400
 
-            async with self.version_calculation_lock:
-                tensor_name = TENSOR_NAME
-                state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
-                block_timestamps = state_data.get("block_timestamps", {})
-                current_version_number = block_timestamps.get(tensor_name, 0)
-                if from_version >= current_version_number:
-                    return jsonify([])
+            # Grab current SOT version
+            tensor_name = TENSOR_NAME
+            state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
+            block_timestamps = state_data.get("block_timestamps", {})
+            current_version_number = block_timestamps.get(tensor_name, 0)
 
-                diffs_list = []
-                for new_ver, (rel_url, created_ts) in self.versioned_diffs.items():
-                    if from_version < new_ver <= current_version_number:
-                        diffs_list.append(rel_url)
+            if end_time_str is None:
+                # If no end_time given, we interpret that as "up to now"
+                end_time = current_version_number
+            else:
+                try:
+                    end_time = int(end_time_str)
+                except ValueError:
+                    return jsonify({'error': 'invalid end_time'}), 400
+                # If user passes an end_time bigger than the current known version,
+                # you can clamp it or just let them get an empty set beyond the real version.
+                if end_time > current_version_number:
+                    end_time = current_version_number
 
-                # Sort them so user gets diffs in ascending order
-                sorted_pairs = sorted(
-                    [(v, self.versioned_diffs[v][0]) for v in self.versioned_diffs],
-                    key=lambda tup: tup[0]
-                )
-                final_list = [
-                    url for v, url in sorted_pairs
-                    if from_version < v <= current_version_number
-                ]
-                return jsonify(final_list)
+            # If from_version is already >= end_time, no diffs
+            if from_version >= end_time:
+                return jsonify({
+                    'diffs': [],
+                    'used_end_time': end_time
+                })
+
+            # Gather the diffs that belong to version numbers in (from_version, end_time]
+            diffs_list = []
+            for ver_num, (rel_url, created_ts) in self.versioned_diffs.items():
+                # we only include diff if from_version < ver_num <= end_time
+                if from_version < ver_num <= end_time:
+                    diffs_list.append(rel_url)
+
+            # Sort so the diffs appear in ascending version order
+            diffs_list = sorted(
+                diffs_list,
+                key=lambda url: int(url.split('_')[-1].split('.')[0])  # a crude parse if needed
+            )
+
+            return jsonify({
+                'diffs': diffs_list,
+                'used_end_time': end_time
+            })
 
         @self.app.route('/latest_state', methods=['GET'])
         async def latest_state():
