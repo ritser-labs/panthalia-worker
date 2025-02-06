@@ -29,7 +29,8 @@ model_params = GPTConfig(
 model_config = NanoGPTConfig(tokenizer, model_params)
 model_adapter = NanoGPTModelAdapter(model_config)
 
-NUM_STEPS = 285
+STEPS_PER_ACCUMULATION = 3
+NUM_STEPS = 70 * STEPS_PER_ACCUMULATION
 EXAMPLES_PER_STEP = 64
 
 dataset = ShakespeareDataLoader(
@@ -42,7 +43,7 @@ dataset = ShakespeareDataLoader(
 ################################################################
 # 2) Create the "DefaultSOTAdapter"
 ################################################################
-TENSOR_VERSION_INTERVAL = 7
+TENSOR_VERSION_INTERVAL = 10
 sot_adapter = DefaultSOTAdapter(
     model_adapter=model_adapter,
     dataset=dataset,
@@ -61,9 +62,10 @@ exported_plugin = StandardPlugin(
     tokenizer,
     num_steps=NUM_STEPS,
     examples_per_step=EXAMPLES_PER_STEP,
-    outer_max_lr=1,
-    outer_min_lr=1,
-    outer_weight_decay=0.0,
+    steps_per_accumulation=STEPS_PER_ACCUMULATION,
+    outer_max_lr=1e-4,
+    outer_min_lr=1e-4,
+    outer_weight_decay=0.01,
     tensor_version_interval=TENSOR_VERSION_INTERVAL,
     expected_worker_time=3,
     max_concurrent_iterations=4,

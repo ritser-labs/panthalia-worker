@@ -54,9 +54,9 @@ class ModelAdapter(ABC):
         step_idx: int
     ):
         """
-        Do forward+backward on the mini-batch for 'step_idx',
-        gather the gradient, chunked-DCT encode it, and return
-        (encoded_grad_dict, loss_value).
+        Do forward+backward on the mini-batch (possibly multiple micro-steps
+        to accumulate gradients), gather the final gradient, chunked-DCT encode it,
+        and return (encoded_grad_dict, loss_value).
         """
         pass
 
@@ -125,42 +125,65 @@ class StandardModelAdapter(ModelAdapter):
         step_idx: int
     ):
         """
-        We do forward/backward => chunked-DCT encode the gradient => return it.
-        Uses self._cached_param for the model weights. We do NOT pass param_tensor from tasks.py.
+        Modified to support gradient accumulation before returning the final gradient.
+        
+        We look for 'steps_per_accumulation' in task_params (defaults to 1 if missing).
+        Inside this method, we do multiple micro-step forward/backward passes on the 
+        same sub-batch, summing the gradients, and finally chunked-DCT encode the 
+        accumulated gradient once.
         """
         if self._cached_param is None:
             raise ValueError("No param is set. Did you call initialize_tensor first?")
 
+        # Number of major steps, used for splitting input among steps
         steps = task_params['steps']
+        # New parameter: steps per accumulation (default 1)
+        accum_steps = task_params.get('steps_per_accumulation', 1)
+
         model = self.tensor_to_model(self._cached_param)
 
+        # Divide the entire dataset (already loaded in self.inputs) by 'steps' 
         batch_size = self.inputs.size(0) // steps
         if batch_size <= 0:
-            raise ValueError(f"execute_step: Invalid batch_size, total={self.inputs.size(0)}, steps={steps}")
+            raise ValueError(
+                f"execute_step: Invalid batch_size, total={self.inputs.size(0)}, steps={steps}"
+            )
 
         start_idx = step_idx * batch_size
         end_idx = (step_idx + 1) * batch_size
         x_step = self.inputs[start_idx:end_idx].detach()
         y_step = self.targets[start_idx:end_idx].detach()
 
-        # zero grads
-        for p in model.parameters():
-            if p.grad is not None:
-                p.grad.zero_()
+        # Prepare to accumulate gradients across multiple micro-steps
+        accum_grads = torch.zeros_like(self._cached_param, dtype=torch.float32, device=device)
+        total_loss = 0.0
 
-        # forward/backward
-        loss = self.forward_and_loss(model, x_step, y_step)
-        loss_value = loss.item()
-        loss.backward()
+        for micro_step in range(accum_steps):
+            # Zero the model's .grad
+            for p in model.parameters():
+                if p.grad is not None:
+                    p.grad.zero_()
 
-        # gather parameter grads into a single flat vector
-        grads_list = []
-        for p in model.parameters():
-            if p.grad is not None:
-                grads_list.append(p.grad.view(-1))
-            else:
-                grads_list.append(torch.zeros_like(p).view(-1))
-        full_grads = torch.cat(grads_list, dim=0).detach()
+            # Forward/backward on the same sub-batch
+            loss = self.forward_and_loss(model, x_step, y_step)
+            loss_value = loss.item()
+            loss.backward()
+
+            # Collect grads from model
+            grads_list = []
+            for p in model.parameters():
+                if p.grad is not None:
+                    grads_list.append(p.grad.view(-1))
+                else:
+                    grads_list.append(torch.zeros_like(p).view(-1))
+
+            partial_grads = torch.cat(grads_list, dim=0).detach()
+            # Accumulate
+            accum_grads += partial_grads
+            total_loss += loss_value
+        
+        accum_grads /= accum_steps
+        total_loss /= accum_steps
 
         # chunked-DCT encode, reusing self.prev_error so residual accumulates
         chunk_shape = task_params['chunk_shape']
@@ -173,7 +196,7 @@ class StandardModelAdapter(ModelAdapter):
             new_error,
             pad_count
         ) = demo.chunked_dct_encode_int8(
-            full_grads,
+            accum_grads,
             chunk_shape=chunk_shape,
             k=k_for_encoding,
             prev_error=self.prev_error,
@@ -190,11 +213,14 @@ class StandardModelAdapter(ModelAdapter):
             'freq_scales': freq_scales.cpu(),
             'freq_zero_points': freq_zero_points.cpu(),
             'chunk_shape': chunk_shape,
-            'orig_shape': full_grads.shape,
+            'orig_shape': accum_grads.shape,
             'pad_count': pad_count
         }
 
-        return encoded_dict, loss_value
+        # Return final (encoded_gradient, loss_value) 
+        # The 'loss_value' below is the sum over accum_steps. 
+        # (Change to an average if you prefer.)
+        return encoded_dict, total_loss
 
     def run_sanity_check(self, task_result: dict) -> bool:
         if not isinstance(task_result, dict):

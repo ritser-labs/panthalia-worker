@@ -91,10 +91,10 @@ async def deposit_stake():
     if (await task_queue.queue_length() + concurrent_tasks_counter) > args.max_tasks_handling:
         logger.debug("Too many tasks being processed. Not depositing more stakes.")
         return
-    
+
     num_orders = await db_adapter.get_num_orders(args.subnet_id, OrderType.Ask.name, False)
     logger.info(f"Current number of stakes: {num_orders}")
-    
+
     for _ in range(args.max_stakes - num_orders):
         price = await get_ask_price()
         await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, price, None)
@@ -175,7 +175,8 @@ async def process_tasks():
                 )
 
                 # 1) Download the input data
-                predownloaded_data = await download_file(task_params['input_url'])
+                #    CHANGED => explicitly chunk_timeout=300
+                predownloaded_data = await download_file(task_params['input_url'], chunk_timeout=300)
                 if predownloaded_data is None:
                     raise Exception("Predownloaded data is None unexpectedly.")
 
@@ -247,10 +248,11 @@ async def process_tasks():
                             for diff_url in new_diffs:
                                 full_diff_url = f"{sot_url}{diff_url}"
                                 logger.debug(f"Downloading diff: {full_diff_url}")
+                                # CHANGED => increased chunk_timeout=300
                                 diff_data = await download_file(
                                     full_diff_url,
                                     download_type='tensor',
-                                    chunk_timeout=20
+                                    chunk_timeout=300
                                 )
                                 if not isinstance(diff_data, dict):
                                     logger.warning(

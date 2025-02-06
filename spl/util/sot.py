@@ -13,8 +13,11 @@ from ..common import (
     get_future_version_number,
     TENSOR_NAME
 )
-from .nag import nag_update
+from .nag import nag_update  # <-- Was used before, you can remove 'nag.py' if not needed
 from .json import load_json, save_json
+
+# NEW: import your AdamW function
+from .adam import adamw_update  # <-- CHANGED: we will use this instead
 
 def ensure_file_locks(file_locks: dict) -> dict:
     required_keys = [
@@ -128,6 +131,7 @@ async def initialize_all_tensors(
         file_locks=file_locks
     )
 
+    # If you want separate param for Adam's momentum, keep it zero-initialized
     await initialize_tensor(
         f'{TENSOR_NAME}_adam_m',
         state_dir,
@@ -137,7 +141,20 @@ async def initialize_all_tensors(
         memory_logging=memory_logging,
         file_locks=file_locks
     )
+    # If you want separate param for Adam's variance
+    await initialize_tensor(
+        f'{TENSOR_NAME}_adam_v',
+        state_dir,
+        tensor_version_interval,
+        init_tensor_func,
+        zero_init=True,
+        memory_logging=memory_logging,
+        file_locks=file_locks
+    )
 
+# --------------------------------------------------------------------------
+# CHANGED: Replace NAG with AdamW in apply_optimizer(...)
+# --------------------------------------------------------------------------
 async def apply_optimizer(
     version_number: int,
     tensor_name: str,
@@ -145,11 +162,18 @@ async def apply_optimizer(
     learning_rate: float,
     beta1: float,
     beta2: float,
-    epsilon: float,
+    eps: float,
     weight_decay: float,
     t: float,
     state_dir: str
 ):
+    """
+    Applies AdamW to param_vector using first and second moment states in
+    f'{tensor_name}_adam_m_{version_number}.pt' and f'{tensor_name}_adam_v_{version_number}.pt'.
+
+    Returns:
+      new_params, new_m, new_v
+    """
     old_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
     if not os.path.exists(old_path):
         raise FileNotFoundError(f"Tensor file not found at {old_path}")
@@ -158,26 +182,40 @@ async def apply_optimizer(
     if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
         raise ValueError(f"NaN/Inf in grads for {tensor_name} -- aborting update.")
 
-    adam_m_old = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
-    if os.path.exists(adam_m_old):
-        m_vector = torch.load(adam_m_old, map_location=device).to(device)
+    # Load or init the old m, v
+    old_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
+    old_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{version_number}.pt')
+
+    if os.path.exists(old_m_path):
+        m_vector = torch.load(old_m_path, map_location=device)
     else:
         logging.info(f"No momentum file found for {tensor_name} v{version_number}, using zeros.")
         m_vector = torch.zeros_like(param_vector, device=device)
 
-    from .nag import nag_update
-    new_params, new_m = nag_update(
+    if os.path.exists(old_v_path):
+        v_vector = torch.load(old_v_path, map_location=device)
+    else:
+        logging.info(f"No variance file found for {tensor_name} v{version_number}, using zeros.")
+        v_vector = torch.zeros_like(param_vector, device=device)
+
+    # CHANGED: Use AdamW now
+    # step => int(t+1) if t is iteration count
+    new_params, new_m, new_v = adamw_update(
         param_vector,
         grads_flat,
         m_vector,
+        v_vector,
         lr=learning_rate,
-        weight_decay=weight_decay,
         beta1=beta1,
-        eps=epsilon,
-        step=t
+        beta2=beta2,
+        eps=eps,
+        weight_decay=weight_decay,
+        step=int(t + 1),
     )
 
-    return new_params.view(-1), new_m.view(-1)
+    return new_params.view(-1), new_m.view(-1), new_v.view(-1)
+
+# --------------------------------------------------------------------------
 
 async def update_block_timestamps(
     tensor_name: str,
@@ -205,6 +243,12 @@ async def update_block_timestamps(
                 shutil.copy(src_m, dst_m)
                 logging.info(f"[update_block_timestamps] Copied {src_m} -> {dst_m}")
 
+            src_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{old_ts}.pt')
+            dst_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{future_ts}.pt')
+            if os.path.exists(src_v) and not os.path.exists(dst_v):
+                shutil.copy(src_v, dst_v)
+                logging.info(f"[update_block_timestamps] Copied {src_v} -> {dst_v}")
+
         block_timestamps[tensor_name] = future_ts
         num_updates[tensor_name] = 0
         iteration_val = iteration_number.get(tensor_name, 0) + 1
@@ -217,6 +261,9 @@ async def update_block_timestamps(
         state_data["iteration_number"] = iteration_number
         state_data["last_future_version_number"] = last_future_version_number
         await db_adapter.update_sot_state_for_job(job_id, state_data)
+        logging.info(
+            f"[update_block_timestamps] Finalized old v={old_ts} => new v={future_ts}"
+        )
 
 async def cleanup_old_timestamp(
     tensor_name: str,
@@ -244,6 +291,11 @@ async def cleanup_old_timestamp(
         logging.info(f"[cleanup_old_timestamp] Removing old momentum {old_mom}")
         os.remove(old_mom)
 
+    old_var = os.path.join(state_dir, f'{tensor_name}_adam_v_{old_block_timestamp}.pt')
+    if os.path.exists(old_var):
+        logging.info(f"[cleanup_old_timestamp] Removing old variance {old_var}")
+        os.remove(old_var)
+
 async def update_cleanup_timestamps(
     tensor_name: str,
     block_timestamps: dict,
@@ -263,23 +315,27 @@ async def update_cleanup_timestamps(
         current_version = get_current_version_number(interval)
 
         logging.debug(
-            f"[update_cleanup_timestamps] Called for {tensor_name}. old_ts={old_ts}, "
-            f"current_version={current_version}"
+            f"[update_cleanup_timestamps] Called for {tensor_name}. old_ts={old_ts}, current_version={current_version}"
         )
 
-        # no short-circuit skip for current_version==0, just proceed
         if old_ts < current_version:
-            # Attempt to copy old_ts => current_version
             src = os.path.join(state_dir, f'{tensor_name}_{old_ts}.pt')
             dst = os.path.join(state_dir, f'{tensor_name}_{current_version}.pt')
             if os.path.exists(src) and not os.path.exists(dst):
                 shutil.copy(src, dst)
                 logging.info(f"[update_cleanup_timestamps] Copied {src} -> {dst}")
+
                 src_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_ts}.pt')
                 dst_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{current_version}.pt')
                 if os.path.exists(src_m) and not os.path.exists(dst_m):
                     shutil.copy(src_m, dst_m)
                     logging.info(f"[update_cleanup_timestamps] Copied {src_m} -> {dst_m}")
+
+                src_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{old_ts}.pt')
+                dst_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{current_version}.pt')
+                if os.path.exists(src_v) and not os.path.exists(dst_v):
+                    shutil.copy(src_v, dst_v)
+                    logging.info(f"[update_cleanup_timestamps] Copied {src_v} -> {dst_v}")
 
             block_timestamps[tensor_name] = current_version
             num_updates[tensor_name] = 0

@@ -7,31 +7,41 @@ import random
 import time
 import json
 import torch
+import io
 from quart import Quart, request, jsonify, make_response, send_from_directory
 
 from ..common import (
     TENSOR_NAME,
     download_file,
-    get_future_version_number
+    get_future_version_number,
+    NoMoreDataException
 )
 from ..device import device
 from ..util.sot import (
     version_number_exists,
     get_local_file_path,
-    apply_optimizer,
     initialize_all_tensors
 )
 from ..db.db_adapter_client import DBAdapterClient
 from ..util.docker import janky_url_replace
 from .sot_adapter import BaseSOTAdapter
 
-from ..util import demo  # for chunked-DCT encode/decode
+# Import your chunked-DCT and AdamW logic
+from ..util import demo
+from ..util.adam import adamw_update
+
+logging.basicConfig(level=logging.INFO)
 
 class DefaultSOTAdapter(BaseSOTAdapter):
     """
-    A refactored SOT adapter that collects partial gradients from multiple workers
-    in a single aggregator_sum.pt file and aggregator_count.json. No aggregator_{ver} directories.
+    A SOT adapter that:
+      1) Accumulates partial gradients in aggregator_sum.pt and aggregator_count.json
+      2) On each 'time boundary' (or whenever get_future_version_number(...) is larger),
+         finalizes new_params using AdamW, saves them as model_<ver>.pt
+      3) Then chunked-DCT-encodes the final diff for distribution to workers
+      4) Maintains aggregator_error for progressive encoding across versions.
     """
+
     def __init__(self, model_adapter, dataset, state_dir, tensor_version_interval, hyperparams_getter=None):
         self.initialized = False
         self.db_adapter = None
@@ -48,11 +58,9 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         self.temp_dir = os.path.join(self.base_dir, "temp")
         self.hyperparams_getter = hyperparams_getter
 
-        # We'll store aggregator sums in two files:
-        #   aggregator_sum.pt (a single Tensor)
-        #   aggregator_count.json => { "num_updates": <int> }
         self.aggregator_sum_path = os.path.join(self.base_dir, "aggregator_sum.pt")
         self.aggregator_count_path = os.path.join(self.base_dir, "aggregator_count.json")
+        self.aggregator_error_path = os.path.join(self.base_dir, "aggregator_error.pt")
 
         self.file_locks = None
         self.update_timestamp_lock = None
@@ -60,22 +68,15 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         os.makedirs(self.base_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
 
-        # Lock to ensure only one version-finalization happens at a time
         self.version_calculation_lock = asyncio.Lock()
-
-        # Keep a map of newly generated diffs => new_version -> (rel_url, creation_time)
         self.versioned_diffs = {}
 
-        # We'll run a background task that finalizes versions once the interval has elapsed
         self._version_task = None
 
         self.app = Quart(__name__)
-        self.app.config['MAX_CONTENT_LENGTH'] = 1024**4  # 1 TB (arbitrary large limit)
+        self.app.config['MAX_CONTENT_LENGTH'] = 1024**4  # 1 TB
 
     async def initialize(self, sot_id, db_url, private_key, job_id, perm_db, port):
-        """
-        Called once by the SOT side, passing relevant config. Then the SOT listens on HTTP.
-        """
         self.sot_id = sot_id
         self.db_url = janky_url_replace(db_url)
         self.private_key = private_key
@@ -86,9 +87,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         self.file_locks = {}
         self.update_timestamp_lock = asyncio.Lock()
 
-        # -----------------------------------------------------------------
-        # Optionally load initial model from job.initial_state_url
-        # -----------------------------------------------------------------
+        # Possibly download initial model_0.pt if 'initial_state_url' is set
         job_obj = await self.db_adapter.sot_get_job(self.job_id)
         if job_obj and job_obj.initial_state_url and job_obj.initial_state_url.strip():
             init_url = job_obj.initial_state_url.strip()
@@ -97,7 +96,8 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             if not os.path.exists(local_path):
                 logging.info(f"Downloading initial model => {local_path}")
                 try:
-                    await download_file(init_url, local_file_path=local_path, download_type='tensor', chunk_timeout=10)
+                    await download_file(init_url, local_file_path=local_path,
+                                        download_type='tensor', chunk_timeout=10)
                     logging.info("[initialize] Initial model downloaded.")
                 except Exception as e:
                     logging.error(f"Failed to download initial_state_url: {e}", exc_info=True)
@@ -106,9 +106,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         else:
             logging.info("[initialize] No initial_state_url found; using default init flow.")
 
-        # -----------------------------------------------------------------
-        # Ensure at least model_0.pt is present
-        # -----------------------------------------------------------------
+        # Ensure model_0, model_0_adam_m, model_0_adam_v exist
         await initialize_all_tensors(
             self.base_dir,
             self.tensor_version_interval,
@@ -121,13 +119,14 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         await self.dataset.initialize_dataset()
         self.initialized = True
 
+        # ----------------------------------------------------------------------
+        # Plug in basic auth
+        # ----------------------------------------------------------------------
         db_adapter_lambda = lambda: self.db_adapter
         perm_db_lambda = lambda: self.perm_db
 
         from ..auth.key_auth import requires_key_auth
         requires_auth = requires_key_auth(db_adapter_lambda, perm_db_lambda)
-
-        # ------------------- Register HTTP routes ------------------------
 
         @self.app.route('/health', methods=['GET'])
         async def health_check():
@@ -170,7 +169,15 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             combined_tensor = torch.cat([batch_tensor, targets_tensor], dim=0)
 
             out_path = os.path.join(self.temp_dir, combined_filename)
-            await asyncio.to_thread(torch.save, combined_tensor, out_path)
+
+            # *** Asynchronous save without 'sendall' ***
+            import aiofiles
+            buffer = io.BytesIO()
+            torch.save(combined_tensor, buffer)
+            buffer.seek(0)
+
+            async with aiofiles.open(out_path, 'wb') as f:
+                await f.write(buffer.read())
 
             return jsonify({
                 'input_url': f'/data/state/temp/{combined_filename}'
@@ -190,27 +197,26 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             if version_number is None:
                 return jsonify({'error': 'Missing version_number'}), 400
 
-            # 1) Check worker's version vs DB's current version
             tensor_name = TENSOR_NAME
             state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
             block_timestamps = state_data.get("block_timestamps", {})
             current_version_number = block_timestamps.get(tensor_name, 0)
 
-            # => If aggregator has advanced beyond the worker's version, 409.
             if version_number != current_version_number:
                 msg = f"Version mismatch: worker={version_number} vs. SOT={current_version_number}"
                 logging.warning(f"[update_state] {msg}")
                 return jsonify({'error': msg}), 409
 
-            # 2) decode the partial gradient
             local_file_path = get_local_file_path(result_url, request, self.base_dir)
             if not local_file_path or not os.path.exists(local_file_path):
                 logging.error(f"[update_state] gradient file not found => {local_file_path}")
                 return jsonify({'error': 'File not found'}), 404
 
+            # Load the encoded gradient
             loaded_obj = torch.load(local_file_path, map_location=device)
             os.remove(local_file_path)
 
+            # Decode partial grads from chunked DCT
             partial_grads = demo.chunked_dct_decode_int8(
                 loaded_obj['freq_idxs'],
                 loaded_obj['freq_vals_int8'],
@@ -222,7 +228,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                 pad_count=loaded_obj.get('pad_count', 0)
             ).to(device)
 
-            # optionally remove input file
+            # Remove the input file if we got one
             input_url = data.get('input_url')
             if input_url:
                 inp_path = get_local_file_path(input_url, request, self.base_dir)
@@ -232,8 +238,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                     except Exception as ex:
                         logging.error(f"[update_state] Error removing input file: {ex}", exc_info=True)
 
-            # 3) Add partial grads => aggregator_sum
-            aggregator_sum = None
+            # Update aggregator_sum
             if os.path.exists(self.aggregator_sum_path):
                 aggregator_sum = torch.load(self.aggregator_sum_path, map_location=device)
                 aggregator_sum = aggregator_sum + partial_grads
@@ -243,7 +248,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             torch.save(aggregator_sum, self.aggregator_sum_path + ".tmp")
             os.rename(self.aggregator_sum_path + ".tmp", self.aggregator_sum_path)
 
-            # aggregator_count => increment
+            # Update aggregator_count
             updates_count = 0
             if os.path.exists(self.aggregator_count_path):
                 with open(self.aggregator_count_path, "r") as f:
@@ -256,7 +261,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
             logging.info(f"[update_state] aggregator_sum updated => total count={updates_count}")
             return jsonify({'status': 'accumulated'})
-
 
         @self.app.route('/get_diffs_since', methods=['GET'])
         async def get_diffs_since():
@@ -281,7 +285,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                     if from_version < new_ver <= current_version_number:
                         diffs_list.append(rel_url)
 
-                # Sort them by ascending version
+                # Sort them so user gets diffs in ascending order
                 sorted_pairs = sorted(
                     [(v, self.versioned_diffs[v][0]) for v in self.versioned_diffs],
                     key=lambda tup: tup[0]
@@ -345,7 +349,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         @self.app.route('/data/state/<path:filename>', methods=['GET'])
         async def get_state_file(filename):
             file_path = os.path.join(self.base_dir, filename)
-            # basic checks
             if not os.path.abspath(file_path).startswith(os.path.abspath(self.base_dir)):
                 return jsonify({'error': 'File not found or access denied'}), 403
             if not os.path.exists(file_path):
@@ -360,7 +363,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                 )
             )
             return resp
-
 
         @self.app.route('/upload_tensor', methods=['POST'])
         async def upload_tensor():
@@ -413,9 +415,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                 val = state_data["latest_loss"].get("value", None)
             return jsonify({'loss': val}), 200
 
-        # ------------------------------------------------------
-        # Start background task to auto-finalize aggregator
-        # ------------------------------------------------------
+        # Start the background versioning loop
         self._version_task = asyncio.create_task(self._auto_version_loop())
 
         logging.info("[DefaultSOTAdapter] fully initialized; starting HTTP server...")
@@ -424,54 +424,41 @@ class DefaultSOTAdapter(BaseSOTAdapter):
     async def _auto_version_loop(self):
         tensor_name = TENSOR_NAME
         while True:
-            await asyncio.sleep(0.1)  # poll every 0.1s
-
+            await asyncio.sleep(0.1)
             try:
                 async with self.version_calculation_lock:
                     state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
                     block_timestamps = state_data.get("block_timestamps", {})
                     curr_ver = block_timestamps.get(tensor_name, 0)
 
-                    # The next boundary is a time-based integer from get_future_version_number(...).
                     boundary = get_future_version_number(self.tensor_version_interval)
 
-                    # If the boundary is larger than curr_ver, it means we've entered a new time-slice.
                     if boundary > curr_ver:
-                        # => finalize the aggregator from old version=curr_ver => new version=boundary
                         new_params_path, diff_file_path = await self._finalize_aggregator(
                             old_version=curr_ver,
                             new_version=boundary,
                             tensor_name=tensor_name
                         )
                         if new_params_path is not None:
-                            # Mark the DB's "current version" as boundary
                             block_timestamps[tensor_name] = boundary
                             state_data["block_timestamps"] = block_timestamps
-
-                            # Reset aggregator counters etc.
                             if "num_updates" not in state_data:
                                 state_data["num_updates"] = {}
                             state_data["num_updates"][tensor_name] = 0
-
                             await self.db_adapter.update_sot_state_for_job(self.job_id, state_data)
                             logging.info(
                                 f"[auto_version_loop] Finalized old v={curr_ver} => new v={boundary}"
                             )
-
             except Exception as e:
                 logging.error(f"[auto_version_loop] error: {e}", exc_info=True)
 
-            # optional: cleanup old files
             await self._cleanup_old_files()
-
 
     async def _finalize_aggregator(self, old_version, new_version, tensor_name):
         """
-        Summarize aggregator_sum.pt + aggregator_count.json => final_grads => apply optimizer => produce new param + diff
-        Then reset aggregator.
+        Use AdamW for param updates, then encode the param diff with chunked‐DCT + aggregator_error.
         """
         if not os.path.exists(self.aggregator_sum_path):
-            #logging.info("[_finalize_aggregator] aggregator_sum.pt not found => skip.")
             return None, None
 
         aggregator_sum = torch.load(self.aggregator_sum_path, map_location=device)
@@ -486,17 +473,13 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             return None, None
 
         final_grads = aggregator_sum / float(updates_count)
-
-        # -- NEW LOG LINES START
         logging.info(
-            f"[_finalize_aggregator] aggregator_sum shape={aggregator_sum.shape}, "
+            f"[_finalize_aggregator] aggregator_sum.shape={aggregator_sum.shape}, "
             f"updates_count={updates_count}, aggregator_sum.norm={aggregator_sum.norm().item():.6f}"
         )
         logging.info(
-            f"[_finalize_aggregator] final_grads shape={final_grads.shape}, "
-            f"final_grads.norm={final_grads.norm().item():.6f}"
+            f"[_finalize_aggregator] final_grads.norm={final_grads.norm().item():.6f}"
         )
-        # -- NEW LOG LINES END
 
         old_params_path = os.path.join(self.base_dir, f"{tensor_name}_{old_version}.pt")
         if not os.path.exists(old_params_path):
@@ -505,58 +488,65 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         old_params_data = torch.load(old_params_path, map_location=device)
 
-        # -- NEW LOG
-        logging.info(
-            f"[_finalize_aggregator] old_params shape={old_params_data.shape}, "
-            f"old_params_data.norm={old_params_data.norm().item():.6f}"
-        )
-
-        # fetch hyperparams if provided
-        if self.hyperparams_getter:
-            it_val = 0
-            hparams = self.hyperparams_getter(it_val)
-            lr = hparams.get('learning_rate', 0.001)
-            beta1 = hparams.get('beta1', 0.9)
-            beta2 = hparams.get('beta2', 0.999)
-            eps = hparams.get('epsilon', 1e-8)
-            wd = hparams.get('weight_decay', 0.0)
-            t_val = hparams.get('t', 0)
-            chunk_shape = hparams.get('chunk_shape', 512)
-            k_for_encoding = hparams.get('k', 1)
+        # Load old Adam moments
+        old_m_path = os.path.join(self.base_dir, f"{tensor_name}_adam_m_{old_version}.pt")
+        old_v_path = os.path.join(self.base_dir, f"{tensor_name}_adam_v_{old_version}.pt")
+        if os.path.exists(old_m_path):
+            m_vector = torch.load(old_m_path, map_location=device)
         else:
-            lr = 0.001
-            beta1 = 0.9
-            beta2 = 0.999
-            eps = 1e-8
-            wd = 0.0
-            t_val = 0
-            chunk_shape = 512
-            k_for_encoding = 1
+            m_vector = torch.zeros_like(old_params_data)
+        if os.path.exists(old_v_path):
+            v_vector = torch.load(old_v_path, map_location=device)
+        else:
+            v_vector = torch.zeros_like(old_params_data)
 
-        # Apply optimizer => produce new_params
-        new_params, new_m = await apply_optimizer(
-            old_version, tensor_name,
-            final_grads, lr, beta1, beta2, eps, wd, t_val,
-            self.base_dir
+        # Pull iteration_number from DB
+        state_data = await self.db_adapter.get_sot_state_for_job(self.job_id)
+        iteration_number_map = state_data.get("iteration_number", {})
+        iteration_val = iteration_number_map.get(tensor_name, 0)
+
+        # Retrieve or define AdamW hyperparams
+        if self.hyperparams_getter is not None:
+            hyperparams = self.hyperparams_getter(iteration_val)
+        else:
+            hyperparams = {
+                'learning_rate': 1e-3,
+                'beta1': 0.9,
+                'beta2': 0.999,
+                'epsilon': 1e-8,
+                'weight_decay': 0.01,
+                't': iteration_val
+            }
+
+        # AdamW => new_params_prelim
+        new_params_prelim, new_m, new_v = adamw_update(
+            param_vector=old_params_data.to(device),
+            grad_vector=final_grads.to(device),
+            m_vector=m_vector.to(device),
+            v_vector=v_vector.to(device),
+            lr=hyperparams['learning_rate'],
+            beta1=hyperparams['beta1'],
+            beta2=hyperparams['beta2'],
+            eps=hyperparams['epsilon'],
+            weight_decay=hyperparams['weight_decay'],
+            step=int(hyperparams['t'] + 1),
         )
 
-        # -- NEW LOG
+        final_diff = new_params_prelim - old_params_data
         logging.info(
-            f"[_finalize_aggregator] new_params shape={new_params.shape}, "
-            f"new_params.norm={new_params.norm().item():.6f}"
+            f"[_finalize_aggregator] final_diff.norm={final_diff.norm().item():.6f}, "
+            f"max_abs={final_diff.abs().max().item():.6f}"
         )
 
-        new_params_path = os.path.join(self.base_dir, f"{tensor_name}_{new_version}.pt")
-        torch.save(new_params, new_params_path + ".tmp")
-        os.rename(new_params_path + ".tmp", new_params_path)
+        # aggregator_error for chunked‐DCT
+        if os.path.exists(self.aggregator_error_path):
+            aggregator_error = torch.load(self.aggregator_error_path, map_location=device)
+            logging.info(f"[_finalize_aggregator] Found aggregator_error with norm={aggregator_error.norm().item():.6f}")
+        else:
+            aggregator_error = None
 
-        # momentum
-        future_m_path = os.path.join(self.base_dir, f"{tensor_name}_adam_m_{new_version}.pt")
-        torch.save(new_m, future_m_path + ".tmp")
-        os.rename(future_m_path + ".tmp", future_m_path)
-
-        # produce chunked-DCT diff
-        diff = new_params - old_params_data
+        chunk_shape = (512,)  # example
+        k_val = 10
         (
             freq_idxs,
             freq_vals_int8,
@@ -565,17 +555,22 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             new_error,
             pad_count
         ) = demo.chunked_dct_encode_int8(
-            diff,
+            x=final_diff,
             chunk_shape=chunk_shape,
-            k=k_for_encoding,
-            prev_error=None,
+            k=k_val,
+            prev_error=aggregator_error,
             norm='ortho'
         )
 
-        # -- NEW LOG
         logging.info(
-            f"[_finalize_aggregator] diff shape={diff.shape}, "
-            f"diff.norm={diff.norm().item():.6f}, diff.max_abs={diff.abs().max().item():.6f}"
+            f"[_finalize_aggregator] final_diff => diff.norm={final_diff.norm().item():.6f}, "
+            f"max_abs={final_diff.abs().max().item():.6f}"
+        )
+
+        torch.save(new_error, self.aggregator_error_path + ".tmp")
+        os.rename(self.aggregator_error_path + ".tmp", self.aggregator_error_path)
+        logging.info(
+            f"[_finalize_aggregator] aggregator_error updated => norm={new_error.norm().item():.6f}"
         )
 
         diff_dict = {
@@ -584,17 +579,45 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             'freq_scales': freq_scales,
             'freq_zero_points': freq_zero_points,
             'chunk_shape': chunk_shape,
-            'orig_shape': diff.shape,
+            'orig_shape': final_diff.shape,
             'pad_count': pad_count,
         }
         diff_file_path = os.path.join(self.base_dir, f"diff_{old_version}_to_{new_version}.pt")
         torch.save(diff_dict, diff_file_path)
 
-        # record in self.versioned_diffs for /get_diffs_since
         rel_url = f'/data/state/diff_{old_version}_to_{new_version}.pt'
         self.versioned_diffs[new_version] = (rel_url, time.time())
 
-        # reset aggregator
+        # Decode that diff so aggregator param = old_params + exactly that decoded_diff
+        decoded_diff = demo.chunked_dct_decode_int8(
+            freq_idxs, freq_vals_int8, freq_scales, freq_zero_points,
+            x_shape=final_diff.shape,
+            chunk_shape=chunk_shape,
+            norm='ortho',
+            pad_count=pad_count
+        ).to(device)
+
+        new_params = old_params_data + decoded_diff
+
+        new_params_path = os.path.join(self.base_dir, f"{tensor_name}_{new_version}.pt")
+        torch.save(new_params, new_params_path + ".tmp")
+        os.rename(new_params_path + ".tmp", new_params_path)
+
+        # Save new_m, new_v
+        new_m_path = os.path.join(self.base_dir, f"{tensor_name}_adam_m_{new_version}.pt")
+        torch.save(new_m, new_m_path + ".tmp")
+        os.rename(new_m_path + ".tmp", new_m_path)
+
+        new_v_path = os.path.join(self.base_dir, f"{tensor_name}_adam_v_{new_version}.pt")
+        torch.save(new_v, new_v_path + ".tmp")
+        os.rename(new_v_path + ".tmp", new_v_path)
+
+        logging.info(
+            f"[_finalize_aggregator] Created new params => v={new_version}, "
+            f"and diff => {diff_file_path}"
+        )
+
+        # Cleanup aggregator files
         try:
             os.remove(self.aggregator_sum_path)
         except:
@@ -606,16 +629,13 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         return new_params_path, diff_file_path
 
-
     async def _cleanup_old_files(self):
         """
-        Remove older .pt files from self.base_dir that exceed 2 days old,
-        plus remove old diffs from self.versioned_diffs.
+        Periodically remove .pt files or diffs older than 48h for housekeeping.
         """
         cutoff_seconds = 2 * 24 * 3600
         now = time.time()
 
-        # 1) Clean up .pt files older than cutoff
         for fname in os.listdir(self.base_dir):
             if not fname.endswith(".pt"):
                 continue
@@ -628,7 +648,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             except:
                 pass
 
-        # 2) Clean up old diffs in self.versioned_diffs
+        # Also remove old diffs from self.versioned_diffs
         for ver_key, (rel_url, created_ts) in list(self.versioned_diffs.items()):
             if (now - created_ts) > cutoff_seconds:
                 base_name = os.path.basename(rel_url)

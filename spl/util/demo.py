@@ -2,83 +2,77 @@ import torch
 import math
 
 ##############################################################################
-# 1) DCT and iDCT (Naïve Matrix Multiply Implementation)
-#    - DCT-II and DCT-III with "ortho" normalization
+# 1) DCT and iDCT (Matrix Multiply Implementation with Correct “ortho” scaling)
 ##############################################################################
 
 def dct_1d_naive(x: torch.Tensor, norm: str = 'ortho', dim: int = -1) -> torch.Tensor:
     """
-    Naive DCT-II transform along dimension `dim`, using explicit matrix multiply.
-    For smaller chunk sizes only! For large sizes, consider an FFT-based approach.
+    Compute the 1D DCT-II of x along dimension `dim` using an explicit matrix
+    multiplication. For an input vector x of length N, we define:
+    
+       X[k] = sqrt((2 - δ[k,0]) / N) * Σₙ x[n] cos(π*(n+0.5)*k/N)
+       
+    which is orthonormal when norm=='ortho'.
     """
-    # Move `dim` to last dimension
-    x = x.transpose(dim, -1)  # shape = (..., N)
+    # Bring the desired dimension to the end.
+    x = x.transpose(dim, -1)
     N = x.shape[-1]
-
-    # Flatten everything except last dimension
     old_shape = x.shape[:-1]
-    x_flat = x.reshape(-1, N)  # (batch, N)
+    x_flat = x.reshape(-1, N)
+    device = x.device
+    dtype = x.dtype
 
-    # Build the DCT-II transform matrix [N x N]:
-    #   T_{k,n} = cos( π * (n+0.5) * k / N ),  k,n=0..N-1
-    n = torch.arange(N, device=x.device, dtype=x.dtype).reshape(1, -1)  # (1,N)
-    k = torch.arange(N, device=x.device, dtype=x.dtype).reshape(-1, 1)  # (N,1)
-    cosine_mat = torch.cos((torch.pi / N) * (n + 0.5) * k)  # (N,N)
+    # Build the DCT-II matrix.
+    n = torch.arange(N, device=device, dtype=dtype).unsqueeze(0)    # shape (1, N)
+    k = torch.arange(N, device=device, dtype=dtype).unsqueeze(1)    # shape (N, 1)
+    # Raw cosine matrix: cos(π*(n+0.5)*k/N)
+    D = torch.cos(math.pi * (n + 0.5) * k / N)  # shape (N, N)
 
-    # Matrix multiply
-    X_flat = x_flat @ cosine_mat  # (batch,N)
-
-    # Orthonormal scaling (matching scipy.fft.dct(..., type=2, norm='ortho'))
     if norm == 'ortho':
-        # X[*,0] *= 1/sqrt(4N), X[*,1..] *= 1/sqrt(2N)
-        X_flat[:, 0] *= 1.0 / torch.sqrt(torch.tensor(4.0*N, device=x.device, dtype=x.dtype))
-        X_flat[:, 1:] *= 1.0 / torch.sqrt(torch.tensor(2.0*N, device=x.device, dtype=x.dtype))
-
-    # Reshape and move dim back
-    X = X_flat.reshape(*old_shape, N)
+        # For k = 0, factor is 1/sqrt(2)
+        D[0, :] = D[0, :] / math.sqrt(2)
+        # Multiply entire matrix by sqrt(2/N)
+        D = D * math.sqrt(2.0 / N)
+    # Compute the DCT-II: X = x @ D^T.
+    X_flat = x_flat @ D.t()
+    X = X_flat.view(*old_shape, N)
     X = X.transpose(dim, -1)
     return X
 
 
 def idct_1d_naive(X: torch.Tensor, norm: str = 'ortho', dim: int = -1) -> torch.Tensor:
     """
-    Naive Inverse DCT (DCT-III) along dimension `dim` with "ortho" normalization
-    consistent with dct_1d_naive(...).
+    Compute the 1D inverse DCT (DCT-III) along dimension `dim`.
+    With the above orthonormal definition the inverse is given by:
+    
+       x = X @ D,
+       
+    where D is the same DCT matrix used in dct_1d_naive.
     """
-    # Move `dim` to last
     X = X.transpose(dim, -1)
     N = X.shape[-1]
-
-    # Flatten
     old_shape = X.shape[:-1]
     X_flat = X.reshape(-1, N)
+    device = X.device
+    dtype = X.dtype
 
-    # Build iDCT (DCT-III) transform matrix:
-    n = torch.arange(N, device=X.device, dtype=X.dtype).reshape(1, -1)
-    k = torch.arange(N, device=X.device, dtype=X.dtype).reshape(-1, 1)
-    cosine_mat = torch.cos((torch.pi / N) * (n + 0.5) * k)  # (N,N)
-
+    n = torch.arange(N, device=device, dtype=dtype).unsqueeze(0)  # shape (1, N)
+    k = torch.arange(N, device=device, dtype=dtype).unsqueeze(1)  # shape (N, 1)
+    D = torch.cos(math.pi * (n + 0.5) * k / N)  # shape (N, N)
     if norm == 'ortho':
-        # For DCT-III with orthonormal scale (matching DCT-II norm='ortho'):
-        alpha_0 = 1.0 / torch.sqrt(torch.tensor(4.0*N, device=X.device, dtype=X.dtype))
-        alpha_k = 1.0 / torch.sqrt(torch.tensor(2.0*N, device=X.device, dtype=X.dtype))
-        alpha_vec = torch.full((N,), alpha_k, device=X.device, dtype=X.dtype)
-        alpha_vec[0] = alpha_0
-
-        # Weighted X => multiply each row by alpha(k)
-        X_weighted = X_flat * alpha_vec.unsqueeze(0)
-        x_flat = X_weighted @ cosine_mat
-    else:
-        x_flat = X_flat @ cosine_mat
-
-    x_ = x_flat.reshape(*old_shape, N)
-    x_ = x_.transpose(dim, -1)
-    return x_
+        D[0, :] = D[0, :] / math.sqrt(2)
+        D = D * math.sqrt(2.0 / N)
+    
+    # Inverse DCT via matrix multiplication.
+    x_flat = X_flat @ D
+    x = x_flat.view(*old_shape, N)
+    x = x.transpose(dim, -1)
+    return x
 
 
 def dct_nd_naive(x: torch.Tensor, norm: str = 'ortho') -> torch.Tensor:
     """
-    Applies DCT-II along *all* dims of x in succession (naïve approach).
+    Apply the 1D DCT-II along every dimension in succession.
     """
     out = x
     for d in range(x.ndim):
@@ -88,7 +82,7 @@ def dct_nd_naive(x: torch.Tensor, norm: str = 'ortho') -> torch.Tensor:
 
 def idct_nd_naive(X: torch.Tensor, norm: str = 'ortho') -> torch.Tensor:
     """
-    Applies DCT-III along *all* dims of X in succession (naïve approach).
+    Apply the 1D inverse DCT (DCT-III) along every dimension in succession.
     """
     out = X
     for d in range(X.ndim):
@@ -97,66 +91,50 @@ def idct_nd_naive(X: torch.Tensor, norm: str = 'ortho') -> torch.Tensor:
 
 
 ##############################################################################
-# 2) Utility: Per-chunk int8 quant/dequant
+# 2) Utility: Per-chunk int8 Quantization/Dequantization (Corrected Mapping)
 ##############################################################################
 
 def float_to_int8(values: torch.Tensor):
     """
-    Performs a simple per-row min-max int8 quantization on `values`, shape = (batch, k).
-
+    For each row (of shape (batch, k)) of `values`, quantize linearly from the
+    range [min, max] to the int8 range [-128, 127].
+    
+    The mapping is:
+         scale = (max - min) / 255,
+         q = round((value - min) / scale) - 128,
+         clamped to [-128, 127].
+    
     Returns:
-      - values_int8: (batch, k) int8
-      - scales: (batch,) float
-      - zero_points: (batch,) float
-
-    The formula is:
-       min_val = row.min(), max_val = row.max()
-       scale = (max_val - min_val)/255
-       zero_point = -min_val / scale
-       q = round((val / scale) + zero_point), clamp to [-128,127]
+      - values_int8: (batch, k) int8 tensor,
+      - scales: (batch,) tensor,
+      - min_vals: (batch,) tensor.
     """
     batch, k = values.shape
-    device = values.device
-    dtype = values.dtype
-
-    min_vals = values.min(dim=1).values  # (batch,)
-    max_vals = values.max(dim=1).values  # (batch,)
+    # Keep dims so broadcasting works.
+    min_vals = values.min(dim=1, keepdim=True).values  # shape (batch, 1)
+    max_vals = values.max(dim=1, keepdim=True).values  # shape (batch, 1)
     ranges = (max_vals - min_vals).clamp_min(1e-8)
-
-    scales = ranges / 255.0
-    zero_points = -min_vals / scales
-
-    inv_scales = 1.0 / scales  # (batch,)
-    inv_scales_2d = inv_scales.unsqueeze(-1)
-    zero_points_2d = zero_points.unsqueeze(-1)
-
-    # quantize row by row
-    quant_vals_float = values * inv_scales_2d + zero_points_2d
-    quant_vals_rounded = torch.round(quant_vals_float).clamp(-128, 127)
-    values_int8 = quant_vals_rounded.to(torch.int8)
-
-    return values_int8, scales, zero_points
+    scales = ranges / 255.0  # shape (batch, 1)
+    
+    # Map values so that: value = min -> q = -128, value = max -> q = 127.
+    q = torch.round((values - min_vals) / scales) - 128
+    q = q.clamp(-128, 127).to(torch.int8)
+    # Squeeze scales and min_vals to shape (batch,)
+    return q, scales.squeeze(-1), min_vals.squeeze(-1)
 
 
-def int8_to_float(values_int8: torch.Tensor, scales: torch.Tensor, zero_points: torch.Tensor):
+def int8_to_float(q: torch.Tensor, scales: torch.Tensor, min_vals: torch.Tensor):
     """
-    Dequantize row-by-row:
-       val_float = (val_int8 - zero_point)*scale
+    Dequantize each row using the inverse mapping:
+         value = (q + 128) * scale + min.
     """
-    batch, k = values_int8.shape
-    values_int8_f = values_int8.float()
-    zero_points_2d = zero_points.unsqueeze(-1)
-    scales_2d = scales.unsqueeze(-1)
-
-    out = (values_int8_f - zero_points_2d) * scales_2d
-    return out
+    q_f = q.float()
+    # Reshape scales and min_vals for broadcasting.
+    return (q_f + 128) * scales.unsqueeze(-1) + min_vals.unsqueeze(-1)
 
 
 ##############################################################################
-# 3) Chunked DCT Encode/Decode with top-k + int8 quant
-#
-#    The original code assumed x.numel() is divisible by the chunk_shape product.
-#    Below we patch it by adding zero-padding if needed, then storing `pad_count`.
+# 3) Chunked DCT Encode/Decode with Top-k + int8 Quantization
 ##############################################################################
 
 def chunked_dct_encode_int8(
@@ -167,10 +145,13 @@ def chunked_dct_encode_int8(
     norm: str = 'ortho'
 ):
     """
-    1) If prev_error is given, add it to x.
-    2) Zero-pad x if x.numel() is not divisible by product(chunk_shape).
-    3) Reshape x into sub-chunks, apply nD DCT, keep top-k, int8 quantize.
-    4) Return freq_idxs, freq_vals_int8, freq_scales, freq_zero_points, new_error, plus pad_count.
+    1) Optionally add prev_error to x.
+    2) Zero-pad x so that total elements are divisible by the product of chunk_shape.
+    3) Reshape x into chunks, apply the nD DCT, select the top-k coefficients (by absolute value)
+       in each chunk, and quantize them to int8.
+    4) Reconstruct an approximate DCT (by dequantizing and scattering the values back)
+       to compute the residual error.
+    5) Returns freq_idxs, freq_vals_int8, scales, min_vals, new_error, and pad_count.
     """
     if prev_error is not None:
         x = x + prev_error
@@ -179,7 +160,7 @@ def chunked_dct_encode_int8(
     total_elems = x.numel()
     chunk_elems = math.prod(chunk_shape)
 
-    # Figure out how many leftover elements we have
+    # Zero-pad if necessary.
     remainder = total_elems % chunk_elems
     pad_count = 0
     if remainder != 0:
@@ -188,77 +169,68 @@ def chunked_dct_encode_int8(
     else:
         x = x.flatten()
 
-    # shape => (num_chunks, chunk_elems)
     num_chunks = x.numel() // chunk_elems
     x_chunks = x.view(num_chunks, *chunk_shape)
 
-    # DCT each chunk
-    dct_chunks = dct_nd_naive(x_chunks, norm=norm)   # (num_chunks, *chunk_shape)
-    dct_chunks_flat = dct_chunks.flatten(start_dim=1)  # (num_chunks, chunk_elems)
+    # Apply the nD DCT on each chunk.
+    dct_chunks = dct_nd_naive(x_chunks, norm=norm)   # shape: (num_chunks, *chunk_shape)
+    dct_chunks_flat = dct_chunks.flatten(start_dim=1)  # shape: (num_chunks, chunk_elems)
 
-    # top-k
+    # Select top-k coefficients (by absolute value) in each chunk.
     abs_dct = dct_chunks_flat.abs()
-    values, idxs = torch.topk(abs_dct, k, dim=1, largest=True, sorted=False)
-    topk_vals = dct_chunks_flat.gather(dim=1, index=idxs)
+    _, freq_idxs = torch.topk(abs_dct, k, dim=1, largest=True, sorted=False)
+    topk_vals = dct_chunks_flat.gather(dim=1, index=freq_idxs)
 
-    # quantize
-    freq_vals_int8, scales, zero_points = float_to_int8(topk_vals)
+    # Quantize the top-k coefficients.
+    freq_vals_int8, scales, min_vals = float_to_int8(topk_vals)
 
-    # reconstruct approximate DCT => measure new error
-    topk_vals_approx = int8_to_float(freq_vals_int8, scales, zero_points)
+    # Reconstruct approximate DCT from the quantized values.
+    topk_vals_approx = int8_to_float(freq_vals_int8, scales, min_vals)
     recon_flat = torch.zeros_like(dct_chunks_flat)
-    recon_flat.scatter_(1, idxs, topk_vals_approx)
+    recon_flat.scatter_(1, freq_idxs, topk_vals_approx)
     recon_chunks = recon_flat.view_as(dct_chunks)
+
+    # Invert the DCT to obtain the approximate x.
     x_recon_chunks = idct_nd_naive(recon_chunks, norm=norm)
-
-    # flatten and remove padding
-    x_recon = x_recon_chunks.view(-1)
+    x_recon_flat = x_recon_chunks.view(-1)
     if pad_count > 0:
-        x_recon = x_recon[:-pad_count]
+        x_recon_flat = x_recon_flat[:-pad_count]
+    x_recon = x_recon_flat.view(full_shape)
 
-    x_recon = x_recon.view(full_shape)
-    # original x is also in full_shape, so compute new_error
-    new_error = (x[: total_elems].view(full_shape) - x_recon)
-
-    # Return extra pad_count so the decoder can handle it
-    return idxs, freq_vals_int8, scales, zero_points, new_error, pad_count
+    new_error = x[:total_elems].view(full_shape) - x_recon
+    return freq_idxs, freq_vals_int8, scales, min_vals, new_error, pad_count
 
 
 def chunked_dct_decode_int8(
     freq_idxs: torch.Tensor,
     freq_vals_int8: torch.Tensor,
-    freq_scales: torch.Tensor,
-    freq_zero_points: torch.Tensor,
+    scales: torch.Tensor,
+    min_vals: torch.Tensor,
     x_shape: tuple[int, ...],
     chunk_shape: tuple[int, ...],
     norm: str = 'ortho',
     pad_count: int = 0
 ):
     """
-    Reverse of chunked_dct_encode_int8. Accepts pad_count to remove trailing zeros.
-
-    1) Dequant freq_vals_int8 => scatter into DCT chunks
-    2) iDCT => flatten => remove padding => reshape to x_shape
+    Decode the chunked DCT:
+      1) Dequantize freq_vals_int8.
+      2) Scatter them back into the DCT coefficient array.
+      3) Apply the inverse nD DCT.
+      4) Remove zero-padding and reshape to x_shape.
     """
-    total_elems = 1
-    for d in x_shape:
-        total_elems *= d
-
     chunk_elems = math.prod(chunk_shape)
     num_chunks = freq_idxs.size(0)
 
-    freq_vals_float = int8_to_float(freq_vals_int8, freq_scales, freq_zero_points)
-    recon_flat = torch.zeros(num_chunks, chunk_elems, device=freq_idxs.device, dtype=freq_vals_float.dtype)
+    freq_vals_float = int8_to_float(freq_vals_int8, scales, min_vals)
+    recon_flat = torch.zeros(num_chunks, chunk_elems, device=freq_idxs.device,
+                               dtype=freq_vals_float.dtype)
     recon_flat.scatter_(1, freq_idxs, freq_vals_float)
-
     recon_chunks = recon_flat.view(num_chunks, *chunk_shape)
     x_chunks = idct_nd_naive(recon_chunks, norm=norm)
-    x_approx = x_chunks.view(-1)
-
+    x_approx_flat = x_chunks.reshape(-1)
     if pad_count > 0:
-        x_approx = x_approx[:-pad_count]
-
-    x_approx = x_approx.view(x_shape)
+        x_approx_flat = x_approx_flat[:-pad_count]
+    x_approx = x_approx_flat.view(x_shape)
     return x_approx
 
 
@@ -271,39 +243,41 @@ if __name__ == "__main__":
     shape = (256, 256)
     x = torch.randn(shape)
 
+    # Use chunks of shape 64x64 (each chunk has 4096 elements).
+    # With k=4096 you retain all coefficients.
     chunk_shape = (64, 64)
-    k = 8
+    k = 4096
 
-    # Suppose we track error from the previous iteration
+    # (Optional) Previous error – here zero.
     prev_error = torch.zeros_like(x)
 
     # ENCODE
-    (
-        freq_idxs,
-        freq_vals_int8,
-        freq_scales,
-        freq_zero_points,
-        new_error,
-        pad_count
-    ) = chunked_dct_encode_int8(
-        x, chunk_shape, k, prev_error=prev_error, norm='ortho'
-    )
+    (freq_idxs,
+     freq_vals_int8,
+     scales,
+     min_vals,
+     new_error,
+     pad_count) = chunked_dct_encode_int8(
+                        x, chunk_shape, k, prev_error=prev_error, norm='ortho')
 
     # DECODE
     x_approx = chunked_dct_decode_int8(
-        freq_idxs,
-        freq_vals_int8,
-        freq_scales,
-        freq_zero_points,
-        x_shape=shape,
-        chunk_shape=chunk_shape,
-        norm='ortho',
-        pad_count=pad_count
-    )
+                   freq_idxs,
+                   freq_vals_int8,
+                   scales,
+                   min_vals,
+                   x_shape=shape,
+                   chunk_shape=chunk_shape,
+                   norm='ortho',
+                   pad_count=pad_count)
 
     mse = torch.mean((x - x_approx)**2).item()
     max_diff = (x - x_approx).abs().max().item()
-    print(f"[INFO] MSE: {mse:.6f}")
-    print(f"[INFO] Max Abs Diff: {max_diff:.6f}")
-    print(f"[INFO] Residual Norm: {new_error.norm().item():.6f}")
+    residual_norm = new_error.norm().item()
+
+    print(f"[INFO] x values:       {x.flatten()[:10]}")
+    print(f"[INFO] x_approx vals:  {x_approx.flatten()[:10]}")
+    print(f"[INFO] MSE:            {mse:.6f}")
+    print(f"[INFO] Max Abs Diff:   {max_diff:.6f}")
+    print(f"[INFO] Residual Norm:  {residual_norm:.6f}")
     print(f"[INFO] pad_count used: {pad_count}")
