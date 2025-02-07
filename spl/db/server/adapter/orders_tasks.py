@@ -136,7 +136,7 @@ class DBAdapterOrdersTasksMixin:
 
             else:
                 raise ValueError("Invalid order type provided.")
-
+            await self.match_bid_ask_orders(session, subnet_id)
             await session.commit()
             return new_order.id
 

@@ -1,3 +1,5 @@
+# file: spl/worker/tasks.py
+
 import time
 import json
 import logging
@@ -52,6 +54,7 @@ async def fetch_current_sot_version(sot_url: str) -> int:
             data = await resp.json()
             return data.get("version_number", 0)
 
+
 # -------------------------------------------------------------------------
 # Helper that loops briefly until SOT version > local_version
 # -------------------------------------------------------------------------
@@ -79,7 +82,6 @@ async def wait_for_version_advance(
         f"after {poll_interval * max_attempts:.1f} secs. Continuing anyway."
     )
     return local_version
-# -------------------------------------------------------------------------
 
 
 async def get_ask_price():
@@ -144,7 +146,57 @@ async def handle_task(task, time_invoked):
 
 
 # -------------------------------------------------------------------------
-# Below is the fully changed process_tasks function with the relevant lines updated
+# get_diffs_in_range (unchanged)
+# -------------------------------------------------------------------------
+async def get_diffs_in_range(start_version, end_time, sot_url):
+    """
+    Fetches diffs from the SOT in a version range [start_version+1 .. end_time].
+    If end_time is None, the SOT will interpret that as "up to the current version."
+
+    Returns:
+      (diffs_list, used_end_time)
+    """
+    if end_time is not None:
+        endpoint = f"{sot_url}/get_diffs_since?from_version={start_version}&end_time={end_time}"
+    else:
+        endpoint = f"{sot_url}/get_diffs_since?from_version={start_version}"
+
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(endpoint) as resp:
+            if resp.status != 200:
+                txt = await resp.text()
+                logger.warning(f"get_diffs_in_range => status={resp.status}, body={txt}")
+                # Return an empty list and the same start_version on error
+                return [], start_version
+
+            data = await resp.json()
+            diffs_list = data.get("diffs", [])
+            used_end_time = data.get("used_end_time", start_version)
+            return diffs_list, used_end_time
+
+
+# -------------------------------------------------------------------------
+# submit_solution (unchanged)
+# -------------------------------------------------------------------------
+async def submit_solution(task_id, result: dict, final: bool):
+    """
+    Call DB to store partial result => final=bool
+    (This triggers the SOT's update_state internally, so no direct call is needed here.)
+    """
+    try:
+        logger.info(f"Submitting result for task {task_id}, final={final}: {result}")
+        result_str = json.dumps(result)
+        receipt = await db_adapter.submit_partial_result(task_id, result_str, final=final)
+        logger.info(f"DB submission receipt: {receipt}")
+    except Exception as e:
+        logger.error(f"Error in submit_solution for task {task_id}: {e}", exc_info=True)
+        raise
+
+
+# -------------------------------------------------------------------------
+# The main processing loop
 # -------------------------------------------------------------------------
 async def process_tasks():
     global task_queue, concurrent_tasks_counter
@@ -187,103 +239,173 @@ async def process_tasks():
                 try:
                     plugin = await get_plugin(next_task['plugin_id'], db_adapter)
 
-                    # 2a) Initialize => fetch param from SOT
-                    version_number = await plugin.call_submodule(
-                        'model_adapter',
-                        'initialize_tensor',
-                        TENSOR_NAME,
-                        sot_url,
-                        task_params
-                    )
-                    local_version = version_number
+                    # *** NEW LOGIC => Check for replicate_sequence ***
+                    replicate_sequence = task_params.get("replicate_sequence", [])
 
-                    # 2b) Load the input 
-                    await plugin.call_submodule(
-                        'model_adapter',
-                        'load_input_tensor',
-                        predownloaded_data
-                    )
-                    del predownloaded_data
+                    if replicate_sequence:
+                        # --------------------------------------------------
+                        # *** ADDED *** REPLICATION LOGIC
+                        # if replicate_sequence is present, we do a special multi-step approach:
+                        #   for i in range(len(replicate_sequence)):
+                        #       if i == 0: initialize_tensor(force_version_number=replicate_sequence[0])
+                        #       else: fetch diffs from [replicate_sequence[i-1] ... replicate_sequence[i]]
+                        #       forward/backward => partial result
+                        # --------------------------------------------------
+                        logger.info(f"[process_tasks] Task {task_id} => Replication steps for versions={replicate_sequence}")
 
-                    steps = task_params['steps']
+                        # Load input
+                        await plugin.call_submodule('model_adapter', 'load_input_tensor', predownloaded_data)
+                        del predownloaded_data
 
-                    for step_idx in range(steps):
-                        # i) Compute gradient
-                        encoded_grad, loss_val = await plugin.call_submodule(
-                            'model_adapter',
-                            'execute_step',
-                            task_params,
-                            step_idx
-                        )
+                        local_version = None
 
-                        # Re-check from SOT for concurrency safety
-                        local_version = await fetch_current_sot_version(sot_url)
-
-                        # ii) Store gradient => triggers SOT update_state
-                        grads_url = await upload_tensor(encoded_grad, 'grads', sot_url)
-
-                        partial_result = {
-                            "version_number": local_version,
-                            "result_url": grads_url,
-                            "loss": loss_val
-                        }
-
-                        # Submit partial result => SOT update_state
-                        is_final = (step_idx == steps - 1)
-                        await submit_solution(task_id, partial_result, final=is_final)
-
-                        # iii) Wait for the SOT to finalize next version
-                        new_global_version = await wait_for_version_advance(local_version, sot_url)
-                        if new_global_version > local_version:
-                            logger.debug(
-                                f"Local version advanced from {local_version} to {new_global_version}"
-                            )
-                            # *** CHANGED to use get_diffs_in_range *** 
-                            new_diffs, used_end_time = await get_diffs_in_range(
-                                start_version=local_version,
-                                end_time=None,   # means "until now"
-                                sot_url=sot_url
-                            )
-                            logger.debug(
-                                f"Obtained {len(new_diffs)} diffs in range from "
-                                f"version {local_version} to {used_end_time}"
-                            )
-                            for diff_url in new_diffs:
-                                full_diff_url = f"{sot_url}{diff_url}"
-                                logger.debug(f"Downloading diff: {full_diff_url}")
-                                diff_data = await download_file(
-                                    full_diff_url,
-                                    download_type='tensor',
-                                    chunk_timeout=300
+                        for idx, ver in enumerate(replicate_sequence):
+                            if idx == 0:
+                                # force param to version=ver
+                                forced_params = {
+                                    "force_version_number": ver
+                                }
+                                lv = await plugin.call_submodule(
+                                    'model_adapter',
+                                    'initialize_tensor',
+                                    TENSOR_NAME,
+                                    sot_url,
+                                    forced_params  # *** pass the force_version_number
                                 )
-                                if not isinstance(diff_data, dict):
-                                    logger.warning(
-                                        f"Downloaded diff data from {full_diff_url} is not a dict. Skipping..."
+                                local_version = lv
+                            else:
+                                # fetch diffs from replicate_sequence[idx-1] up to ver
+                                start_v = replicate_sequence[idx-1]
+                                # We'll do get_diffs_in_range( start_v, ver ), apply them in a loop
+                                diffs, used_end = await get_diffs_in_range(start_v, ver, sot_url)
+                                for diff_url in diffs:
+                                    full_diff_url = f"{sot_url}{diff_url}"
+                                    diff_data = await download_file(full_diff_url, download_type='tensor', chunk_timeout=300)
+                                    if not isinstance(diff_data, dict):
+                                        logger.warning(f"Downloaded diff is not a dict => skipping. url={diff_url}")
+                                        continue
+
+                                    diff_tensor = await plugin.call_submodule('model_adapter', 'decode_diff', diff_data)
+                                    await plugin.call_submodule('model_adapter', 'apply_diff', diff_tensor)
+
+                                local_version = ver
+
+                            # Now do forward/backward => partial result
+                            # We'll do 1 step => step_idx=idx
+                            encoded_grad, loss_val = await plugin.call_submodule(
+                                'model_adapter',
+                                'execute_step',
+                                task_params,
+                                idx
+                            )
+
+                            # We store partial result => version_number=ver
+                            grads_url = await upload_tensor(encoded_grad, 'grads', sot_url)
+                            partial_result = {
+                                "version_number": local_version,
+                                "result_url": grads_url,
+                                "loss": loss_val
+                            }
+                            is_final = (idx == len(replicate_sequence) - 1)
+                            await submit_solution(task_id, partial_result, final=is_final)
+
+                    else:
+                        # --------------------------------------------------
+                        # The normal (non-replicate) path
+                        # --------------------------------------------------
+                        # plugin: model_adapter
+                        version_number = await plugin.call_submodule(
+                            'model_adapter',
+                            'initialize_tensor',
+                            TENSOR_NAME,
+                            sot_url,
+                            task_params
+                        )
+                        local_version = version_number
+
+                        # 2b) Load the input
+                        await plugin.call_submodule(
+                            'model_adapter',
+                            'load_input_tensor',
+                            predownloaded_data
+                        )
+                        del predownloaded_data
+
+                        steps = task_params['steps']
+
+                        for step_idx in range(steps):
+                            # i) Compute gradient
+                            encoded_grad, loss_val = await plugin.call_submodule(
+                                'model_adapter',
+                                'execute_step',
+                                task_params,
+                                step_idx
+                            )
+
+                            # Re-check from SOT for concurrency safety
+                            local_version = await fetch_current_sot_version(sot_url)
+
+                            # ii) Store gradient => triggers SOT update_state
+                            grads_url = await upload_tensor(encoded_grad, 'grads', sot_url)
+
+                            partial_result = {
+                                "version_number": local_version,
+                                "result_url": grads_url,
+                                "loss": loss_val
+                            }
+
+                            # Submit partial result => SOT update_state
+                            is_final = (step_idx == steps - 1)
+                            await submit_solution(task_id, partial_result, final=is_final)
+
+                            # iii) Wait for the SOT to finalize next version
+                            new_global_version = await wait_for_version_advance(local_version, sot_url)
+                            if new_global_version > local_version:
+                                logger.debug(f"Local version advanced from {local_version} to {new_global_version}")
+                                # get diffs in range
+                                new_diffs, used_end_time = await get_diffs_in_range(
+                                    start_version=local_version,
+                                    end_time=None,   # means "until now"
+                                    sot_url=sot_url
+                                )
+                                logger.debug(
+                                    f"Obtained {len(new_diffs)} diffs in range from "
+                                    f"version {local_version} to {used_end_time}"
+                                )
+                                for diff_url in new_diffs:
+                                    full_diff_url = f"{sot_url}{diff_url}"
+                                    logger.debug(f"Downloading diff: {full_diff_url}")
+                                    diff_data = await download_file(
+                                        full_diff_url,
+                                        download_type='tensor',
+                                        chunk_timeout=300
                                     )
-                                    diff_tensor = torch.zeros(0)
-                                else:
+                                    if not isinstance(diff_data, dict):
+                                        logger.warning(
+                                            f"Downloaded diff data from {full_diff_url} is not a dict. Skipping..."
+                                        )
+                                        continue
+
                                     diff_tensor = await plugin.call_submodule(
                                         'model_adapter',
                                         'decode_diff',
                                         diff_data
                                     )
 
-                                logger.info(
-                                    f"{task_id}: Step={step_idx} "
-                                    f"Fetched diff norm={diff_tensor.norm().item():.6f}, "
-                                    f"max_abs={diff_tensor.abs().max().item():.6f}"
-                                )
-                                await plugin.call_submodule(
-                                    'model_adapter',
-                                    'apply_diff',
-                                    diff_tensor
-                                )
-                                local_version += 1
+                                    logger.info(
+                                        f"{task_id}: Step={step_idx} "
+                                        f"Fetched diff norm={diff_tensor.norm().item():.6f}, "
+                                        f"max_abs={diff_tensor.abs().max().item():.6f}"
+                                    )
+                                    await plugin.call_submodule(
+                                        'model_adapter',
+                                        'apply_diff',
+                                        diff_tensor
+                                    )
+                                    local_version += 1
 
-                            # If the "used_end_time" from SOT is still ahead
-                            # (it *should* match local_version after applying all diffs),
-                            # set local_version explicitly just to be safe:
-                            local_version = max(local_version, used_end_time)
+                                # Just to be safe
+                                local_version = max(local_version, used_end_time)
 
                 finally:
                     await task_processing_lock.release()
@@ -317,53 +439,3 @@ async def process_tasks():
     finally:
         async with concurrent_tasks_counter_lock:
             concurrent_tasks_counter -= 1
-
-
-
-
-async def get_diffs_in_range(start_version, end_time, sot_url):
-    """
-    Fetches diffs from the SOT in a version range [start_version+1 .. end_time].
-    If end_time is None, the SOT will interpret that as "up to the current version."
-
-    Returns:
-      (diffs_list, used_end_time)
-
-    where diffs_list is a list of diff URLs (strings), and used_end_time is the
-    actual version up to which we fetched the diffs (the SOT returns this).
-    """
-    if end_time is not None:
-        endpoint = f"{sot_url}/get_diffs_since?from_version={start_version}&end_time={end_time}"
-    else:
-        endpoint = f"{sot_url}/get_diffs_since?from_version={start_version}"
-
-    import aiohttp
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(endpoint) as resp:
-            if resp.status != 200:
-                txt = await resp.text()
-                logger.warning(f"get_diffs_in_range => status={resp.status}, body={txt}")
-                # Return an empty list and the same start_version on error
-                return [], start_version
-
-            data = await resp.json()
-            diffs_list = data.get("diffs", [])
-            used_end_time = data.get("used_end_time", start_version)
-            return diffs_list, used_end_time
-
-
-
-async def submit_solution(task_id, result: dict, final: bool):
-    """
-    Call DB to store partial result => final=bool
-    (This triggers the SOT's update_state internally, so no direct call is needed here.)
-    """
-    try:
-        logger.info(f"Submitting result for task {task_id}, final={final}: {result}")
-        result_str = json.dumps(result)
-        receipt = await db_adapter.submit_partial_result(task_id, result_str, final=final)
-        logger.info(f"DB submission receipt: {receipt}")
-    except Exception as e:
-        logger.error(f"Error in submit_solution for task {task_id}: {e}", exc_info=True)
-        raise

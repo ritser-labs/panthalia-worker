@@ -1,3 +1,4 @@
+# file: spl/adapters/model_adapter.py
 from abc import ABC, abstractmethod
 import logging
 import torch
@@ -15,6 +16,7 @@ from ..util.docker import janky_url_replace
 # We'll import the chunked-DCT from demo.py only here
 from ..util import demo
 import tempfile
+import json
 
 class ModelAdapter(ABC):
     def __init__(self, model_config):
@@ -59,6 +61,77 @@ class ModelAdapter(ABC):
         and return (encoded_grad_dict, loss_value).
         """
         pass
+
+    # *** ADDED *** for replication convenience:
+    @abstractmethod
+    async def decode_diff(self, diff_data: dict) -> torch.Tensor:
+        pass
+
+    @abstractmethod
+    async def apply_diff(self, diff_tensor: torch.Tensor):
+        pass
+
+    # *** The main method we call from tasks.py ***
+    async def initialize_tensor(self, tensor_name, sot_url, task_params):
+        """
+        Attempt to download the latest parameter from the SOT by calling /latest_state,
+        unless task_params includes 'force_version_number' => then we fetch that specific version.
+
+        Returns the *version_number* used. The actual param is cached in self._cached_param.
+        """
+        version_number = 0
+        force_ver = task_params.get("force_version_number", None)
+        param_tensor = None
+
+        if force_ver is not None:
+            # *** ADDED ***: If forced, fetch that version from the SOT
+            endpoint = f"{sot_url}/latest_state?version_number={force_ver}"
+        else:
+            # else fetch /latest_state with no version
+            endpoint = f"{sot_url}/latest_state"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(endpoint) as resp:
+                    if resp.status == 200:
+                        ver_str = resp.headers.get("X-Version-Number", "0")
+                        version_number = int(ver_str)
+
+                        file_bytes = await resp.read()
+                        with tempfile.NamedTemporaryFile(delete=False) as tmp_f:
+                            tmp_path = tmp_f.name
+                            tmp_f.write(file_bytes)
+
+                        loaded_tensor = torch.load(tmp_path, map_location=device)
+                        os.remove(tmp_path)
+
+                        param_tensor = loaded_tensor.to(device)
+                        logging.info(
+                            f"[initialize_tensor] Fetched param from SOT, version={version_number}, "
+                            f"shape={param_tensor.shape}, forced={force_ver}"
+                        )
+                    else:
+                        logging.info(
+                            f"[initialize_tensor] SOT returned status={resp.status}. "
+                            "Falling back to local init_tensor()."
+                        )
+        except Exception as e:
+            logging.error(
+                f"[initialize_tensor] Error requesting /latest_state from SOT: {e}. "
+                "Falling back to local init_tensor().",
+                exc_info=True
+            )
+
+        if param_tensor is None:
+            # fallback => local init
+            param_tensor = self.init_tensor(zero_init=False)
+            version_number = 0
+            logging.info(
+                f"[initialize_tensor] Created new param tensor locally, shape={param_tensor.shape}"
+            )
+
+        self._cached_param = param_tensor
+        return version_number
 
 
 class StandardModelAdapter(ModelAdapter):
@@ -125,32 +198,32 @@ class StandardModelAdapter(ModelAdapter):
         step_idx: int
     ):
         """
-        Modified to support gradient accumulation before returning the final gradient.
-        
-        We look for 'steps_per_accumulation' in task_params (defaults to 1 if missing).
-        Inside this method, we do multiple micro-step forward/backward passes on the 
-        same sub-batch, summing the gradients, and finally chunked-DCT encode the 
-        accumulated gradient once.
+        We do forward+backward on the sub-batch for the 'step_idx'th slice
+        (or just the entire batch if you prefer).
+        Then chunked-DCT encode the gradient and return (encoded_grad_dict, loss_value).
         """
         if self._cached_param is None:
             raise ValueError("No param is set. Did you call initialize_tensor first?")
 
         # Number of major steps, used for splitting input among steps
-        steps = task_params['steps']
-        # New parameter: steps per accumulation (default 1)
+        steps = task_params.get('steps', 1)
+        # steps_per_accumulation is optional
         accum_steps = task_params.get('steps_per_accumulation', 1)
 
+        # If replicate_sequence is used, step_idx might be beyond the normal # of steps,
+        # but we only use a single chunk of the data. For simplicity, keep the same logic
+        # or do a single step each time.
         model = self.tensor_to_model(self._cached_param)
 
-        # Divide the entire dataset (already loaded in self.inputs) by 'steps' 
-        batch_size = self.inputs.size(0) // steps
+        batch_size = self.inputs.size(0) // steps if steps > 0 else self.inputs.size(0)
         if batch_size <= 0:
-            raise ValueError(
-                f"execute_step: Invalid batch_size, total={self.inputs.size(0)}, steps={steps}"
-            )
+            batch_size = self.inputs.size(0)
 
         start_idx = step_idx * batch_size
         end_idx = (step_idx + 1) * batch_size
+        if end_idx > self.inputs.size(0):
+            end_idx = self.inputs.size(0)
+
         x_step = self.inputs[start_idx:end_idx].detach()
         y_step = self.targets[start_idx:end_idx].detach()
 
@@ -159,17 +232,14 @@ class StandardModelAdapter(ModelAdapter):
         total_loss = 0.0
 
         for micro_step in range(accum_steps):
-            # Zero the model's .grad
             for p in model.parameters():
                 if p.grad is not None:
                     p.grad.zero_()
 
-            # Forward/backward on the same sub-batch
             loss = self.forward_and_loss(model, x_step, y_step)
             loss_value = loss.item()
             loss.backward()
 
-            # Collect grads from model
             grads_list = []
             for p in model.parameters():
                 if p.grad is not None:
@@ -178,10 +248,9 @@ class StandardModelAdapter(ModelAdapter):
                     grads_list.append(torch.zeros_like(p).view(-1))
 
             partial_grads = torch.cat(grads_list, dim=0).detach()
-            # Accumulate
             accum_grads += partial_grads
             total_loss += loss_value
-        
+
         accum_grads /= accum_steps
         total_loss /= accum_steps
 
@@ -202,11 +271,8 @@ class StandardModelAdapter(ModelAdapter):
             prev_error=self.prev_error,
             norm='ortho'
         )
-
-        # Update self.prev_error for the next step
         self.prev_error = new_error
 
-        # build final encoded payload
         encoded_dict = {
             'freq_idxs': freq_idxs.cpu(),
             'freq_vals_int8': freq_vals_int8.cpu(),
@@ -217,15 +283,21 @@ class StandardModelAdapter(ModelAdapter):
             'pad_count': pad_count
         }
 
-        # Return final (encoded_gradient, loss_value) 
-        # The 'loss_value' below is the sum over accum_steps. 
-        # (Change to an average if you prefer.)
         return encoded_dict, total_loss
 
-    def run_sanity_check(self, task_result: dict) -> bool:
-        if not isinstance(task_result, dict):
-            return False
-        return True
+    def run_sanity_check(self, task_result) -> bool:
+        # If the result is already a dict, it's valid.
+        if isinstance(task_result, dict):
+            return True
+        # If it's a string, attempt to parse it as JSON.
+        elif isinstance(task_result, str):
+            try:
+                _ = json.loads(task_result)
+                return True
+            except Exception:
+                return False
+        # Any other type is considered invalid.
+        return False
 
     def compile_model(self, model: torch.nn.Module) -> torch.nn.Module:
         model = torch.compile(model)
@@ -251,7 +323,6 @@ class StandardModelAdapter(ModelAdapter):
     def init_tensor(self, zero_init: bool = False) -> torch.Tensor:
         module = self.model_config.create_model().to(device)
         if not zero_init:
-            # some random init
             for p in module.parameters():
                 if p.requires_grad:
                     if p.ndimension() >= 2:
@@ -265,73 +336,7 @@ class StandardModelAdapter(ModelAdapter):
         all_p = [p.data for p in module.parameters()]
         return torch.cat([x.view(-1) for x in all_p]).to(device)
 
-    def initialize_environment(self, *args, **kwargs):
-        torch.set_float32_matmul_precision('high')
-
-    # -------------------------------------------------------------
-    # Save the parameter in memory after fetching from SOT
-    # -------------------------------------------------------------
-    async def initialize_tensor(self, tensor_name, sot_url, task_params):
-        """
-        Attempt to download the latest parameter from the SOT by calling /latest_state.
-        If no state exists yet (404 or error), fallback to a fresh init_tensor().
-        Returns the *version_number* only. The actual param is cached in self._cached_param.
-        """
-        version_number = 0
-        param_tensor = None
-
-        endpoint = f"{sot_url}/latest_state"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(endpoint) as resp:
-                    if resp.status == 200:
-                        ver_str = resp.headers.get("X-Version-Number", "0")
-                        version_number = int(ver_str)
-
-                        file_bytes = await resp.read()
-                        with tempfile.NamedTemporaryFile(delete=False) as tmp_f:
-                            tmp_path = tmp_f.name
-                            tmp_f.write(file_bytes)
-
-                        loaded_tensor = torch.load(tmp_path, map_location=device)
-                        os.remove(tmp_path)
-
-                        param_tensor = loaded_tensor.to(device)
-                        logging.info(
-                            f"[initialize_tensor] Fetched param from SOT, version={version_number}, "
-                            f"shape={param_tensor.shape}"
-                        )
-                    else:
-                        logging.info(
-                            f"[initialize_tensor] SOT returned status={resp.status}. "
-                            "Falling back to local init_tensor()."
-                        )
-        except Exception as e:
-            logging.error(
-                f"[initialize_tensor] Error requesting /latest_state from SOT: {e}. "
-                "Falling back to local init_tensor().",
-                exc_info=True
-            )
-
-        if param_tensor is None:
-            param_tensor = self.init_tensor(zero_init=False)
-            version_number = 0
-            logging.info(
-                f"[initialize_tensor] Created new param tensor locally, shape={param_tensor.shape}"
-            )
-
-        self._cached_param = param_tensor
-        return version_number
-
-    # -------------------------------------------------------------
-    # decode_diff submodule function (FIXED)
-    # -------------------------------------------------------------
     async def decode_diff(self, diff_data: dict) -> torch.Tensor:
-        """
-        Convert the freq tensors using .clone().detach() to avoid the user warning,
-        ensure everything is on the same device, then decode with chunked iDCT.
-        """
-        # If diff_data[...] are already Tensors, we do clone/detach:
         freq_idxs_t = diff_data['freq_idxs'].clone().detach().to(device=device, dtype=torch.int64)
         freq_vals_int8_t = diff_data['freq_vals_int8'].clone().detach().to(device=device, dtype=torch.int8)
         freq_scales_t = diff_data['freq_scales'].clone().detach().to(device=device, dtype=torch.float32)
@@ -352,17 +357,10 @@ class StandardModelAdapter(ModelAdapter):
             pad_count=pad_count
         )
 
-        # Force param_diff to float32 on GPU
         param_diff = param_diff.to(device=device, dtype=torch.float32)
         return param_diff
 
-    # -------------------------------------------------------------
-    # apply_diff submodule function (UPDATED for device match)
-    # -------------------------------------------------------------
     async def apply_diff(self, diff_tensor: torch.Tensor):
-        """
-        Ensures the diff is on the same device as _cached_param, then updates in-place.
-        """
         if self._cached_param is None:
             raise ValueError("No param is set. Did you call initialize_tensor first?")
         diff_tensor = diff_tensor.to(self._cached_param.device)
@@ -379,6 +377,7 @@ class FairscaleModelAdapter(ModelAdapter):
     
     def initialize_distributed_environment(self, backend, master_addr='localhost', master_port=None):
         if master_port is None:
+            import os
             master_port = str(12356 + os.getpid() % 10000)
         os.environ['MASTER_ADDR'] = master_addr
         os.environ['MASTER_PORT'] = master_port

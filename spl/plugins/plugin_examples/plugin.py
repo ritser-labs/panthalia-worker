@@ -30,7 +30,7 @@ model_config = NanoGPTConfig(tokenizer, model_params)
 model_adapter = NanoGPTModelAdapter(model_config)
 
 STEPS_PER_ACCUMULATION = 3
-NUM_STEPS = 70 * STEPS_PER_ACCUMULATION
+NUM_STEPS = 2 * STEPS_PER_ACCUMULATION # small number for testing
 EXAMPLES_PER_STEP = 64
 
 dataset = ShakespeareDataLoader(

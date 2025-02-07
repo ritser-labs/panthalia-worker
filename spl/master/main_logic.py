@@ -161,16 +161,6 @@ class Master:
         logger.info(f"[Master.run_main] Master done for job {self.job_id}.")
 
     async def main_iteration(self, iteration_number: int):
-        """
-        Each iteration attempts to:
-        1) Retrieve (or reuse) SOT input => "pending_get_input".
-        2) Create a new (Task+Bid) => "pending_submit_task".
-        3) Wait for that Task's final resolution => "pending_wait_for_result".
-
-        The logic of local sanity check, replication, and final finalize now lives
-        entirely in `wait_for_result`. We simply receive the final result (or None),
-        record it, and mark iteration done.
-        """
         iteration_state = await get_iteration_state(
             db_adapter=self.db_adapter,
             job_id=self.job_id,
@@ -209,7 +199,9 @@ class Master:
                     if not created or len(created) < 1:
                         self.logger.error(f"[main_iteration] Iter={iteration_number} => failed to create tasks.")
                         iteration_state["stage"] = "done"
-                        await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
+                        await save_iteration_state(
+                            self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state
+                        )
                         break
 
                     iteration_state["task_id_info"] = created
@@ -227,11 +219,7 @@ class Master:
                     await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
                     break
 
-                # We'll only handle the single newly created task in this iteration
                 original_task_id = tasks_info[0]["task_id"]
-
-                # The new wait_for_result now handles final sanity checks, replication, & finalization.
-                # If the solver's entire chain is forcibly deleted or fails, we get None.
                 final_result = await wait_for_result(
                     db_adapter=self.db_adapter,
                     plugin=self.plugin,
@@ -240,30 +228,33 @@ class Master:
                     original_task_id=original_task_id
                 )
                 iteration_state["result"] = final_result or {}
-                
-                last_key = max([int(k) for k in iteration_state.keys() if k.isdigit()])
-                last_result = iteration_state.get(str(last_key), {})
 
-                # If final_result included a 'loss', store it in self.losses & optionally update SOT
+                # FIX BELOW:
+                numeric_keys = [int(k) for k in iteration_state.keys() if k.isdigit()]
+                if numeric_keys:
+                    last_key = max(numeric_keys)
+                    last_result = iteration_state.get(str(last_key), {})
+                else:
+                    last_result = {}
+
                 if last_result and "loss" in last_result and "version_number" in last_result:
-                    if type(last_result["loss"]) != float:
-                        self.logger.error(f"[main_iteration] Iter={iteration_number} => invalid loss value.")
-                    if type(last_result["version_number"]) != int:
-                        self.logger.error(f"[main_iteration] Iter={iteration_number} => invalid version number.")
                     loss_val = last_result["loss"]
-                    self.losses.append(loss_val)
-                    version_num = last_result.get("version_number")
-                    await self.update_latest_loss(loss_val, version_num)
+                    if isinstance(loss_val, (int, float)):
+                        self.losses.append(loss_val)
+                        version_num = last_result["version_number"]
+                        await self.update_latest_loss(loss_val, version_num)
+                    else:
+                        self.logger.error(f"[main_iteration] Iter={iteration_number} => invalid loss value type.")
 
-                # Bump job iteration in DB, mark iteration as done
+                # Bump the job iteration and finalize
                 await self.db_adapter.update_job_iteration(self.job_id, iteration_number + 1)
                 iteration_state["stage"] = "done"
                 await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
-                # Optionally remove iteration's subdict from job.master_state_json if you prefer a clean DB
                 await remove_iteration_entry(self.db_adapter, self.job_id, self.state_key, iteration_number)
                 break
 
         self.logger.info(f"[main_iteration] Iteration {iteration_number} => DONE.")
+
 
 
 

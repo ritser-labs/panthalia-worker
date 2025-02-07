@@ -107,6 +107,7 @@ async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_tas
         is_valid = await plugin.call_submodule("model_adapter", "run_sanity_check", task_obj.result)
         if not is_valid:
             # => finalize incorrect & return
+            logger.info(f"[wait_for_result] local check failed for task {task_obj.id}, finalizing INCORRECT.")
             await db_adapter.finalize_sanity_check(task_obj.id, is_valid=False)
             return task_obj.result
 
@@ -148,6 +149,7 @@ async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_tas
             await db_adapter.finalize_sanity_check(task_obj.id, True)
         else:
             # => mismatch => finalize original => INCORRECT
+            logger.info(f"[wait_for_result] final child {child_id} result mismatch => finalizing INCORRECT.")
             await db_adapter.finalize_sanity_check(task_obj.id, False)
 
         return task_obj.result
