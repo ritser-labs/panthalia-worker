@@ -29,7 +29,7 @@ model_params = GPTConfig(
 model_config = NanoGPTConfig(tokenizer, model_params)
 model_adapter = NanoGPTModelAdapter(model_config)
 
-STEPS_PER_ACCUMULATION = 3
+STEPS_PER_ACCUMULATION = 2
 NUM_STEPS = 2 * STEPS_PER_ACCUMULATION # small number for testing
 EXAMPLES_PER_STEP = 64
 

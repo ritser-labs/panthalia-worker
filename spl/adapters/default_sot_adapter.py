@@ -214,7 +214,6 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
             # Load the encoded gradient
             loaded_obj = torch.load(local_file_path, map_location=device)
-            os.remove(local_file_path)
 
             # Decode partial grads from chunked DCT
             partial_grads = demo.chunked_dct_decode_int8(
@@ -664,11 +663,17 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
     async def _cleanup_old_files(self):
         """
-        Periodically remove .pt files or diffs older than 48h for housekeeping.
+        Periodically remove .pt files or diffs older than 48 hours for housekeeping.
+        
+        This function cleans up:
+        1) Files in the base directory (e.g. model parameters, diff files),
+        2) Files in the temp directory (files uploaded via upload_tensor),
+        3) And entries in self.versioned_diffs whose files are older than 48 hours.
         """
-        cutoff_seconds = 2 * 24 * 3600
+        cutoff_seconds = 2 * 24 * 3600  # 48 hours in seconds
         now = time.time()
 
+        # 1) Clean up files in the base directory
         for fname in os.listdir(self.base_dir):
             if not fname.endswith(".pt"):
                 continue
@@ -678,10 +683,26 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                 age = now - stat_info.st_mtime
                 if age > cutoff_seconds:
                     os.remove(full_path)
-            except:
-                pass
+                    self.logger.info(f"Removed old file: {full_path}")
+            except Exception as e:
+                self.logger.error(f"Error removing file {full_path}: {e}")
 
-        # Also remove old diffs from self.versioned_diffs
+        # 2) Clean up temporary files in the temp directory (uploaded via upload_tensor)
+        if hasattr(self, 'temp_dir') and os.path.isdir(self.temp_dir):
+            for fname in os.listdir(self.temp_dir):
+                if not fname.endswith(".pt"):
+                    continue
+                full_path = os.path.join(self.temp_dir, fname)
+                try:
+                    stat_info = os.stat(full_path)
+                    age = now - stat_info.st_mtime
+                    if age > cutoff_seconds:
+                        os.remove(full_path)
+                        self.logger.info(f"Removed old temp file: {full_path}")
+                except Exception as e:
+                    self.logger.error(f"Error removing temp file {full_path}: {e}")
+
+        # 3) Remove old diffs from self.versioned_diffs
         for ver_key, (rel_url, created_ts) in list(self.versioned_diffs.items()):
             if (now - created_ts) > cutoff_seconds:
                 base_name = os.path.basename(rel_url)
@@ -689,6 +710,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                 if os.path.exists(local_diff_path):
                     try:
                         os.remove(local_diff_path)
-                    except:
-                        pass
+                        self.logger.info(f"Removed old diff file: {local_diff_path}")
+                    except Exception as e:
+                        self.logger.error(f"Error removing diff file {local_diff_path}: {e}")
                 del self.versioned_diffs[ver_key]

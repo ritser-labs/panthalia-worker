@@ -19,6 +19,10 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from ..ephemeral_key import get_db_sot_private_key  # ephemeral key from app.py
 
+import json
+from datetime import datetime, timezone
+from sqlalchemy.orm import selectinload
+from ....models import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
 PLATFORM_FEE_PERCENTAGE = 0.1
@@ -157,6 +161,7 @@ class DBAdapterOrdersTasksMixin:
             res = await session.execute(stmt)
             return {'num_orders': res.scalar_one()}
 
+
     async def create_bids_and_tasks(
         self,
         job_id: int,
@@ -165,6 +170,8 @@ class DBAdapterOrdersTasksMixin:
         params: str,
         hold_id: Optional[int] = None
     ) -> Optional[Dict[str, List[Dict[str, int]]]]:
+        if num_tasks < 1:
+            raise ValueError(f"create_bids_and_tasks => requested {num_tasks} tasks; must be >= 1.")
         async with self.get_async_session() as session:
             try:
                 stmt = select(Job).where(Job.id == job_id).options(joinedload(Job.subnet))
@@ -174,7 +181,6 @@ class DBAdapterOrdersTasksMixin:
                     raise ValueError(f"Job {job_id} not found.")
                 if not job.active:
                     raise ValueError(f"Cannot create tasks for an inactive job (job_id={job_id}).")
-
                 user_id = job.user_id
                 account = await self.get_or_create_account(user_id, session)
 
@@ -201,9 +207,7 @@ class DBAdapterOrdersTasksMixin:
                     session.add(new_bid)
                     await session.flush()
 
-                    deposit_hold = await self.select_hold_for_order(
-                        session, account, job.subnet, OrderType.Bid, price, hold_id
-                    )
+                    deposit_hold = await self.select_hold_for_order(session, account, job.subnet, OrderType.Bid, price, hold_id)
                     await self.reserve_funds_on_hold(session, deposit_hold, price, new_bid)
                     new_bid.hold_id = deposit_hold.id
 
@@ -214,11 +218,18 @@ class DBAdapterOrdersTasksMixin:
 
                 await self.match_bid_ask_orders(session, job.subnet_id)
                 await session.commit()
+
+                if len(created_items) < num_tasks:
+                    raise RuntimeError(
+                        f"create_bids_and_tasks => created only {len(created_items)} out of {num_tasks} tasks."
+                    )
+
                 return {"created_items": created_items}
 
             except Exception:
                 await session.rollback()
                 raise
+
 
     async def delete_order(self, order_id: int):
         async with self.get_async_session() as session:
@@ -391,55 +402,70 @@ class DBAdapterOrdersTasksMixin:
     async def check_invalid(self, task: Task):
         return False
 
-    async def submit_partial_result(self, task_id: int, partial_result: str, final: bool = False) -> dict:
+    async def submit_partial_result(
+        self,
+        task_id: int,
+        partial_result: str,
+        final: bool = False
+    ) -> dict:
         """
-        Updates the Task.result JSON by merging in the new partial_result. If `final` is True,
-        moves the Task to SanityCheckPending. Also posts partial_result to the SOT if relevant.
+        Store or merge a JSON partial_result into Task.result in the DB.
+        If final=True, mark the Task status as SanityCheckPending so the
+        next phase can decide correctness or replication.
+
+        Returns:
+        { "success": True } on success, raises exceptions on errors.
         """
-        # Convert partial_result to a dict if it's a JSON string
+
+        # Attempt to parse `partial_result` as JSON:
         if isinstance(partial_result, str):
-            partial_data = json.loads(partial_result)
+            try:
+                partial_data = json.loads(partial_result)
+            except json.JSONDecodeError as ex:
+                raise ValueError(f"submit_partial_result => invalid JSON: {ex}")
         else:
+            # If your calling code sometimes passes an already-loaded dict,
+            # handle that gracefully:
             partial_data = partial_result
 
         async with self.get_async_session() as session:
-            # Eager-load everything we need: ask, bid, job, etc.
+            # 1) Load the Task (with a possible join to verify solver or job ownership)
             stmt = (
                 select(Task)
                 .where(Task.id == task_id)
-                .options(
-                    selectinload(Task.ask),
-                    selectinload(Task.bid),
-                    selectinload(Task.job)  # or joinedload if you prefer
-                )
+                .options(selectinload(Task.ask), selectinload(Task.bid))
             )
             result = await session.execute(stmt)
             task = result.scalar_one_or_none()
-
             if not task:
-                raise ValueError(f"Task {task_id} not found.")
-            if not getattr(task, 'ask', None):
-                # If you truly require an ask for partial submission:
-                raise PermissionError("No solver assignment => cannot submit partial result.")
+                raise ValueError(f"submit_partial_result => Task {task_id} not found.")
 
-            # Merge partial_result into task.result
-            current_results = {}
+            # 2) Merge new partial_data into the existing Task.result field (JSON).
+            current_json = {}
             if task.result:
                 try:
-                    current_results = (
-                        json.loads(task.result) if isinstance(task.result, str)
-                        else task.result
-                    )
+                    if isinstance(task.result, dict):
+                        current_json = task.result
+                    else:
+                        current_json = json.loads(task.result)
                 except Exception:
-                    current_results = {}
+                    # If the existing .result column is invalid JSON, we can either
+                    # raise an error or just overwrite it. Here, we overwrite for safety:
+                    current_json = {}
 
-            # Use a timestamp key or whatever structure you want
+            # Example: store partial_data under a timestamp key
+            # or simply append if you want an array.
+            # Here, we store them by integer timestamp:
             import time
             timestamp_key = str(int(time.time()))
-            current_results[timestamp_key] = partial_data
-            task.result = json.dumps(current_results)
+            current_json[timestamp_key] = partial_data
 
-            # If final => push it to SanityCheckPending
+            # 3) Update the Task.result column
+            task.result = current_json  # if your column is JSON-type in SQLAlchemy
+            # or if your column is a string field, do:
+            #     task.result = json.dumps(current_json)
+
+            # 4) If final => go to SanityCheckPending
             if final:
                 task.status = TaskStatus.SanityCheckPending
                 task.time_solved = datetime.now(timezone.utc)
@@ -449,14 +475,15 @@ class DBAdapterOrdersTasksMixin:
             session.add(task)
             await session.commit()
 
-        # Return something to the caller
         return {"success": True}
 
 
     async def _update_sot_with_partial(self, task_id: int, partial_data: dict):
         """
         POSTs directly to SOT’s /update_state endpoint, signing with the ephemeral
-        DB key that lives in app.py.
+        DB key that lives in app.py. We only do this if partial_data has the
+        fields needed (version_number, result_url). If it's a replica task with
+        no version_number, we skip.
         """
         # 1) Fetch the job => we need job.sot_url
         async with self.get_async_session() as session:
@@ -475,8 +502,15 @@ class DBAdapterOrdersTasksMixin:
                 logger.warning(f"[_update_sot_with_partial] job {job_obj.id} has no sot_url set.")
                 return
 
-        # 2) Build the payload you want to send to /update_state
-        #    Typically includes at least version_number, result_url, etc.
+        # 2) Check if 'version_number' and 'result_url' are present in partial_data
+        if "version_number" not in partial_data or "result_url" not in partial_data:
+            logger.info(
+                f"[_update_sot_with_partial] Skipping SOT update for task={task_id} because "
+                f"no 'version_number' or 'result_url' was found (replica or simple partial?)."
+            )
+            return
+
+        # If we do have them, build the payload:
         payload = {
             "version_number": partial_data["version_number"],
             "result_url": partial_data["result_url"],
@@ -488,33 +522,28 @@ class DBAdapterOrdersTasksMixin:
             payload["input_url"] = partial_data["input_url"]
 
         # 3) Generate a signature with the ephemeral DB key
-        #    i.e. the standard "<message>:<signature>" format
         def _sign_sot_request(endpoint: str, data_dict: dict) -> dict:
-            # Construct the "message" portion
             msg_obj = {
-                "endpoint": endpoint,   # "update_state"
+                "endpoint": endpoint,
                 "nonce": str(uuid.uuid4()),
                 "timestamp": int(time.time()),
                 "data": data_dict,
             }
             msg_str = json.dumps(msg_obj, sort_keys=True)
 
-            # Sign with ephemeral private key
             pk = get_db_sot_private_key()
             if not pk:
-                raise RuntimeError("Ephemeral DB key not found (did you generate it at startup?)")
+                raise RuntimeError("Ephemeral DB key not found.")
 
             acct = Account.from_key(pk)
             sign_res = acct.sign_message(encode_defunct(text=msg_str))
             sig_hex = sign_res.signature.hex()
-
-            # Return as an Authorization header
             return {"Authorization": f"{msg_str}:{sig_hex}"}
 
         headers = _sign_sot_request("update_state", payload)
         update_url = f"{sot_url}/update_state"
 
-        # 4) Make the POST request
+        # 4) Make the POST request to the SOT
         try:
             async with aiohttp.ClientSession() as client:
                 async with client.post(update_url, json=payload, headers=headers, timeout=30) as resp:

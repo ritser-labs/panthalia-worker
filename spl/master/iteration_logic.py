@@ -10,6 +10,13 @@ from ..models import TaskStatus
 from .config import args
 from ..db.db_adapter_client import DBAdapterClient
 from ..models import Job
+import datetime
+
+# ------------------------------------------------------------------------
+# Bring in the replicate probability logic from replicate.py
+# We'll use a single probability for all tasks
+# ------------------------------------------------------------------------
+from .replicate import should_replicate, spawn_replica_task, manage_replication_chain
 
 logger = logging.getLogger(__name__)
 
@@ -67,92 +74,64 @@ async def remove_iteration_entry(db_adapter, job_id: int, state_key: str, iterat
 ###############################################################################
 async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_task_id: int):
     """
-    Polls the original solver Task until it is either:
-      - Forcibly deleted from the DB => return None
-      - Finalized as ResolvedCorrect or ResolvedIncorrect => return task.result
-      - Moves to SanityCheckPending => we do local check; if fails => finalize INCORRECT, return result
-        if passes => we attempt replication with some probability => manage chain => finalize original accordingly
-        => return the final result.
-
-    This function now includes all logic for replication chaining
-    and for finalizing the original Task. The caller simply gets
-    the final result or None if forcibly deleted or something else.
+    Poll the original solver Task until it is final or forcibly removed.
+    If it hits SanityCheckPending => local check => replicate => ...
+    The final correctness is decided by manage_replication_chain or local pass/fail.
     """
-    from .replicate import should_replicate, spawn_replica_task, manage_replication_chain, compare_results_locally
+    from ..models import TaskStatus
+    import asyncio
 
     while True:
-        # 1) Check if the original task is missing
+        # 1) If forcibly removed => done
         task_obj = await db_adapter.get_task(original_task_id)
         if not task_obj:
-            # Forcibly deleted => we can't do anything => return None
             return None
 
-        # 2) If it's already in a final status => just return its result
+        # 2) If final => return
         if task_obj.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
             return task_obj.result
 
-        # 3) If it's waiting for solver => continue polling
+        # 3) If not yet SanityCheckPending => poll
         if task_obj.status not in [TaskStatus.SanityCheckPending.name, TaskStatus.ReplicationPending.name]:
             await asyncio.sleep(0.5)
             continue
 
-        # 4) If we get here => task is either SanityCheckPending or ReplicationPending
-        #    We need to do a local check if it hasn't been validated yet.
+        # 4) If we are here => we have a final partial posted => local check
         if not task_obj.result:
-            # no solver result => can't do local check => wait
             await asyncio.sleep(0.5)
             continue
 
-        # 4.1) We run the local check if we haven't already
         is_valid = await plugin.call_submodule("model_adapter", "run_sanity_check", task_obj.result)
         if not is_valid:
-            # => finalize incorrect & return
-            logger.info(f"[wait_for_result] local check failed for task {task_obj.id}, finalizing INCORRECT.")
-            await db_adapter.finalize_sanity_check(task_obj.id, is_valid=False)
+            # finalize => incorrect
+            await db_adapter.finalize_sanity_check(task_obj.id, False)
             return task_obj.result
 
-        # 4.2) If local check passes => we replicate with some probability. If skip => finalize correct.
-        #      If replicate => indefinite chain.
+        # local check is valid => replicate or finalize => correct
         await db_adapter.update_task_status(task_obj.id, job_id, TaskStatus.ReplicationPending.name)
-        # Decide whether to replicate
         do_replicate = await should_replicate()
         if not do_replicate:
-            # finalize correct => return
-            await db_adapter.finalize_sanity_check(task_obj.id, is_valid=True)
+            await db_adapter.finalize_sanity_check(task_obj.id, True)
             return task_obj.result
 
-        # 4.3) Attempt to spawn the first replicate child
+        # spawn replicate child
         child_id = await spawn_replica_task(db_adapter, parent_task_id=task_obj.id)
         if not child_id:
-            # If we can't spawn => finalize original as correct
-            await db_adapter.finalize_sanity_check(task_obj.id, is_valid=True)
+            # fallback => finalize => correct
+            await db_adapter.finalize_sanity_check(task_obj.id, True)
             return task_obj.result
 
-        # 4.4) Manage the indefinite replication chain
+        # 5) Manage indefinite chain
         chain_outcome = await manage_replication_chain(db_adapter, plugin, job_id, task_obj.id, child_id)
-        # If chain_outcome == 'chain_fail' => child eventually was INCORRECT => original => CORRECT
         if chain_outcome == "chain_fail":
-            await db_adapter.finalize_sanity_check(task_obj.id, True)
+            # we have already finalized => parent's=incorrect
+            return task_obj.result
+        elif chain_outcome == "chain_success":
+            # we have already finalized => parent's=correct
             return task_obj.result
 
-        # If chain_outcome == 'chain_correct'
-        # => final replicate child is correct. Compare child's result w/ original's result
-        final_child = await db_adapter.get_task(child_id)
-        if not final_child or not final_child.result:
-            # can't get child's final result => default original => CORRECT
-            await db_adapter.finalize_sanity_check(task_obj.id, True)
-            return task_obj.result
+        await asyncio.sleep(0.5)
 
-        matched = await compare_results_locally(plugin, task_obj.result, final_child.result)
-        if matched:
-            # => finalize original => CORRECT
-            await db_adapter.finalize_sanity_check(task_obj.id, True)
-        else:
-            # => mismatch => finalize original => INCORRECT
-            logger.info(f"[wait_for_result] final child {child_id} result mismatch => finalizing INCORRECT.")
-            await db_adapter.finalize_sanity_check(task_obj.id, False)
-
-        return task_obj.result
 
 
 
@@ -161,12 +140,9 @@ async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_tas
 ###############################################################################
 async def _handle_recreate_missing_task(db_adapter, plugin, sot_url, job_id: int, old_task_id: int):
     """
-    1) Check the job is still active
-    2) Find iteration referencing old_task_id
-    3) revert from 'pending_wait_for_result' => 'pending_submit_task'
-    4) create a new DB Task + Bid
-    5) store new task_id in iteration_state
-    6) if we exceed MAX_RECREATES_PER_ITERATION => set job inactive
+    If the original Task is forcibly removed, we revert the iteration from
+    'pending_wait_for_result' => 'pending_submit_task' and create a new Task
+    as a fallback.
     """
     # 1) Confirm the job is still active
     job_obj = await db_adapter.get_job(job_id)
@@ -269,19 +245,12 @@ async def _finalize_sanity_check(db_adapter: DBAdapterClient, job_id: int, task_
         logger.error("[_finalize_sanity_check] finalize_sanity_check call failed")
 
 
-
 ###############################################################################
 # create_bids_and_tasks wrapper used in re-creation
 ###############################################################################
 async def submit_task_with_persist(db_adapter, job_id: int, iteration_number: int, params_str: str):
-    """
-    Create a DB task + bid via create_bids_and_tasks. On success, store
-    `last_task_creation_time` in job.master_state_json so we can measure inactivity.
-    """
-    import datetime
-
     start_time = datetime.datetime.now()
-    max_duration = datetime.timedelta(seconds=300)  # 300s => 5 minutes
+    max_duration = datetime.timedelta(seconds=300)  # 5 minutes
     retry_delay = 1
     attempt = 0
 
@@ -289,26 +258,44 @@ async def submit_task_with_persist(db_adapter, job_id: int, iteration_number: in
         attempt += 1
         elapsed = datetime.datetime.now() - start_time
         if elapsed >= max_duration:
-            raise RuntimeError(f"[submit_task_with_persist] no solver assigned within {max_duration}.")
+            raise RuntimeError(
+                f"[submit_task_with_persist] no solver assigned within {max_duration}."
+            )
 
         try:
-            # Basic example: pass a fixed price=1
-            created_items = await db_adapter.create_bids_and_tasks(
-                job_id, 1, 1, params_str, None
-            )
-            if created_items and len(created_items) > 0:
+            created = await db_adapter.create_bids_and_tasks(job_id, 1, 1, params_str, None)
+            # If a list is returned instead of a dict, wrap it in a dictionary.
+            if isinstance(created, list):
+                created = {"created_items": created}
+
+            if not created:
+                logger.error(
+                    f"[submit_task_with_persist] attempt #{attempt}, create_bids_and_tasks returned None."
+                )
+            elif not isinstance(created, dict):
+                logger.error(
+                    f"[submit_task_with_persist] attempt #{attempt}, got type={type(created)} instead of dict. Value={created}."
+                )
+            elif "created_items" not in created:
+                logger.error(
+                    f"[submit_task_with_persist] attempt #{attempt}, no 'created_items' key in returned dict; keys={list(created.keys())}."
+                )
+            elif not created["created_items"]:
+                logger.error(
+                    f"[submit_task_with_persist] attempt #{attempt}, 'created_items' is empty; Value={created}."
+                )
+            else:
                 state_data = await db_adapter.get_master_state_for_job(job_id)
                 state_data["last_task_creation_time"] = time.time()
                 await db_adapter.update_master_state_for_job(job_id, state_data)
-                return created_items
-            else:
-                logger.error("[submit_task_with_persist] create_bids_and_tasks returned empty.")
-                return None
+                return created
 
         except Exception as e:
             logger.error(f"[submit_task_with_persist] attempt #{attempt}, error => {e}")
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(2 * retry_delay, 60)
+
+        await asyncio.sleep(retry_delay)
+        retry_delay = min(2 * retry_delay, 60)
+
 
 
 ###############################################################################

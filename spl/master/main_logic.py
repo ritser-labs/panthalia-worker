@@ -31,7 +31,6 @@ from .iteration_logic import (
 from .replicate import (
     spawn_replica_task,
     manage_replication_chain,
-    compare_results_locally,
     should_replicate
 )
 
@@ -190,21 +189,25 @@ class Master:
                         "input_url": iteration_state["input_url"],
                         **learning_params
                     })
-                    created = await submit_task_with_persist(
+
+                    created_response = await submit_task_with_persist(
                         self.db_adapter,
                         self.job_id,
                         iteration_number,
                         params_str
                     )
-                    if not created or len(created) < 1:
-                        self.logger.error(f"[main_iteration] Iter={iteration_number} => failed to create tasks.")
+                    if not created_response:
+                        self.logger.error(
+                            f"[main_iteration] Iter={iteration_number} => failed to create tasks."
+                        )
                         iteration_state["stage"] = "done"
                         await save_iteration_state(
                             self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state
                         )
                         break
 
-                    iteration_state["task_id_info"] = created
+                    # ---- FIX: Store only the actual list of items into 'task_id_info' ----
+                    iteration_state["task_id_info"] = created_response["created_items"]
 
                 iteration_state["stage"] = "pending_wait_for_result"
                 await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
@@ -219,6 +222,7 @@ class Master:
                     await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
                     break
 
+                # original_task_id => the first item from tasks_info
                 original_task_id = tasks_info[0]["task_id"]
                 final_result = await wait_for_result(
                     db_adapter=self.db_adapter,
