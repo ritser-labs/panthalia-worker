@@ -68,6 +68,7 @@ class LanguageDataLoader:
         self._filler_task = None  # the background filler
         self._token_pair_buffer = []  # accumulates token pairs until we form a batch
         self.executor = None  # for run_in_executor
+        random.seed(0)
 
     async def _buffer_filler(self):
         """

@@ -21,6 +21,13 @@ import json
 class ModelAdapter(ABC):
     def __init__(self, model_config):
         self.model_config = model_config
+        
+        SEED_VALUE = 0
+        torch.manual_seed(SEED_VALUE)
+        torch.cuda.manual_seed(SEED_VALUE)
+        torch.cuda.manual_seed_all(SEED_VALUE)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     @abstractmethod
     def get_dummy_input(self):

@@ -34,7 +34,6 @@ upload_lock = AsyncQueuedLock()
 
 task_queue = TaskQueue()
 
-
 # -------------------------------------------------------------------------
 # Helper to quickly fetch the SOT's *current* version
 # -------------------------------------------------------------------------
@@ -48,7 +47,6 @@ async def fetch_current_sot_version(sot_url: str) -> int:
                 return 0
             data = await resp.json()
             return data.get("version_number", 0)
-
 
 # -------------------------------------------------------------------------
 # Helper that loops briefly until SOT version > local_version
@@ -69,16 +67,11 @@ async def wait_for_version_advance(local_version: int, sot_url: str,
     )
     return local_version
 
-
 async def get_ask_price():
     subnet_db = await db_adapter.get_subnet(args.subnet_id)
     return subnet_db.target_price
 
-
 async def deposit_stake():
-    """
-    Possibly create ask orders up to args.max_stakes if fewer exist.
-    """
     global concurrent_tasks_counter
     if (await task_queue.queue_length() + concurrent_tasks_counter) > args.max_tasks_handling:
         logger.debug("Too many tasks being processed. Not depositing more stakes.")
@@ -90,7 +83,6 @@ async def deposit_stake():
     for _ in range(args.max_stakes - num_orders):
         price = await get_ask_price()
         await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, price, None)
-
 
 async def handle_task(task, time_invoked):
     global last_handle_event_timestamp
@@ -133,9 +125,8 @@ async def handle_task(task, time_invoked):
     # Attempt to process the queue
     await process_tasks()
 
-
 # -------------------------------------------------------------------------
-# get_diffs_in_range (unchanged)
+# get_diffs_in_range
 # -------------------------------------------------------------------------
 async def get_diffs_in_range(start_version, end_time, sot_url):
     endpoint = (
@@ -156,15 +147,13 @@ async def get_diffs_in_range(start_version, end_time, sot_url):
             used_end_time = data.get("used_end_time", start_version)
             return diffs_list, used_end_time
 
-
 # -------------------------------------------------------------------------
 # submit_solution
 # -------------------------------------------------------------------------
 async def submit_solution(task_id, result: dict, final: bool):
     """
     Call DB to store partial result => final=bool
-    This triggers SOT's update_state internally (via _update_sot_with_partial if your code
-    is hooking in that method).
+    This triggers SOT's update_state internally (via _update_sot_with_partial).
     """
     try:
         logger.info(f"Submitting result for task {task_id}, final={final}: {result}")
@@ -174,7 +163,6 @@ async def submit_solution(task_id, result: dict, final: bool):
     except Exception as e:
         logger.error(f"Error in submit_solution for task {task_id}: {e}", exc_info=True)
         raise
-
 
 # -------------------------------------------------------------------------
 # The main processing loop
@@ -220,20 +208,17 @@ async def process_tasks():
                     plugin = await get_plugin(next_task['plugin_id'], db_adapter)
 
                     replicate_sequence = task_params.get("replicate_sequence", [])
-                    # Possibly the user includes "original_task_id" if you want to fetch from that:
-                    # e.g. "original_task_id": 123
-                    # This example uses the parent's job_id or replicate chain in your system. 
-                    # Adjust to your real approach:
                     original_task_id = task_params.get("original_task_id", None)
 
                     if replicate_sequence and original_task_id is not None:
                         # ------------------------------------------------------------------
-                        # *** REPLICATION PATH ***
-                        # We compare each newly computed gradient to the original solver's
-                        # stored gradient for the same version number => if mismatch => fail.
+                        # REPLICATION PATH: 
+                        # replicate ALWAYS references the top solver (original_task_id),
+                        # but aggregator versions might be new => we "back-fill" partials
+                        # in the top solver's row for each version in replicate_sequence.
                         # ------------------------------------------------------------------
                         logger.info(f"[process_tasks] Task {task_id} => REPLICA for versions={replicate_sequence}")
-
+                        
                         await plugin.call_submodule(
                             'model_adapter',
                             'load_input_tensor',
@@ -241,25 +226,23 @@ async def process_tasks():
                         )
                         del predownloaded_data
 
-                        local_version = None
                         difference_threshold = 1e-3
                         mismatch_found = False
                         debug_steps_info = {}
 
                         for idx, ver in enumerate(replicate_sequence):
-                            # Download & apply param up to version=ver
+                            # (A) Download aggregator diffs from the previous version to `ver`.
                             if idx == 0:
+                                # Use "force_version_number" param to fetch exactly ver from SOT
                                 forced_params = {"force_version_number": ver}
-                                lv = await plugin.call_submodule(
+                                local_version = await plugin.call_submodule(
                                     'model_adapter',
                                     'initialize_tensor',
                                     TENSOR_NAME,
                                     sot_url,
                                     forced_params
                                 )
-                                local_version = lv
                             else:
-                                # apply diffs from replicate_sequence[idx-1] up to ver
                                 start_v = replicate_sequence[idx-1]
                                 diffs, used_end = await get_diffs_in_range(start_v, ver, sot_url)
                                 for diff_url in diffs:
@@ -276,7 +259,7 @@ async def process_tasks():
                                     await plugin.call_submodule('model_adapter', 'apply_diff', diff_tensor)
                                 local_version = ver
 
-                            # Now compute gradient for this step
+                            # (B) Now compute gradient
                             encoded_grad, loss_val = await plugin.call_submodule(
                                 'model_adapter',
                                 'execute_step',
@@ -284,32 +267,39 @@ async def process_tasks():
                                 idx
                             )
 
-                            # Next, fetch the original solver’s gradient for the same version
+                            # (C) "Back-fill" that aggregator version in the top solver's row
+                            #     so nested replicas won't get "missing_original".
+                            grads_url = await upload_tensor(encoded_grad, 'grads', sot_url)
+                            partial_for_top_solver = {
+                                "version_number": ver,
+                                "result_url": grads_url,
+                                "loss": loss_val
+                            }
+                            # "final" only on last iteration
+                            final_for_parent = (idx == len(replicate_sequence) - 1)
+                            await submit_solution(original_task_id, partial_for_top_solver, final_for_parent)
+
+                            # (D) Compare with top solver's partial for version=ver
                             try:
                                 original_grad = await fetch_original_step_grad_from_db(
                                     original_task_id, ver, plugin
                                 )
                             except Exception as ex:
-                                logger.error(f"[replica] Could not fetch original grad for ver={ver}: {ex}",
+                                logger.error(f"[replica] Could not fetch top solver grad ver={ver}: {ex}",
                                              exc_info=True)
-                                original_grad = None
-
-                            if original_grad is not None:
-                                # decode the new grad as a Tensor
-                                new_grad_decoded = await plugin.call_submodule(
-                                    'model_adapter', 'decode_diff', encoded_grad
-                                )
-                                diff_norm = (new_grad_decoded - original_grad).norm().item()
-                                debug_steps_info[f"ver_{ver}_diff"] = diff_norm
-                                logger.info(f"[replica] ver={ver}, difference_norm={diff_norm:.6f}")
-
-                                if diff_norm > difference_threshold:
-                                    mismatch_found = True
-                                    break
-                            else:
-                                # If we cannot fetch original => treat it as mismatch or decide a policy
                                 mismatch_found = True
                                 debug_steps_info[f"ver_{ver}_diff"] = "missing_original"
+                                break
+
+                            new_grad_decoded = await plugin.call_submodule(
+                                'model_adapter', 'decode_diff', encoded_grad
+                            )
+                            diff_norm = (new_grad_decoded - original_grad).norm().item()
+                            debug_steps_info[f"ver_{ver}_diff"] = diff_norm
+                            logger.info(f"[replica] ver={ver}, difference_norm={diff_norm:.6f}")
+
+                            if diff_norm > difference_threshold:
+                                mismatch_found = True
                                 break
 
                         final_replica_status = (not mismatch_found)
@@ -317,20 +307,19 @@ async def process_tasks():
                             "replica_status": final_replica_status,
                             "debug_info": debug_steps_info
                         }
-                        # Submit once, as final
+                        # store final replicate status in *this replicate's* row
                         await submit_solution(task_id, final_result, final=True)
 
                     elif replicate_sequence:
-                        # If replicate_sequence is set but no original_task_id => log or fallback
+                        # replicate_sequence set but no original_task_id => fallback
                         logger.warning("[process_tasks] replicate_sequence set but no original_task_id => skipping comparison.")
-                        # Just do normal logic or skip
                         final_result = {"replica_status": False, "error": "No original_task_id provided"}
                         await submit_solution(task_id, final_result, final=True)
 
                     else:
-                        # ------------------------------------------------------------------
-                        # *** NORMAL SOLVER PATH ***
-                        # ------------------------------------------------------------------
+                        # -------------------------
+                        # NORMAL SOLVER PATH
+                        # -------------------------
                         version_number = await plugin.call_submodule(
                             'model_adapter',
                             'initialize_tensor',
@@ -349,28 +338,33 @@ async def process_tasks():
 
                         steps = task_params['steps']
                         for step_idx in range(steps):
+                            old_local_version = await fetch_current_sot_version(sot_url)
+                            # compute gradient
                             encoded_grad, loss_val = await plugin.call_submodule(
                                 'model_adapter',
                                 'execute_step',
                                 task_params,
                                 step_idx
                             )
-                            local_version = await fetch_current_sot_version(sot_url)
                             grads_url = await upload_tensor(encoded_grad, 'grads', sot_url)
 
+                            # aggregator => next version
+                            new_global_version = await wait_for_version_advance(old_local_version, sot_url)
+
                             partial_result = {
-                                "version_number": local_version,
+                                "version_number": new_global_version,
                                 "result_url": grads_url,
                                 "loss": loss_val
                             }
                             is_final = (step_idx == steps - 1)
                             await submit_solution(task_id, partial_result, final=is_final)
 
-                            # Wait for next version
-                            new_global_version = await wait_for_version_advance(local_version, sot_url)
-                            if new_global_version > local_version:
+                            # now fetch diffs from old_local_version..new_global_version
+                            if new_global_version > old_local_version:
                                 new_diffs, used_end_time = await get_diffs_in_range(
-                                    start_version=local_version, end_time=None, sot_url=sot_url
+                                    start_version=old_local_version,
+                                    end_time=new_global_version,
+                                    sot_url=sot_url
                                 )
                                 for diff_url in new_diffs:
                                     full_diff_url = f"{sot_url}{diff_url}"
@@ -389,8 +383,7 @@ async def process_tasks():
                                     await plugin.call_submodule(
                                         'model_adapter', 'apply_diff', diff_tensor
                                     )
-                                    local_version += 1
-                                local_version = max(local_version, used_end_time)
+                                local_version = max(new_global_version, used_end_time)
 
                 finally:
                     await task_processing_lock.release()
@@ -421,17 +414,15 @@ async def process_tasks():
         async with concurrent_tasks_counter_lock:
             concurrent_tasks_counter -= 1
 
-
 # -------------------------------------------------------------------------
-# fetch_original_step_grad_from_db: new helper to retrieve & decode the
-# original solver's partial gradient that has version_number == `ver`.
+# fetch_original_step_grad_from_db
 # -------------------------------------------------------------------------
 async def fetch_original_step_grad_from_db(original_task_id: int,
                                            ver: int,
                                            plugin) -> torch.Tensor:
     """
-    1) Load the "original" solver Task from DB.
-    2) Check task.result JSON for an entry with partial_data["version_number"] == `ver`.
+    1) Load the "original" solver Task from DB (the top solver).
+    2) Check task.result JSON for partial_data["version_number"] == `ver`.
     3) Download partial_data["result_url"], decode to a Tensor, and return it.
     Raises Exception if not found or on any error.
     """
@@ -442,8 +433,6 @@ async def fetch_original_step_grad_from_db(original_task_id: int,
     if not orig_task.result:
         raise RuntimeError(f"Original solver Task {original_task_id} has no stored results.")
 
-    # It's stored in JSON under timestamp keys:
-    # e.g.  { "1686327013": { "version_number":12, "result_url":"..." }, ... }
     partial_dict = orig_task.result
     matched_url = None
     for timestamp_key, partial_data in partial_dict.items():
@@ -454,14 +443,12 @@ async def fetch_original_step_grad_from_db(original_task_id: int,
 
     if not matched_url:
         raise RuntimeError(
-            f"No partial result with version_number={ver} found in original solver task={original_task_id}."
+            f"No partial result with version_number={ver} found in top solver task={original_task_id}."
         )
 
-    # Download the original grad
     raw_data = await download_file(matched_url, download_type='tensor', chunk_timeout=300)
     if not isinstance(raw_data, dict):
         raise RuntimeError(f"Original gradient partial not a dict => {matched_url}")
 
-    # Decode to a Tensor
     decoded = await plugin.call_submodule('model_adapter', 'decode_diff', raw_data)
     return decoded
