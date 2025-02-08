@@ -53,7 +53,7 @@ class TaskStatus(Enum):
     Checking = "Checking"
     ResolvedCorrect = "ResolvedCorrect"
     ResolvedIncorrect = "ResolvedIncorrect"
-    SanityCheckPending = "SanityCheckPending"
+    SolutionSubmitted = "SolutionSubmitted"
     ReplicationPending = "ReplicationPending"
 
 class Vote(Enum):

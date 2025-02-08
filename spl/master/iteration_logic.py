@@ -75,7 +75,7 @@ async def remove_iteration_entry(db_adapter, job_id: int, state_key: str, iterat
 async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_task_id: int):
     """
     Poll the original solver Task until it is final or forcibly removed.
-    If it hits SanityCheckPending => local check => replicate => ...
+    If it hits SolutionSubmitted => local check => replicate => ...
     The final correctness is decided by manage_replication_chain or local pass/fail.
     """
     from ..models import TaskStatus
@@ -91,8 +91,8 @@ async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_tas
         if task_obj.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
             return task_obj.result
 
-        # 3) If not yet SanityCheckPending => poll
-        if task_obj.status not in [TaskStatus.SanityCheckPending.name, TaskStatus.ReplicationPending.name]:
+        # 3) If not yet SolutionSubmitted => poll
+        if task_obj.status not in [TaskStatus.SolutionSubmitted.name, TaskStatus.ReplicationPending.name]:
             await asyncio.sleep(0.5)
             continue
 

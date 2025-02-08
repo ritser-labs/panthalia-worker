@@ -20,7 +20,7 @@ DEFAULT_REPLICATE_PROB = 0.35
 #       "chain_current_task_id": <string or None>,    # storing as str(task_id)
 #       "final_decision": True / False / None,
 #       "child_outcomes": {
-#           "1234": True/False/"missing_replica_status"/"task_missing"/"in_progress"/None,
+#           "1234": True/False/"missing_is_original_valid"/"task_missing"/"in_progress"/None,
 #           "9999": ...
 #       }
 #   }
@@ -206,12 +206,12 @@ async def _monitor_replicate_child(db_adapter, child_task_id: int):
     Checks the replicate child's status and returns one of:
         ('child_says_match', child_task_id)
         ('child_says_mismatch', child_task_id)
-        ('missing_replica_status', child_task_id)
+        ('missing_is_original_valid', child_task_id)
         ('in_progress', child_task_id)
         ('task_missing', child_task_id)
 
-    We'll interpret 'child_says_match' => child posted final replica_status=True
-    We'll interpret 'child_says_mismatch' => final replica_status=False
+    We'll interpret 'child_says_match' => child posted final is_original_valid=True
+    We'll interpret 'child_says_mismatch' => final is_original_valid=False
     """
     child_task = await db_adapter.get_task(child_task_id)
     if not child_task:
@@ -222,21 +222,21 @@ async def _monitor_replicate_child(db_adapter, child_task_id: int):
         TaskStatus.SelectingSolver.name,
         TaskStatus.SolverSelected.name,
         TaskStatus.Checking.name,
-        TaskStatus.SanityCheckPending.name,
+        TaskStatus.SolutionSubmitted.name,
         TaskStatus.ReplicationPending.name
     ):
         if not child_task.result:
             return ('in_progress', child_task_id)
 
-        # There's partial data, check if it has final "replica_status"
+        # There's partial data, check if it has final "is_original_valid"
         partials_dict = child_task.result
         latest_key = max(partials_dict.keys(), key=int)
         final_partial = partials_dict[latest_key]
-        if 'replica_status' not in final_partial:
-            return ('missing_replica_status', child_task_id)
+        if 'is_original_valid' not in final_partial:
+            return ('missing_is_original_valid', child_task_id)
         else:
             # child claims match or mismatch
-            is_match = bool(final_partial['replica_status'])
+            is_match = bool(final_partial['is_original_valid'])
             return (
                 ('child_says_match', child_task_id)
                 if is_match
@@ -250,9 +250,9 @@ async def _monitor_replicate_child(db_adapter, child_task_id: int):
         partials_dict = child_task.result
         latest_key = max(partials_dict.keys(), key=int)
         final_partial = partials_dict[latest_key]
-        if 'replica_status' not in final_partial:
-            return ('missing_replica_status', child_task_id)
-        is_match = bool(final_partial['replica_status'])
+        if 'is_original_valid' not in final_partial:
+            return ('missing_is_original_valid', child_task_id)
+        is_match = bool(final_partial['is_original_valid'])
         return (
             ('child_says_match', child_task_id)
             if is_match
@@ -307,19 +307,19 @@ async def _finalize_chain(db_adapter, plugin, job_id, original_task_id, final_re
             # forcibly removed or never posted => skip or finalize => often "INCORRECT"
             continue
 
-        if outcome_val in ('missing_replica_status', 'in_progress'):
+        if outcome_val in ('missing_is_original_valid', 'in_progress'):
             # no final boolean => finalize => incorrect
             await db_adapter.finalize_sanity_check(int(c_id_str), False)
-            logger.info(f"[_finalize_chain] Child={c_id_str} => INCORRECT (missing final replica_status).")
+            logger.info(f"[_finalize_chain] Child={c_id_str} => INCORRECT (missing final is_original_valid).")
 
         elif outcome_val is True:
-            # child posted replica_status=True => correct only if final_replica_says==True
+            # child posted is_original_valid=True => correct only if final_replica_says==True
             is_correct = (final_replica_says is True)
             await db_adapter.finalize_sanity_check(int(c_id_str), is_correct)
             logger.info(f"[_finalize_chain] Child={c_id_str} => {'CORRECT' if is_correct else 'INCORRECT'}.")
 
         elif outcome_val is False:
-            # child posted replica_status=False => correct only if final_replica_says==False
+            # child posted is_original_valid=False => correct only if final_replica_says==False
             is_correct = (final_replica_says is False)
             await db_adapter.finalize_sanity_check(int(c_id_str), is_correct)
             logger.info(f"[_finalize_chain] Child={c_id_str} => {'CORRECT' if is_correct else 'INCORRECT'}.")
@@ -350,7 +350,7 @@ async def manage_replication_chain(db_adapter, plugin, job_id, original_task_id,
       - If child says "match" => replicate again or finalize => parent's CORRECT
       - If child says "mismatch" => replicate again or finalize => parent's INCORRECT
       - If forcibly removed => parent's CORRECT
-      - If partial is "missing_replica_status" => replicate again or default => parent's CORRECT
+      - If partial is "missing_is_original_valid" => replicate again or default => parent's CORRECT
     """
     # Fetch the chain-state from the master JSON
     chain_state = await _get_replication_chain_state(db_adapter, job_id, original_task_id)
@@ -424,7 +424,7 @@ async def manage_replication_chain(db_adapter, plugin, job_id, original_task_id,
                 await _finalize_chain(db_adapter, plugin, job_id, original_task_id, False, child_outcomes)
                 return "chain_fail"
 
-        elif outcome == 'missing_replica_status':
+        elif outcome == 'missing_is_original_valid':
             # child didn't provide a final status => replicate again or finalize => parent's correct
             await _mark_task_replication_pending(db_adapter, c_id_int)
             new_id = await spawn_replica_task(db_adapter, c_id_int)

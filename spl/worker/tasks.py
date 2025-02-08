@@ -302,9 +302,9 @@ async def process_tasks():
                                 mismatch_found = True
                                 break
 
-                        final_replica_status = (not mismatch_found)
+                        final_is_original_valid = (not mismatch_found)
                         final_result = {
-                            "replica_status": final_replica_status,
+                            "is_original_valid": final_is_original_valid,
                             "debug_info": debug_steps_info
                         }
                         # store final replicate status in *this replicate's* row
@@ -313,7 +313,7 @@ async def process_tasks():
                     elif replicate_sequence:
                         # replicate_sequence set but no original_task_id => fallback
                         logger.warning("[process_tasks] replicate_sequence set but no original_task_id => skipping comparison.")
-                        final_result = {"replica_status": False, "error": "No original_task_id provided"}
+                        final_result = {"is_original_valid": False, "error": "No original_task_id provided"}
                         await submit_solution(task_id, final_result, final=True)
 
                     else:

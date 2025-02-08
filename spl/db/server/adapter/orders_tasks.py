@@ -410,7 +410,7 @@ class DBAdapterOrdersTasksMixin:
     ) -> dict:
         """
         Store or merge a JSON partial_result into Task.result in the DB.
-        If final=True, mark the Task status as SanityCheckPending so the
+        If final=True, mark the Task status as SolutionSubmitted so the
         next phase can decide correctness or replication.
 
         Returns:
@@ -465,9 +465,9 @@ class DBAdapterOrdersTasksMixin:
             # or if your column is a string field, do:
             #     task.result = json.dumps(current_json)
 
-            # 4) If final => go to SanityCheckPending
+            # 4) If final => go to SolutionSubmitted
             if final:
-                task.status = TaskStatus.SanityCheckPending
+                task.status = TaskStatus.SolutionSubmitted
                 task.time_solved = datetime.now(timezone.utc)
 
             await self._update_sot_with_partial(task_id, partial_data)
@@ -575,9 +575,9 @@ class DBAdapterOrdersTasksMixin:
             return True
 
 
-    async def finalize_sanity_check(self, task_id: int, is_valid: bool, force: bool = False):
+    async def finalize_sanity_check(self, task_id: int, is_valid: bool):
         """
-        Moves a task from SanityCheckPending => ResolvedCorrect/ResolvedIncorrect, etc.
+        Moves a task from SolutionSubmitted => ResolvedCorrect/ResolvedIncorrect, etc.
         Then calls handle_correct_resolution_scenario or handle_incorrect_resolution_scenario
         to adjust holds, fees, etc.
         """
@@ -598,8 +598,8 @@ class DBAdapterOrdersTasksMixin:
                 raise ValueError("Task not found.")
 
             # If we’re not forcing, ensure it’s in the correct status
-            if not force and task.status not in [TaskStatus.SanityCheckPending, TaskStatus.ReplicationPending]:
-                raise ValueError(f"Task {task_id} must be in SanityCheckPending or ReplicationPending to finalize.")
+            if task.status not in [TaskStatus.SolutionSubmitted, TaskStatus.ReplicationPending]:
+                raise ValueError(f"Task {task_id} must be in SolutionSubmitted or ReplicationPending to finalize.")
             
             if is_valid:
                 task.status = TaskStatus.ResolvedCorrect
@@ -787,7 +787,7 @@ class DBAdapterOrdersTasksMixin:
             # STEP 2 (continued): Finalize overdue tasks as incorrect
             for task_id in tasks_to_fail:
                 try:
-                    await self.finalize_sanity_check(task_id, is_valid=False, force=True)
+                    await self.finalize_sanity_check(task_id, is_valid=False)
                     logger.info(f"[check_and_cleanup_holds] Finalized task {task_id} as incorrect due to solver timeout.")
                 except Exception as e:
                     logger.error(f"[check_and_cleanup_holds] Failed to finalize task {task_id} as incorrect: {e}")

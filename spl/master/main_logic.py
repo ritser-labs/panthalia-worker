@@ -264,7 +264,7 @@ class Master:
 
     async def finalize_sanity_check(self, task_id: int, is_valid: bool):
         """
-        If we see a task is 'SanityCheckPending', we finalize it as correct/incorrect.
+        If we see a task is 'SolutionSubmitted', we finalize it as correct/incorrect.
         """
         url = f"{self.db_adapter.base_url}/finalize_sanity_check"
         payload = {"task_id": task_id, "is_valid": is_valid}
