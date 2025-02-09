@@ -11,8 +11,8 @@ class StandardPlugin:
         dataset,
         tokenizer,
         num_steps,
-        examples_per_step,
-        steps_per_accumulation,
+        examples_per_accumulation,
+        accumulations_per_step,
         outer_max_lr=0.7,
         outer_min_lr=0.7,
         outer_weight_decay=0.00,
@@ -29,9 +29,9 @@ class StandardPlugin:
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.num_steps = num_steps
-        self.batch_size = num_steps * examples_per_step
-        self.examples_per_step = examples_per_step
-        self.steps_per_accumulation = steps_per_accumulation
+        self.batch_size = num_steps * examples_per_accumulation
+        self.examples_per_accumulation = examples_per_accumulation
+        self.accumulations_per_step = accumulations_per_step
         self.outer_max_lr = outer_max_lr
         self.outer_min_lr = outer_min_lr
         self.outer_weight_decay = outer_weight_decay
@@ -45,7 +45,7 @@ class StandardPlugin:
     def get_master_learning_hyperparameters(self):
         return {
             'steps': self.num_steps,
-            'steps_per_accumulation': self.steps_per_accumulation,
+            'accumulations_per_step': self.accumulations_per_step,
             'tensor_version_interval': self.tensor_version_interval,
             'expected_worker_time': self.expected_worker_time,
             'chunk_shape': self.chunk_shape,

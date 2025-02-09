@@ -21,7 +21,10 @@ import json
 class ModelAdapter(ABC):
     def __init__(self, model_config):
         self.model_config = model_config
+        self.enforce_reproducibility()
         
+    
+    def enforce_reproducibility(self):
         SEED_VALUE = 0
         torch.manual_seed(SEED_VALUE)
         torch.cuda.manual_seed(SEED_VALUE)
@@ -209,13 +212,14 @@ class StandardModelAdapter(ModelAdapter):
         (or just the entire batch if you prefer).
         Then chunked-DCT encode the gradient and return (encoded_grad_dict, loss_value).
         """
+        self.enforce_reproducibility()
         if self._cached_param is None:
             raise ValueError("No param is set. Did you call initialize_tensor first?")
 
         # Number of major steps, used for splitting input among steps
         steps = task_params.get('steps', 1)
-        # steps_per_accumulation is optional
-        accum_steps = task_params.get('steps_per_accumulation', 1)
+        # accumulations_per_step is optional
+        accum_steps = task_params.get('accumulations_per_step', 1)
 
         # If replicate_sequence is used, step_idx might be beyond the normal # of steps,
         # but we only use a single chunk of the data. For simplicity, keep the same logic

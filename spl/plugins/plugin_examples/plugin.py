@@ -29,15 +29,15 @@ model_params = GPTConfig(
 model_config = NanoGPTConfig(tokenizer, model_params)
 model_adapter = NanoGPTModelAdapter(model_config)
 
-STEPS_PER_ACCUMULATION = 2
-NUM_STEPS = 2 * STEPS_PER_ACCUMULATION # small number for testing
-EXAMPLES_PER_STEP = 64
+ACCUMULATIONS_PER_STEP = 1
+NUM_STEPS = 2 # small number for testing
+EXAMPLES_PER_ACCUMULATION = 64
 
 dataset = ShakespeareDataLoader(
     model_config,
     buffer_size=16,
     max_seq_len=model_params.block_size,
-    batch_size=NUM_STEPS * EXAMPLES_PER_STEP
+    batch_size=NUM_STEPS * EXAMPLES_PER_ACCUMULATION * ACCUMULATIONS_PER_STEP,
 )
 
 ################################################################
@@ -61,8 +61,8 @@ exported_plugin = StandardPlugin(
     dataset,               # dataset
     tokenizer,
     num_steps=NUM_STEPS,
-    examples_per_step=EXAMPLES_PER_STEP,
-    steps_per_accumulation=STEPS_PER_ACCUMULATION,
+    examples_per_accumulation=EXAMPLES_PER_ACCUMULATION,
+    accumulations_per_step=ACCUMULATIONS_PER_STEP,
     outer_max_lr=1e-4,
     outer_min_lr=1e-4,
     outer_weight_decay=0.01,
