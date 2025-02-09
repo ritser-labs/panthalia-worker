@@ -6,6 +6,7 @@ from sqlalchemy import (
     Column, Integer, String, ForeignKey, Text, DateTime, Enum, Float, Boolean, JSON
 )
 from sqlalchemy.orm import relationship
+from sqlalchemy.ext.mutable import MutableDict
 from .enums import (
     ServiceType, PermType, OrderType, AccountTxnType, HoldType,
     CreditTxnType, EarningsTxnType, PlatformRevenueTxnType, WithdrawalStatus,
@@ -81,7 +82,7 @@ class Task(TimestampMixin, Serializable):
     job_iteration = Column(Integer, nullable=False)
     status = Column(Enum(TaskStatus), nullable=False)
     params = Column(String, nullable=False)
-    result = Column(JSON, nullable=True)
+    result = Column(MutableDict.as_mutable(JSON), nullable=True)
     time_solved = Column(DateTime, nullable=True)
     time_solver_selected = Column(DateTime, nullable=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=True)

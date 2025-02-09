@@ -9,7 +9,7 @@ from ..models import TaskStatus
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REPLICATE_PROB = 0.35
+DEFAULT_REPLICATE_PROB = 1.0 #0.35
 
 ###############################################################################
 # Master-state persistence for replication chains
@@ -122,7 +122,7 @@ async def spawn_replica_task(db_adapter, parent_task_id, replicate_price=1) -> i
                 if isinstance(original_task.result, dict)
                 else json.loads(original_task.result)
             )
-            for tstamp_key in sorted(partials_dict.keys(), key=int):
+            for tstamp_key in sorted(partials_dict.keys(), key=float):
                 ver_num = partials_dict[tstamp_key].get("version_number")
                 if isinstance(ver_num, int):
                     replicate_versions.append(ver_num)
@@ -139,8 +139,7 @@ async def spawn_replica_task(db_adapter, parent_task_id, replicate_price=1) -> i
         original_params = {}
 
     # Insert replicate info
-    if replicate_versions:
-        original_params["replicate_sequence"] = replicate_versions
+    original_params["replicate_sequence"] = replicate_versions
     original_params["original_task_id"] = original_task.id
 
     new_params_str = json.dumps(original_params)

@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import select, update, desc, func, or_, and_
+from sqlalchemy import select, update, desc, func, or_, inspect
 from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List, Dict
@@ -25,6 +25,7 @@ from sqlalchemy.orm import selectinload
 from ....models import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 PLATFORM_FEE_PERCENTAGE = 0.1
 DISPUTE_PAYOUT_DELAY_DAYS = 1
 
@@ -418,6 +419,7 @@ class DBAdapterOrdersTasksMixin:
         """
 
         # Attempt to parse `partial_result` as JSON:
+        logger.debug(f"submit_partial_result => task_id={task_id}, final={final}")
         if isinstance(partial_result, str):
             try:
                 partial_data = json.loads(partial_result)
@@ -439,41 +441,32 @@ class DBAdapterOrdersTasksMixin:
             task = result.scalar_one_or_none()
             if not task:
                 raise ValueError(f"submit_partial_result => Task {task_id} not found.")
+            
+            if task.status != TaskStatus.SolverSelected:
+                raise ValueError(f"submit_partial_result => Task {task_id} is not in SolverSelected status.")
 
             # 2) Merge new partial_data into the existing Task.result field (JSON).
-            current_json = {}
-            if task.result:
-                try:
-                    if isinstance(task.result, dict):
-                        current_json = task.result
-                    else:
-                        current_json = json.loads(task.result)
-                except Exception:
-                    # If the existing .result column is invalid JSON, we can either
-                    # raise an error or just overwrite it. Here, we overwrite for safety:
-                    current_json = {}
 
-            # Example: store partial_data under a timestamp key
-            # or simply append if you want an array.
-            # Here, we store them by integer timestamp:
             import time
-            timestamp_key = str(int(time.time()))
-            current_json[timestamp_key] = partial_data
-
-            # 3) Update the Task.result column
-            task.result = current_json  # if your column is JSON-type in SQLAlchemy
-            # or if your column is a string field, do:
-            #     task.result = json.dumps(current_json)
-
+            timestamp_key = str(time.time())
+            current_dict = task.result or {}
+            current_dict[timestamp_key] = partial_data
+            task.result = dict(current_dict)
+            
             # 4) If final => go to SolutionSubmitted
             if final:
                 task.status = TaskStatus.SolutionSubmitted
                 task.time_solved = datetime.now(timezone.utc)
 
-            await self._update_sot_with_partial(task_id, partial_data)
-
             session.add(task)
             await session.commit()
+        
+        # TODO: make worker retry if too late for submit_partial_result
+        try:
+            await self._update_sot_with_partial(task_id, partial_data)
+        except Exception as ex:
+            logger.error(f"submit_partial_result => SOT update failed: {ex}")
+
 
         return {"success": True}
 
@@ -598,8 +591,8 @@ class DBAdapterOrdersTasksMixin:
                 raise ValueError("Task not found.")
 
             # If we’re not forcing, ensure it’s in the correct status
-            if task.status not in [TaskStatus.SolutionSubmitted, TaskStatus.ReplicationPending]:
-                raise ValueError(f"Task {task_id} must be in SolutionSubmitted or ReplicationPending to finalize.")
+            if task.status in [TaskStatus.ResolvedCorrect, TaskStatus.ResolvedIncorrect]:
+                raise ValueError(f"Task {task_id} must not be resolved to finalize.")
             
             if is_valid:
                 task.status = TaskStatus.ResolvedCorrect
