@@ -9,7 +9,7 @@ from ..models import TaskStatus
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REPLICATE_PROB = 1.0 #0.35
+DEFAULT_REPLICATE_PROB = 0.35
 
 ###############################################################################
 # Master-state persistence for replication chains
