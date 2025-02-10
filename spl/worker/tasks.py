@@ -374,10 +374,7 @@ async def process_tasks():
                             grads_url = await upload_tensor(encoded_grad, 'grads', sot_url)
 
                             # aggregator => next version
-                            await wait_for_version_advance(
-                                await fetch_current_sot_version(sot_url),
-                                sot_url
-                            )
+                            version_before_submission = await fetch_current_sot_version(sot_url)
 
                             partial_result = {
                                 "version_number": local_version,
@@ -386,6 +383,10 @@ async def process_tasks():
                             }
                             is_final = (step_idx == steps - 1)
                             await submit_solution(task_id, partial_result, final=is_final)
+                            await wait_for_version_advance(
+                                version_before_submission,
+                                sot_url
+                            )
 
                             # now fetch diffs from local_version..new_global_version
                             new_diffs, end_time = await get_diffs_in_range(
