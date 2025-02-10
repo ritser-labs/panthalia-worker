@@ -286,18 +286,6 @@ async def process_tasks():
                                 task_params,
                                 step_idx
                             )
-
-                            # (C) "Back-fill" aggregator version in the top solver's row
-                            grads_url = await upload_tensor(encoded_grad, 'grads', sot_url)
-                            partial_for_top_solver = {
-                                "version_number": ver,
-                                "result_url": grads_url,
-                                "loss": loss_val
-                            }
-                            # final only on the last iteration
-                            final_for_parent = (step_idx == steps - 1)
-                            await submit_solution(original_task_id, partial_for_top_solver, final_for_parent)
-
                             # (D) Compare with the original solver’s partial for version=ver
                             try:
                                 original_grad = await fetch_original_step_grad_from_db(
