@@ -99,90 +99,72 @@ class DBAdapterHoldsMixin:
     async def charge_hold_for_price(self, session: AsyncSession, hold: Hold, price: int):
         """
         Partially or fully charge `price` from 'hold'.
-
-        If the hold type is NOT a credit card:
-         - If hold.used_amount < price, raise an error.
-         - Decrease used_amount by `price` and total_amount by `price`.
-         - Increase charged_amount by `price`.
-         - Mark hold as charged=True if total_amount goes to 0 or below.
-         - If total_amount < 0, raise ValueError (charged more than total).
-
-        If the hold type IS a credit card (HoldType.CreditCard):
-         - We treat the entire hold.total_amount as "charged" (zero out total_amount & used_amount).
-         - We only actually apply `price` to hold.charged_amount, i.e. hold.charged_amount += price.
-         - If leftover > 0 (i.e. hold.total_amount > price), we create a leftover hold of type=Credits 
-           in the same account for (hold.total_amount - price).
+        Integrates with Stripe capture for credit-card holds
+        by calling self.capture_stripe_payment_intent(...).
         """
 
-        from ....models.enums import HoldType
+        # Non-CC logic
         if hold.hold_type != HoldType.CreditCard:
-            # Original partial charge logic for non-credit-card holds
             if hold.used_amount < price:
                 raise ValueError(
                     f"Cannot finalize {price} from hold {hold.id}; used_amount={hold.used_amount} is too small."
                 )
-
             hold.used_amount -= price
             hold.charged_amount += price
             hold.total_amount -= price
-            hold.charged = True  # we consider it 'charged' at least partially
-
+            hold.charged = True
             if hold.total_amount < 0:
                 raise ValueError(f"Charged more than total_amount in hold {hold.id}")
 
             await session.flush()
+            return
 
-        else:
-            # Special logic for credit card holds: fully consume the hold
-            if hold.used_amount < price:
-                raise ValueError(
-                    f"Cannot finalize {price} from credit-card hold {hold.id}; "
-                    f"used_amount={hold.used_amount} is too small."
-                )
+        # ---------- CC hold logic ----------
+        leftover = hold.total_amount - price
+        if leftover < 0:
+            raise ValueError(
+                f"Cannot charge {price} from CC hold {hold.id}; total_amount={hold.total_amount} < price."
+            )
+        if hold.used_amount < price:
+            raise ValueError(
+                f"Cannot finalize {price} from CC hold {hold.id}; used_amount={hold.used_amount} is too small."
+            )
 
-            leftover = hold.total_amount - price
-            if leftover < 0:
-                raise ValueError(
-                    f"Cannot charge {price} from credit-card hold {hold.id} because total_amount={hold.total_amount} "
-                    "would go negative."
-                )
+        # (A) Actually capture on Stripe using the new function in DBAdapterStripeBillingMixin
+        # The same `self` here has the method `capture_stripe_payment_intent` because
+        # DBAdapterServer inherits from both DBAdapterHoldsMixin & DBAdapterStripeBillingMixin.
+        await self.capture_stripe_payment_intent(hold, price, session)
 
-            # Mark the original CC hold as fully consumed
-            hold.charged_amount += price
-            hold.total_amount = 0.0
-            hold.used_amount = 0.0
-            hold.charged = True
+        # (B) Now proceed with the local logic. We treat CC holds as fully consumed
+        hold.charged_amount += price
+        hold.total_amount = 0.0
+        hold.used_amount = 0.0
+        hold.charged = True
+        await session.flush()
 
-            await session.flush()
+        # (C) If leftover > 0 => create leftover Credits hold
+        if leftover > 0:
+            expiry_date = datetime.utcnow() + timedelta(days=365)
+            new_credits_hold = Hold(
+                account_id=hold.account_id,
+                user_id=hold.user_id,
+                hold_type=HoldType.Credits,
+                total_amount=leftover,
+                used_amount=0.0,
+                expiry=expiry_date,
+                charged=False,
+                charged_amount=0.0,
+                parent_hold_id=hold.id
+            )
+            session.add(new_credits_hold)
 
-            # If there's leftover from the CC hold, create a new Credits-type hold
-            if leftover > 0:
-                from ....models import Hold
-                from datetime import datetime, timedelta
+            new_tx = CreditTransaction(
+                account_id=hold.account_id,
+                user_id=hold.user_id,
+                amount=leftover,
+                txn_type=CreditTxnType.Add,
+                reason="CC leftover"
+            )
+            session.add(new_tx)
 
-                expiry_date = datetime.utcnow() + timedelta(days=365)
-                new_credits_hold = Hold(
-                    account_id=hold.account_id,
-                    user_id=hold.user_id,
-                    hold_type=HoldType.Credits,
-                    total_amount=leftover,
-                    used_amount=0.0,
-                    expiry=expiry_date,
-                    charged=False,
-                    charged_amount=0.0,
-                    parent_hold_id=hold.id  # optional: track lineage
-                )
-                session.add(new_credits_hold)
-                # 1) Also log a "deposit" transaction for leftover
-                new_tx = CreditTransaction(
-                    account_id=hold.account_id,
-                    user_id=hold.user_id,
-                    amount=leftover,
-                    txn_type=CreditTxnType.Add,
-                    reason="CC leftover"
-                )
-                session.add(new_tx)
-
-            # Done
-            await session.flush()
-
+        await session.flush()

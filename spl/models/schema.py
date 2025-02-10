@@ -223,6 +223,7 @@ class Hold(Serializable):
     expiry = Column(DateTime, nullable=False)
     charged = Column(Boolean, nullable=False, default=False)
     charged_amount = Column(Integer, nullable=False, default=0.0)
+    stripe_deposit_id = Column(Integer, ForeignKey('stripe_deposits.id'), nullable=True)
 
     account = relationship("Account", back_populates="holds")
     hold_transactions = relationship("HoldTransaction", back_populates="hold")

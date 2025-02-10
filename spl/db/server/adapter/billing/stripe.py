@@ -129,7 +129,8 @@ class DBAdapterStripeBillingMixin:
                     expiry=datetime.utcnow() + timedelta(days=6),  # or your desired expiry
                     charged=False,
                     charged_amount=0.0,
-                    parent_hold_id=None
+                    parent_hold_id=None,
+                    stripe_deposit_id=deposit_obj.id
                 )
                 session.add(cc_hold)
 
@@ -273,3 +274,53 @@ class DBAdapterStripeBillingMixin:
             await session.refresh(dep_obj)
             logging.info(f"[mark_stripe_deposit_completed] Deposit {dep_obj.id} marked completed.")
             return dep_obj
+    
+    async def capture_stripe_payment_intent(self, hold: Hold, price: int, session) -> None:
+        """
+        Captures the authorized PaymentIntent if:
+          - hold has stripe_deposit_id
+          - that StripeDeposit has a valid payment_intent_id
+        Will capture exactly `price` micro‐USD => convert to cents if needed.
+        If deposit or payment_intent_id is missing, quietly skip capture.
+        If Stripe fails, raise ValueError or log the error.
+
+        :param hold: The credit-card hold we are charging
+        :param price: The amount (in your internal integer format) we want to capture
+        :param session: the current AsyncSession
+        """
+        if not hold.stripe_deposit_id:
+            self.logger.debug(
+                f"[capture_stripe_payment_intent] hold={hold.id} => no stripe_deposit_id, skipping capture."
+            )
+            return
+
+        # Fetch the StripeDeposit
+        stmt = select(StripeDeposit).where(StripeDeposit.id == hold.stripe_deposit_id)
+        result = await session.execute(stmt)
+        deposit_obj = result.scalar_one_or_none()
+        if not deposit_obj or not deposit_obj.payment_intent_id:
+            self.logger.debug(
+                f"[capture_stripe_payment_intent] hold={hold.id} => deposit not found or missing payment_intent_id, skipping."
+            )
+            return
+
+        try:
+            # Convert your micro-dollars to Stripe cents (adjust if you store amounts differently).
+            from .....models.enums import CENT_AMOUNT
+            capture_amount_in_cents = int(price / CENT_AMOUNT)
+
+            stripe.PaymentIntent.capture(
+                deposit_obj.payment_intent_id,
+                amount_to_capture=capture_amount_in_cents
+            )
+            self.logger.info(
+                f"[capture_stripe_payment_intent] Captured PaymentIntent={deposit_obj.payment_intent_id} "
+                f"for {capture_amount_in_cents} (cents), hold_id={hold.id}, deposit_id={deposit_obj.id}"
+            )
+        except stripe.error.StripeError as e:
+            self.logger.error(f"[capture_stripe_payment_intent] Stripe capture failed: {e}")
+            # You can raise or return an error dict. Typically raise:
+            raise ValueError(f"Stripe capture failed: {e}")
+
+        # success => just return
+        return
