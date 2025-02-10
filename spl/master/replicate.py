@@ -229,7 +229,7 @@ async def _monitor_replicate_child(db_adapter, child_task_id: int):
 
         # There's partial data, check if it has final "is_original_valid"
         partials_dict = child_task.result
-        latest_key = max(partials_dict.keys(), key=int)
+        latest_key = max(partials_dict.keys(), key=float)
         final_partial = partials_dict[latest_key]
         if 'is_original_valid' not in final_partial:
             return ('missing_is_original_valid', child_task_id)
@@ -247,7 +247,7 @@ async def _monitor_replicate_child(db_adapter, child_task_id: int):
         if not child_task.result:
             return ('in_progress', child_task_id)
         partials_dict = child_task.result
-        latest_key = max(partials_dict.keys(), key=int)
+        latest_key = max(partials_dict.keys(), key=float)
         final_partial = partials_dict[latest_key]
         if 'is_original_valid' not in final_partial:
             return ('missing_is_original_valid', child_task_id)
