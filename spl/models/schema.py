@@ -14,7 +14,8 @@ from .enums import (
 )
 from .base import Base
 import enum
-from ..common import device
+
+AMOUNT_PRECISION = 10**6 # how much for 1 cent
 
 class Serializable(Base):
     __abstract__ = True

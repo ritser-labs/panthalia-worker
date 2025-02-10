@@ -4,7 +4,7 @@ import os
 import logging
 import stripe
 from .....models.enums import CreditTxnType
-from .....models import StripeDeposit, HoldType, Hold
+from .....models import StripeDeposit, HoldType, Hold, AMOUNT_PRECISION
 from datetime import datetime, timedelta
 from sqlalchemy import select
 
@@ -36,7 +36,7 @@ class DBAdapterStripeBillingMixin:
             return {"error": "Invalid amount", "status_code": 400}
 
         try:
-            amount_in_cents = amount
+            amount_in_cents = int(amount / AMOUNT_PRECISION)
             session = stripe.checkout.Session.create(
                 payment_method_types=["card"],
                 mode="payment",
@@ -183,8 +183,7 @@ class DBAdapterStripeBillingMixin:
             return {"error": "Invalid amount", "status_code": 400}
 
         try:
-            # Convert amount to cents or use what your existing code does
-            amount_in_cents = amount
+            amount_in_cents = int(amount / AMOUNT_PRECISION)
 
             session = stripe.checkout.Session.create(
                 payment_method_types=["card"],
