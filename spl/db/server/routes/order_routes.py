@@ -1,7 +1,8 @@
 # spl/db/server/routes/order_routes.py
 
 from .common import create_get_route, create_post_route_return_id, create_post_route, AuthMethod
-from ..app import app, db_adapter_server
+from ..app import app
+from ..db_server_instance import db_adapter_server
 
 @app.route('/create_order', methods=['POST'], endpoint='create_order_endpoint')
 async def create_order_route():

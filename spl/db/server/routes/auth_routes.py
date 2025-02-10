@@ -1,7 +1,8 @@
 # spl/db/server/routes/auth_routes.py
 
 from .common import create_post_route, AuthMethod
-from ..app import app, db_adapter_server
+from ..app import app
+from ..db_server_instance import db_adapter_server
 
 @app.route('/admin_deposit_account', methods=['POST'], endpoint='admin_deposit_account_endpoint')
 async def admin_deposit_account_route():

@@ -115,7 +115,7 @@ async def test_holds_flow_end_to_end(db_adapter_server_fixture):
 
         # 7) Solver => submit => buyer => finalize => correct
         solver_result_data = {"final": "correct_output"}
-        await server.submit_task_result(task_id, result=json.dumps(solver_result_data))
+        await server.submit_partial_result(task_id, json.dumps(solver_result_data), final=True)
 
         # Switch buyer => finalize
         server._user_id_getter = lambda: buyer_id

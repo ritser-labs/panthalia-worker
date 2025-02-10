@@ -1,20 +1,21 @@
-# spl/db/server/app.py
+# file: spl/db/server/app.py
 
 import logging
-import os
 from quart import Quart
 from quart_cors import cors
+from .ephemeral_key import (
+    generate_ephemeral_db_sot_key,
+    get_db_sot_private_key,
+    get_db_sot_address,
+)
 
-# Import your DBAdapterServer
-from .adapter import db_adapter_server
-
+# Possibly the same logger you used
 logger = logging.getLogger(__name__)
 
-# Create and configure the Quart app
 original_app = Quart(__name__)
 app = cors(original_app, allow_origin="http://localhost:3000")
 
-# If you still need these two global variables and functions:
+# This sets or gets your "modify DB" permission int
 _perm_modify_db = None
 
 def set_perm_modify_db(perm):
@@ -24,11 +25,10 @@ def set_perm_modify_db(perm):
 def get_perm_modify_db():
     return _perm_modify_db
 
-# -------------------------------------------------------------------
-# Force-load the route modules so they can attach routes to `app`.
-# Make sure you import ALL the route files you created in spl/db/server/routes/.
-# If you split them differently, list those files here.
-# -------------------------------------------------------------------
+
+###############################################################################
+#  Force-load route files (like you do) ...
+###############################################################################
 from .routes import auth_routes
 from .routes import debug_routes
 from .routes import health_routes
@@ -43,9 +43,3 @@ from .routes import stripe_routes
 from .routes import subnet_routes
 from .routes import task_routes
 from .routes import withdrawal_routes
-
-# If you keep any special logic (like hooking extra frameworks),
-# put it here at the bottom. Usually, you can just leave it.
-#
-# Done! Now all your routes are registered onto `app`.
-# Usage: "python -m spl.db.server" or run from your main server code.

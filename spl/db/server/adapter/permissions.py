@@ -1,6 +1,7 @@
 from sqlalchemy import select, update
 from ....models import Perm, PermDescription, PermType, Sot
 from typing import Optional
+from ..ephemeral_key import get_db_sot_address
 
 class DBAdapterPermissionsMixin:
     async def get_perm(self, address: str, perm: int):
@@ -75,6 +76,7 @@ class DBAdapterPermissionsMixin:
             await session.commit()
             await session.refresh(new_sot)
             await self.create_perm(address, perm_id)
+            await self.create_perm(get_db_sot_address(), perm_id)
             return new_sot.id
 
 

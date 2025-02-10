@@ -53,7 +53,7 @@ class TaskStatus(Enum):
     Checking = "Checking"
     ResolvedCorrect = "ResolvedCorrect"
     ResolvedIncorrect = "ResolvedIncorrect"
-    SanityCheckPending = "SanityCheckPending"
+    SolutionSubmitted = "SolutionSubmitted"
     ReplicationPending = "ReplicationPending"
 
 class Vote(Enum):
@@ -114,8 +114,6 @@ def get_current_version_number(tensor_version_interval):
     """
     Return the 'rounded-down' current version based on time.
     If time.time()=1699999999.2 and interval=36 => 1699999999//36=47222222 => 47222222*36=1700000000 - 72 => etc.
-
-    ADDED LOG for debugging:
     """
     now = int(time.time())
     result = (now // tensor_version_interval) * tensor_version_interval
@@ -215,10 +213,15 @@ async def download_file(
     url,
     retries=3,
     backoff=1,
-    chunk_timeout=20,
+    # CHANGED default from 20 -> 300:
+    chunk_timeout=300,
     download_type='batch_targets',
     tensor_name=None
 ):
+    """
+    Downloads a .pt or other file from `url` with optional retries/backoff.
+    If chunk_timeout is exceeded when reading a chunk, we retry or fail.
+    """
     params = {'tensor_name': tensor_name} if tensor_name else None
     for attempt in range(1, retries + 1):
         try:

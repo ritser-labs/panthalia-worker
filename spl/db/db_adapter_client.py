@@ -298,12 +298,13 @@ class DBAdapterClient:
         return 'success' in response
 
     @typechecked
-    async def submit_task_result(self, task_id: int, result: str) -> bool:
+    async def submit_partial_result(self, task_id: int, partial_result: str, final: bool = False) -> bool:
         data = {
             'task_id': task_id,
-            'result': result
+            'partial_result': partial_result,
+            'final': final
         }
-        response = await self._authenticated_request('POST', '/submit_task_result', data=data)
+        response = await self._authenticated_request('POST', '/submit_partial_result', data=data)
         return response.get('success', False)
 
     @typechecked

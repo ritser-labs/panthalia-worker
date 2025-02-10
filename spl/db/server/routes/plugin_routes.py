@@ -1,7 +1,8 @@
 # spl/db/server/routes/plugin_routes.py
 
 from .common import create_get_route, create_post_route_return_id, AuthMethod
-from ..app import app, db_adapter_server
+from ..app import app
+from ..db_server_instance import db_adapter_server
 
 @app.route('/get_plugin', methods=['GET'], endpoint='get_plugin_endpoint')
 async def get_plugin_route():

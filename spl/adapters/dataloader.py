@@ -9,22 +9,15 @@ import aiofiles
 import concurrent.futures
 import multiprocessing
 import logging
+import time
 
-# Initialize global variables
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 datasets_dir = os.path.join(parent_dir, 'datasets')
+
 
 def _tokenize_and_split_sync_batch(text, max_seq_len, tokenizer):
     """
     Synchronously tokenizes a single text and splits it into multiple token pairs.
-
-    Args:
-        text (str): The text to tokenize.
-        max_seq_len (int): The maximum sequence length for each token pair.
-        tokenizer: Tokenizer with `encode` and `pad_id` attributes.
-
-    Returns:
-        list of tuples: Each tuple contains (inputs, targets) token lists.
     """
     token_pairs = []
     tokens = tokenizer.encode(text)
@@ -33,54 +26,53 @@ def _tokenize_and_split_sync_batch(text, max_seq_len, tokenizer):
     # Calculate number of samples, ensure at least 1
     num_samples = max(1, total_tokens // max_seq_len)
 
-    # Define the desired length of the sample (max_seq_len + 1)
+    # We want (max_seq_len + 1) tokens per sample, so we can form (input, target)
     desired_sample_len = max_seq_len + 1
 
     for i in range(num_samples):
         start = i * max_seq_len
-        end = start + desired_sample_len  # Ensure we get max_seq_len + 1 tokens
+        end = start + desired_sample_len
         sample_tokens = tokens[start:end]
 
-        # Ensure the sample has exactly desired_sample_len tokens
+        # Pad if not enough tokens
         if len(sample_tokens) < desired_sample_len:
             sample_tokens += [tokenizer.pad_id] * (desired_sample_len - len(sample_tokens))
 
-        # Inputs are the first max_seq_len tokens, targets are the next max_seq_len tokens
+        # inputs are first max_seq_len, targets are shifted by 1
         inputs = sample_tokens[:max_seq_len]
         targets = sample_tokens[1:desired_sample_len]
         token_pairs.append((inputs, targets))
 
     return token_pairs
 
-class LanguageDataLoader:
-    def __init__(self, model_config, buffer_size, max_seq_len, batch_size):
-        """
-        Generalized class for handling both streaming and file-based datasets.
-        Handles tokenization, prefetching, and buffering of text data.
 
-        Args:
-            model_config (TransformerModelConfig): Model configuration including tokenizer.
-            buffer_size (int): Number of batches to hold in the buffer.
-            max_seq_len (int): Maximum length of tokenized sequences.
-            batch_size (int): Number of token pairs per batch.
-        """
+class LanguageDataLoader:
+    """
+    Common base for all text-like loaders. Each child class must implement
+    or override `_text_generator` to produce text strings. Then we:
+      1) Tokenize/split them into (input, target) pairs
+      2) Fill an async buffer with batches
+      3) Let clients consume them via __anext__
+    """
+
+    def __init__(self, model_config, buffer_size, max_seq_len, batch_size):
         self.max_seq_len = max_seq_len
         self.model_config = model_config
         self.buffer_size = buffer_size
         self.batch_size = batch_size
 
-        self.buffer = asyncio.Queue(maxsize=self.buffer_size)  # Buffer to hold batches
-        self.dataset_iterator = None  # To be initialized by subclasses
+        self.buffer = asyncio.Queue(maxsize=self.buffer_size)  # to hold the final (inputs,targets) batches
+        self.dataset_iterator = None
 
-        self._stop_event = asyncio.Event()  # Event to signal stopping the buffer filler
-        self._filler_task = None  # Background buffer filler task
-        self._token_pair_buffer = []  # Temporary buffer to accumulate token pairs
-        self.executor = None  # Executor will be initialized later
+        self._stop_event = asyncio.Event()
+        self._filler_task = None  # the background filler
+        self._token_pair_buffer = []  # accumulates token pairs until we form a batch
+        self.executor = None  # for run_in_executor
+        random.seed(0)
 
     async def _buffer_filler(self):
         """
-        Background task to continuously fill the buffer with batches.
-        Accumulates token pairs across multiple texts until a full batch is ready.
+        Background task: repeatedly gather text => tokenize => form full batch => put in self.buffer.
         """
         while not self._stop_event.is_set():
             try:
@@ -91,35 +83,27 @@ class LanguageDataLoader:
                         await asyncio.sleep(0.1)
                         continue
 
-                    # Tokenize and split the text into multiple token pairs
                     token_pairs = await self.tokenize_and_split(text, self.max_seq_len)
                     if not token_pairs:
                         continue
 
-                    # Shuffle token pairs to ensure randomness
                     random.shuffle(token_pairs)
-
-                    # Add token pairs to the temporary buffer
                     self._token_pair_buffer.extend(token_pairs)
 
-                # Form a batch from the accumulated token pairs
+                # Now slice off a batch
                 batch = self._token_pair_buffer[:self.batch_size]
                 self._token_pair_buffer = self._token_pair_buffer[self.batch_size:]
 
-                # Put the batch into the buffer
                 await self.buffer.put(batch)
                 logging.debug(f"Added a batch to buffer. Buffer size: {self.buffer.qsize()}")
 
             except Exception as e:
                 logging.error(f"Error in buffer_filler: {e}", exc_info=True)
-                await asyncio.sleep(1)  # Prevent tight loop on error
+                await asyncio.sleep(1)
 
     async def _get_text(self):
         """
-        Fetches a single text from the generator.
-
-        Returns:
-            str or None: The fetched text or None if unavailable.
+        Fetches one chunk of text from self._text_generator().
         """
         try:
             text = await self._text_generator().__anext__()
@@ -138,16 +122,10 @@ class LanguageDataLoader:
 
     async def __anext__(self):
         """
-        Retrieves the next batch from the buffer.
-
-        Returns:
-            list of tuples: Each tuple contains (inputs, targets) token lists.
-
-        Raises:
-            StopAsyncIteration: If the buffer is empty and no more data is available.
+        Grab the next batch from the buffer. Raises StopAsyncIteration if empty.
         """
         if self.buffer.empty():
-            await asyncio.sleep(0.1)  # Wait for the buffer to be filled
+            await asyncio.sleep(0.1)
             if self.buffer.empty():
                 raise StopAsyncIteration
 
@@ -157,21 +135,33 @@ class LanguageDataLoader:
 
     async def _text_generator(self):
         """
-        Abstract method to be implemented by subclasses for generating text data.
-        This method should yield text data asynchronously.
+        Must be overridden by child classes to yield text strings asynchronously.
         """
-        raise NotImplementedError("Subclasses should implement this method.")
+        raise NotImplementedError("Subclasses must override _text_generator.")
+
+    async def initialize_dataset(self):
+        """
+        Public async init. Child classes can override but should do:
+            await super().initialize_dataset()
+        to start the filler task.
+        """
+        if self.executor is None:
+            self.executor = concurrent.futures.ProcessPoolExecutor(
+                max_workers=multiprocessing.cpu_count()
+            )
+        self._filler_task = asyncio.create_task(self._buffer_filler())
+
+    def stop(self):
+        """
+        Cancels the buffer filler task.
+        """
+        if self._filler_task:
+            self._stop_event.set()
+            self._filler_task.cancel()
 
     async def _load_file_in_chunks(self, file_path, block_size):
         """
-        Read a file asynchronously in chunks.
-
-        Args:
-            file_path (str): Path to the file to read.
-            block_size (int): Size of each chunk to read.
-
-        Yields:
-            str: Chunks of text from the file.
+        Asynchronously read a file in chunks, yield strings.
         """
         try:
             async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
@@ -186,10 +176,7 @@ class LanguageDataLoader:
 
     async def _load_dataset_in_chunks(self):
         """
-        Yield text data from a streaming dataset asynchronously.
-
-        Yields:
-            str: Text examples from the dataset.
+        Yields text from self.dataset in a loop; re-init if exhausted.
         """
         while True:
             try:
@@ -200,194 +187,121 @@ class LanguageDataLoader:
             except StopIteration:
                 logging.info("Dataset iterator exhausted. Restarting iterator.")
                 self.dataset_iterator = iter(self.dataset)
-                await asyncio.sleep(1)  # Avoid tight loop
+                await asyncio.sleep(1)
             except Exception as e:
                 logging.error(f"Error in _load_dataset_in_chunks: {e}", exc_info=True)
                 await asyncio.sleep(1)
 
     async def tokenize_and_split(self, text, max_seq_len):
         """
-        Tokenize and split a single text into multiple input-target pairs.
-
-        Args:
-            text (str): The text to tokenize and split.
-            max_seq_len (int): The maximum sequence length for each token pair.
-
-        Returns:
-            list of tuples: Each tuple contains (inputs, targets) token lists.
+        Offload tokenize/split to ProcessPoolExecutor for speed.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            self.executor, _tokenize_and_split_sync_batch, text, max_seq_len, self.model_config.tokenizer
+            self.executor,
+            _tokenize_and_split_sync_batch,
+            text, max_seq_len, self.model_config.tokenizer
         )
 
-    async def initialize_dataset(self):
-        """
-        Initializes the dataset and sets up the executor for processing.
-        To be implemented by subclasses.
-        """
-        if self.executor is None:
-            self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count())
-        self._filler_task = asyncio.create_task(self._buffer_filler())
-
-    def stop(self):
-        """
-        Signals the buffer filler to stop and waits for the task to finish.
-        """
-        if self._filler_task:
-            self._stop_event.set()
-            self._filler_task.cancel()
 
 class WikipediaDataLoader(LanguageDataLoader):
+    """
+    Streams data from the Wikipedia dataset (huggingface).
+    """
     def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size):
-        """
-        WikipediaDataLoader for loading the Wikipedia dataset.
-        Inherits common functionality from LanguageDataLoader.
-
-        Args:
-            model_config (TransformerModelConfig): Model configuration including tokenizer.
-            buffer_size (int): Number of batches to hold in the buffer.
-            max_seq_len (int): Maximum length of tokenized sequences.
-            batch_size (int): Number of token pairs per batch.
-        """
         super().__init__(model_config, buffer_size, max_seq_len, batch_size)
         self.dataset = None
         self.dataset_iterator = None
 
-    def initialize_dataset(self):
-        """
-        Initialize the Wikipedia streaming dataset and its iterator.
-        """
-        super().initialize_dataset()
+    async def initialize_dataset(self):
+        # Make sure parent logic runs first (starts the filler, sets executor, etc.)
+        await super().initialize_dataset()
         self.dataset = load_dataset("wikipedia", "20220301.en", split="train", streaming=True).shuffle()
         self.dataset_iterator = iter(self.dataset)
 
     async def _text_generator(self):
-        """
-        Override the _text_generator method to yield text from the Wikipedia dataset.
-        """
         async for text in self._load_dataset_in_chunks():
             yield text
 
-class FineWebDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size):
-        """
-        FineWebDataLoader for loading the FineWeb dataset.
-        Inherits common functionality from LanguageDataLoader.
 
-        Args:
-            model_config (TransformerModelConfig): Model configuration including tokenizer.
-            buffer_size (int): Number of batches to hold in the buffer.
-            max_seq_len (int): Maximum length of tokenized sequences.
-            batch_size (int): Number of token pairs per batch.
-        """
+class FineWebDataLoader(LanguageDataLoader):
+    """
+    Streams data from the FineWeb dataset.
+    """
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size):
         super().__init__(model_config, buffer_size, max_seq_len, batch_size)
         self.dataset = None
         self.dataset_iterator = None
 
-    def initialize_dataset(self):
-        """
-        Initialize the FineWeb streaming dataset and its iterator.
-        """
-        super().initialize_dataset()
-        self.dataset = load_dataset("HuggingFaceFW/fineweb", name="CC-MAIN-2024-10", split="train", streaming=True).shuffle()
+    async def initialize_dataset(self):
+        await super().initialize_dataset()
+        self.dataset = load_dataset(
+            "HuggingFaceFW/fineweb",
+            name="CC-MAIN-2024-10",
+            split="train",
+            streaming=True
+        ).shuffle()
         self.dataset_iterator = iter(self.dataset)
 
     async def _text_generator(self):
-        """
-        Override the _text_generator method to yield text from the FineWeb dataset.
-        """
         async for text in self._load_dataset_in_chunks():
             yield text
 
-class ShakespeareDataLoader(LanguageDataLoader):
-    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size, file_path=None, block_size=124000):
-        """
-        ShakespeareDataLoader for loading text data from a file.
-        Inherits common functionality from LanguageDataLoader.
 
-        Args:
-            model_config (TransformerModelConfig): Model configuration including tokenizer.
-            buffer_size (int): Number of batches to hold in the buffer.
-            max_seq_len (int): Maximum length of tokenized sequences.
-            batch_size (int): Number of token pairs per batch.
-            file_path (str, optional): Path to the Shakespeare text file. Defaults to None.
-            block_size (int, optional): Size of each chunk to read from the file. Defaults to 124000.
-        """
+class ShakespeareDataLoader(LanguageDataLoader):
+    """
+    Reads a local Shakespeare text file in chunks, then tokenizes.
+    """
+    def __init__(self, model_config: TransformerModelConfig, buffer_size, max_seq_len, batch_size,
+                 file_path=None, block_size=124000):
+        super().__init__(model_config, buffer_size, max_seq_len, batch_size)
         self.file_path = file_path if file_path else os.path.join(datasets_dir, 'shakespeare.txt')
         self.block_size = block_size
-        super().__init__(model_config, buffer_size, max_seq_len, batch_size)
 
-    async def init_dataset(self):
-        """
-        ShakespeareDataLoader does not use a streaming dataset.
-        Initialization is handled differently.
-        """
-        # No dataset to initialize for file-based loading
-        self._filler_task = asyncio.create_task(self._buffer_filler())
+    async def initialize_dataset(self):
+        # This calls the parent's logic to start the filler
+        await super().initialize_dataset()
 
     async def _text_generator(self):
-        """
-        Override the _text_generator method to yield text chunks from the Shakespeare file.
-        """
         async for chunk in self._load_file_in_chunks(self.file_path, self.block_size):
             yield chunk
 
+
 class LowercaseAlphabetDataLoader(LanguageDataLoader):
+    """
+    Generates random slices of the lowercase alphabet on the fly.
+    """
     def __init__(self, model_config: TransformerModelConfig, buffer_size: int, max_seq_len: int, batch_size):
-        """
-        LowercaseAlphabetDataLoader for generating random lowercase alphabet sequences.
-        Inherits common functionality from LanguageDataLoader.
-
-        Args:
-            model_config (TransformerModelConfig): Model configuration including tokenizer.
-            buffer_size (int): Number of batches to hold in the buffer.
-            max_seq_len (int): Maximum length of tokenized sequences.
-            batch_size (int): Number of token pairs per batch.
-        """
-        self.alphabet = list('abcdefghijklmnopqrstuvwxyz')
         super().__init__(model_config, buffer_size, max_seq_len, batch_size)
+        self.alphabet = list('abcdefghijklmnopqrstuvwxyz')
 
-    async def init_dataset(self):
-        """
-        LowercaseAlphabetDataLoader does not use an external dataset.
-        Initialization is not required.
-        """
-        # No dataset to initialize
-        self._filler_task = asyncio.create_task(self._buffer_filler())
+    async def initialize_dataset(self):
+        await super().initialize_dataset()
 
     async def _text_generator(self):
-        """
-        Override the _text_generator method to yield random lowercase alphabet sequences.
-        """
         while True:
             start_index = random.randint(0, len(self.alphabet) - 1)
-            end_index = random.randint(start_index + 1, len(self.alphabet))  # Ensure at least one character
+            end_index = random.randint(start_index + 1, len(self.alphabet))
             yield ''.join(self.alphabet[start_index:end_index])
 
-class AddNumbersDataLoader(IterableDataset):
-    def __init__(self, min_value: int = -100, max_value: int = 100, buffer_size: int = 1024, batch_size: int = 32):
-        """
-        DataLoader for generating pairs of numbers and their sum indefinitely.
 
-        Args:
-            min_value (int): Minimum value for the random numbers.
-            max_value (int): Maximum value for the random numbers.
-            buffer_size (int): Number of batches to buffer.
-            batch_size (int): Number of samples per batch.
-        """
+class AddNumbersDataLoader(IterableDataset):
+    """
+    A completely separate toy class that doesn't use LanguageDataLoader at all.
+    Generates random (num1, num2) => sum, buffered asynchronously.
+    """
+
+    def __init__(self, min_value: int = -100, max_value: int = 100,
+                 buffer_size: int = 1024, batch_size: int = 32):
         self.min_value = min_value
         self.max_value = max_value
         self.buffer_size = buffer_size
         self.batch_size = batch_size
-        self.buffer = asyncio.Queue(maxsize=self.buffer_size)  # Buffer to hold batches
-        self._stop_event = asyncio.Event()  # Event to signal stopping the buffer filler
+        self.buffer = asyncio.Queue(maxsize=self.buffer_size)
+        self._stop_event = asyncio.Event()
         self._filler_task = asyncio.create_task(self._fill_buffer())
 
     async def _fill_buffer(self):
-        """
-        Background task to continuously fill the buffer with number batches.
-        """
         while not self._stop_event.is_set():
             try:
                 batch = []
@@ -400,9 +314,9 @@ class AddNumbersDataLoader(IterableDataset):
                         torch.tensor([result], dtype=torch.float32)
                     ))
                 await self.buffer.put(batch)
-                logging.debug(f"Added a number batch to buffer. Buffer size: {self.buffer.qsize()}")
+                logging.debug(f"Added a number batch to buffer. Size: {self.buffer.qsize()}")
             except Exception as e:
-                logging.error(f"Error in AddNumbersDataLoader _fill_buffer: {e}", exc_info=True)
+                logging.error(f"AddNumbersDataLoader _fill_buffer error: {e}", exc_info=True)
                 await asyncio.sleep(1)
 
     def __iter__(self):
@@ -410,20 +324,16 @@ class AddNumbersDataLoader(IterableDataset):
 
     def __next__(self):
         if self.buffer.empty():
-            time.sleep(0.01)  # Wait for the buffer to fill
+            time.sleep(0.01)
             if self.buffer.empty():
                 raise StopIteration
         try:
             batch = self.buffer.get_nowait()
-            logging.debug(f"Retrieved a number batch from buffer. Remaining buffer size: {self.buffer.qsize()}")
             return batch
         except asyncio.QueueEmpty:
             raise StopIteration
 
     def stop(self):
-        """
-        Signals the buffer filler to stop and waits for the task to finish.
-        """
         self._stop_event.set()
         self._filler_task.cancel()
 

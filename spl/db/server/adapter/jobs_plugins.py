@@ -210,7 +210,7 @@ class DBAdapterJobsPluginsMixin:
                 TaskStatus.SelectingSolver,
                 TaskStatus.SolverSelected,
                 TaskStatus.Checking,
-                TaskStatus.SanityCheckPending
+                TaskStatus.SolutionSubmitted
             ]
             
             stmt = (

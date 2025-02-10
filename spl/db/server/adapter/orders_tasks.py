@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import select, update, desc, func, or_, and_
+from sqlalchemy import select, update, desc, func, or_, inspect
 from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List, Dict
@@ -13,9 +13,19 @@ from ....models import (
     Order, Account, OrderType, HoldType, CreditTxnType, EarningsTxnType, PlatformRevenueTxnType,
     CreditTransaction, HoldTransaction, Hold, EarningsTransaction
 )
-import secrets
+import time, uuid
+import aiohttp
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from ..ephemeral_key import get_db_sot_private_key  # ephemeral key from app.py
+
+import json
+from datetime import datetime, timezone
+from sqlalchemy.orm import selectinload
+from ....models import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 PLATFORM_FEE_PERCENTAGE = 0.1
 DISPUTE_PAYOUT_DELAY_DAYS = 1
 
@@ -131,7 +141,7 @@ class DBAdapterOrdersTasksMixin:
 
             else:
                 raise ValueError("Invalid order type provided.")
-
+            await self.match_bid_ask_orders(session, subnet_id)
             await session.commit()
             return new_order.id
 
@@ -152,6 +162,7 @@ class DBAdapterOrdersTasksMixin:
             res = await session.execute(stmt)
             return {'num_orders': res.scalar_one()}
 
+
     async def create_bids_and_tasks(
         self,
         job_id: int,
@@ -160,6 +171,8 @@ class DBAdapterOrdersTasksMixin:
         params: str,
         hold_id: Optional[int] = None
     ) -> Optional[Dict[str, List[Dict[str, int]]]]:
+        if num_tasks < 1:
+            raise ValueError(f"create_bids_and_tasks => requested {num_tasks} tasks; must be >= 1.")
         async with self.get_async_session() as session:
             try:
                 stmt = select(Job).where(Job.id == job_id).options(joinedload(Job.subnet))
@@ -169,7 +182,6 @@ class DBAdapterOrdersTasksMixin:
                     raise ValueError(f"Job {job_id} not found.")
                 if not job.active:
                     raise ValueError(f"Cannot create tasks for an inactive job (job_id={job_id}).")
-
                 user_id = job.user_id
                 account = await self.get_or_create_account(user_id, session)
 
@@ -196,9 +208,7 @@ class DBAdapterOrdersTasksMixin:
                     session.add(new_bid)
                     await session.flush()
 
-                    deposit_hold = await self.select_hold_for_order(
-                        session, account, job.subnet, OrderType.Bid, price, hold_id
-                    )
+                    deposit_hold = await self.select_hold_for_order(session, account, job.subnet, OrderType.Bid, price, hold_id)
                     await self.reserve_funds_on_hold(session, deposit_hold, price, new_bid)
                     new_bid.hold_id = deposit_hold.id
 
@@ -209,11 +219,18 @@ class DBAdapterOrdersTasksMixin:
 
                 await self.match_bid_ask_orders(session, job.subnet_id)
                 await session.commit()
+
+                if len(created_items) < num_tasks:
+                    raise RuntimeError(
+                        f"create_bids_and_tasks => created only {len(created_items)} out of {num_tasks} tasks."
+                    )
+
                 return {"created_items": created_items}
 
             except Exception:
                 await session.rollback()
                 raise
+
 
     async def delete_order(self, order_id: int):
         async with self.get_async_session() as session:
@@ -386,42 +403,160 @@ class DBAdapterOrdersTasksMixin:
     async def check_invalid(self, task: Task):
         return False
 
-    async def submit_task_result(self, task_id: int, result: str) -> bool:
+    async def submit_partial_result(
+        self,
+        task_id: int,
+        partial_result: str,
+        final: bool = False
+    ) -> dict:
+        """
+        Store or merge a JSON partial_result into Task.result in the DB.
+        If final=True, mark the Task status as SolutionSubmitted so the
+        next phase can decide correctness or replication.
+
+        Returns:
+        { "success": True } on success, raises exceptions on errors.
+        """
+
+        # Attempt to parse `partial_result` as JSON:
+        logger.debug(f"submit_partial_result => task_id={task_id}, final={final}")
+        if isinstance(partial_result, str):
+            try:
+                partial_data = json.loads(partial_result)
+            except json.JSONDecodeError as ex:
+                raise ValueError(f"submit_partial_result => invalid JSON: {ex}")
+        else:
+            # If your calling code sometimes passes an already-loaded dict,
+            # handle that gracefully:
+            partial_data = partial_result
+
         async with self.get_async_session() as session:
-            q = (
+            # 1) Load the Task (with a possible join to verify solver or job ownership)
+            stmt = (
                 select(Task)
                 .where(Task.id == task_id)
-                .options(
-                    joinedload(Task.job).joinedload(Job.subnet),
-                    joinedload(Task.bid).joinedload(Order.hold),
-                    joinedload(Task.ask).joinedload(Order.hold)
-                )
+                .options(selectinload(Task.ask), selectinload(Task.bid))
             )
-            r = await session.execute(q)
-            task = r.scalar_one_or_none()
+            result = await session.execute(stmt)
+            task = result.scalar_one_or_none()
             if not task:
-                raise ValueError(f"Task {task_id} not found")
-
-            if not task.ask:
-                raise PermissionError("No solver assignment, cannot submit result.")
-            if task.ask.user_id != self.get_user_id():
-                raise PermissionError("Not your task to submit a result for.")
+                raise ValueError(f"submit_partial_result => Task {task_id} not found.")
+            
             if task.status != TaskStatus.SolverSelected:
-                raise ValueError(f"Task {task_id} is not in SolverSelected status")
+                raise ValueError(f"submit_partial_result => Task {task_id} is not in SolverSelected status.")
 
-            try:
-                result_data = json.loads(result)
-            except json.JSONDecodeError:
-                result_data = None
-                logger.error(f"Failed to parse JSON result for task {task_id}")
+            # 2) Merge new partial_data into the existing Task.result field (JSON).
 
-            task.result = result_data
-            task.status = TaskStatus.SanityCheckPending
-            task.time_solved = datetime.now(timezone.utc)
+            import time
+            timestamp_key = str(time.time())
+            current_dict = task.result or {}
+            current_dict[timestamp_key] = partial_data
+            task.result = dict(current_dict)
+            
+            # 4) If final => go to SolutionSubmitted
+            if final:
+                task.status = TaskStatus.SolutionSubmitted
+                task.time_solved = datetime.now(timezone.utc)
+
             session.add(task)
             await session.commit()
-            return {'success': True}
-    
+        
+        # TODO: make worker retry if too late for submit_partial_result
+        try:
+            await self._update_sot_with_partial(task_id, partial_data)
+        except Exception as ex:
+            logger.error(f"submit_partial_result => SOT update failed: {ex}")
+
+
+        return {"success": True}
+
+
+    async def _update_sot_with_partial(self, task_id: int, partial_data: dict):
+        """
+        POSTs directly to SOT’s /update_state endpoint, signing with the ephemeral
+        DB key that lives in app.py. We only do this if partial_data has the
+        fields needed (version_number, result_url). If it's a replica task with
+        no version_number, we skip.
+        """
+        # 1) Fetch the job => we need job.sot_url
+        async with self.get_async_session() as session:
+            stmt = (
+                select(Task, Job)
+                .join(Job, Job.id == Task.job_id)
+                .where(Task.id == task_id)
+            )
+            row = (await session.execute(stmt)).first()
+            if not row:
+                logger.warning(f"[_update_sot_with_partial] No Job found for task_id={task_id}.")
+                return
+            task_obj, job_obj = row
+            sot_url = (job_obj.sot_url or "").rstrip("/")
+            if not sot_url:
+                logger.warning(f"[_update_sot_with_partial] job {job_obj.id} has no sot_url set.")
+                return
+
+        # 2) Check if 'version_number' and 'result_url' are present in partial_data
+        if "version_number" not in partial_data or "result_url" not in partial_data:
+            logger.info(
+                f"[_update_sot_with_partial] Skipping SOT update for task={task_id} because "
+                f"no 'version_number' or 'result_url' was found (replica or simple partial?)."
+            )
+            return
+
+        # If we do have them, build the payload:
+        payload = {
+            "version_number": partial_data["version_number"],
+            "result_url": partial_data["result_url"],
+            "tensor_name": "model",
+        }
+        if "loss" in partial_data:
+            payload["loss"] = partial_data["loss"]
+        if "input_url" in partial_data:
+            payload["input_url"] = partial_data["input_url"]
+
+        # 3) Generate a signature with the ephemeral DB key
+        def _sign_sot_request(endpoint: str, data_dict: dict) -> dict:
+            msg_obj = {
+                "endpoint": endpoint,
+                "nonce": str(uuid.uuid4()),
+                "timestamp": int(time.time()),
+                "data": data_dict,
+            }
+            msg_str = json.dumps(msg_obj, sort_keys=True)
+
+            pk = get_db_sot_private_key()
+            if not pk:
+                raise RuntimeError("Ephemeral DB key not found.")
+
+            acct = Account.from_key(pk)
+            sign_res = acct.sign_message(encode_defunct(text=msg_str))
+            sig_hex = sign_res.signature.hex()
+            return {"Authorization": f"{msg_str}:{sig_hex}"}
+
+        headers = _sign_sot_request("update_state", payload)
+        update_url = f"{sot_url}/update_state"
+
+        # 4) Make the POST request to the SOT
+        try:
+            async with aiohttp.ClientSession() as client:
+                async with client.post(update_url, json=payload, headers=headers, timeout=30) as resp:
+                    if resp.status == 200:
+                        logger.info(
+                            f"[_update_sot_with_partial] SOT update succeeded for task={task_id}, "
+                            f"version={payload['version_number']}"
+                        )
+                    else:
+                        err_txt = await resp.text()
+                        logger.error(
+                            f"[_update_sot_with_partial] SOT /update_state failed: "
+                            f"HTTP {resp.status}, body={err_txt}"
+                        )
+        except Exception as e:
+            logger.error(f"[_update_sot_with_partial] SOT call crashed: {e}")
+
+
+
+        
     async def update_replicated_parent(self, child_task_id: int, parent_task_id: int) -> bool:
         async with self.get_async_session() as session:
             child = await session.get(Task, child_task_id)
@@ -433,31 +568,32 @@ class DBAdapterOrdersTasksMixin:
             return True
 
 
-    async def finalize_sanity_check(self, task_id: int, is_valid: bool, force: bool = False):
+    async def finalize_sanity_check(self, task_id: int, is_valid: bool):
+        """
+        Moves a task from SolutionSubmitted => ResolvedCorrect/ResolvedIncorrect, etc.
+        Then calls handle_correct_resolution_scenario or handle_incorrect_resolution_scenario
+        to adjust holds, fees, etc.
+        """
         async with self.get_async_session() as session:
-            logger.info(f"[finalize_sanity_check] Finalizing task {task_id} with is_valid={is_valid}")
+            # Eager-load ask, bid, job->subnet, plus hold
             stmt = (
                 select(Task)
                 .where(Task.id == task_id)
                 .options(
-                    joinedload(Task.bid).joinedload(Order.hold),
-                    joinedload(Task.ask).joinedload(Order.hold),
-                    joinedload(Task.job).joinedload(Job.subnet)
+                    selectinload(Task.bid).selectinload(Order.hold),
+                    selectinload(Task.ask).selectinload(Order.hold),
+                    selectinload(Task.job).selectinload(Job.subnet)
                 )
             )
-            r = await session.execute(stmt)
-            task = r.scalar_one_or_none()
+            res = await session.execute(stmt)
+            task = res.scalar_one_or_none()
             if not task:
                 raise ValueError("Task not found.")
 
+            # If we’re not forcing, ensure it’s in the correct status
             if task.status in [TaskStatus.ResolvedCorrect, TaskStatus.ResolvedIncorrect]:
-                logger.warning(
-                    f"[finalize_sanity_check] Task {task_id} is already in {task.status} => skipping re-finalization."
-                )
-                return
-            if not force and task.status not in [TaskStatus.SanityCheckPending, TaskStatus.ReplicationPending]:
-                raise ValueError(f"Task {task_id} must be in SanityCheckPending or ReplicationPending to finalize sanity check.")
-
+                raise ValueError(f"Task {task_id} must not be resolved to finalize.")
+            
             if is_valid:
                 task.status = TaskStatus.ResolvedCorrect
                 await self.handle_correct_resolution_scenario(session, task)
@@ -467,7 +603,7 @@ class DBAdapterOrdersTasksMixin:
 
             task.time_solved = datetime.now(timezone.utc)
             session.add(task)
-            await session.flush()
+            await session.flush()  # in case handle_* changed anything
             await session.commit()
 
     async def handle_correct_resolution_scenario(self, session: AsyncSession, task: Task):
@@ -644,7 +780,7 @@ class DBAdapterOrdersTasksMixin:
             # STEP 2 (continued): Finalize overdue tasks as incorrect
             for task_id in tasks_to_fail:
                 try:
-                    await self.finalize_sanity_check(task_id, is_valid=False, force=True)
+                    await self.finalize_sanity_check(task_id, is_valid=False)
                     logger.info(f"[check_and_cleanup_holds] Finalized task {task_id} as incorrect due to solver timeout.")
                 except Exception as e:
                     logger.error(f"[check_and_cleanup_holds] Failed to finalize task {task_id} as incorrect: {e}")

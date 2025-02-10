@@ -1,7 +1,8 @@
 # spl/db/server/routes/instance_routes.py
 
 from .common import create_get_route, create_post_route, create_post_route_return_id, AuthMethod
-from ..app import app, db_adapter_server
+from ..app import app
+from ..db_server_instance import db_adapter_server
 from quart import request, jsonify
 
 @app.route('/get_instance_by_service_type', methods=['GET'], endpoint='get_instance_by_service_type_endpoint')

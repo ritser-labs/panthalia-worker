@@ -26,12 +26,12 @@ model_adapter = NanoGPTModelAdapter(model_config)
 
 NUM_STEPS = 1500
 
-EXAMPLES_PER_STEP = 14
+EXAMPLES_PER_ACCUMULATION = 14
 
 dataset = FineWebDataLoader(
     model_config,
     buffer_size=16,
-    batch_size=NUM_STEPS * EXAMPLES_PER_STEP,
+    batch_size=NUM_STEPS * EXAMPLES_PER_ACCUMULATION,
     max_seq_len=model_params.block_size
 )
 
@@ -41,16 +41,12 @@ exported_plugin = StandardPlugin(
     dataset,
     tokenizer,
     num_steps=NUM_STEPS,
-    examples_per_step=EXAMPLES_PER_STEP,
+    examples_per_accumulation=EXAMPLES_PER_ACCUMULATION,
     outer_max_lr=1,
     outer_min_lr=1,
     outer_weight_decay=0.0,
     tensor_version_interval=870,
     expected_worker_time=850,
     max_concurrent_iterations=14,
-    inner_max_lr=6e-4,
-    inner_min_lr=6e-4,
-    inner_T_0=200,
-    inner_weight_decay=0.1,
     preload_batch_count=4
 )

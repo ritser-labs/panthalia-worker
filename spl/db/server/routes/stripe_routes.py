@@ -2,7 +2,8 @@
 
 from quart import request, jsonify
 from .common import create_post_route, AuthMethod
-from ..app import app, db_adapter_server
+from ..app import app
+from ..db_server_instance import db_adapter_server
 
 @app.route('/create_stripe_credits_session', methods=['POST'], endpoint='create_stripe_credits_session_endpoint')
 async def create_stripe_credits_session_route():

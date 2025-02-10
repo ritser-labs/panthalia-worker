@@ -11,7 +11,8 @@ import time
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
-from ..app import logger, get_perm_modify_db, db_adapter_server
+from ..app import logger, get_perm_modify_db
+from ..db_server_instance import db_adapter_server
 from ....auth.key_auth import requires_key_auth
 from ....auth.user_auth import requires_user_or_key_auth, requires_sot_auth
 from ..parse import parse_args_with_types
