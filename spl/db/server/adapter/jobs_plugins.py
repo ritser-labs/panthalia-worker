@@ -7,9 +7,15 @@ from sqlalchemy.orm import joinedload
 
 logger = logging.getLogger(__name__)
 
+MIN_REPLICATE_PROB = 0.0
+MAX_REPLICATE_PROB = 0.4
+
 class DBAdapterJobsPluginsMixin:
-    async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int, initial_state_url: str=''):
+    async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int, initial_state_url: str='', replicate_prob: float=0.1):
         async with self.get_async_session() as session:
+            if replicate_prob < MIN_REPLICATE_PROB or replicate_prob > MAX_REPLICATE_PROB:
+                logger.warning(f"[create_job] replicate_prob={replicate_prob} out of range.")
+                return None
             new_job = Job(
                 name=name,
                 plugin_id=plugin_id,
@@ -18,7 +24,8 @@ class DBAdapterJobsPluginsMixin:
                 sot_url=sot_url,
                 iteration=iteration,
                 done=False,
-                initial_state_url=initial_state_url
+                initial_state_url=initial_state_url,
+                replicate_prob=replicate_prob
             )
             session.add(new_job)
             await session.commit()

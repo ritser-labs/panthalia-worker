@@ -87,6 +87,9 @@ async def handle_newly_assigned_job(
             logger.warning(f"[handle_newly_assigned_job] Failed to assign job {job_obj.id} to {master_id}")
             return
 
+    # TODO: remove this line
+    await db_adapter.admin_deposit_account(job_obj.user_id, deposit_amount)
+
     # 1) Launch SOT
     sot_db_obj, sot_url = await launch_sot(db_adapter, job_obj, db_url)
     # 2) Launch Workers

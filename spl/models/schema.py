@@ -64,6 +64,7 @@ class Job(TimestampMixin, Serializable):
     sot_state_json = Column(JSON, nullable=True, default={})
     initial_state_url = Column(String, nullable=False)
     active = Column(Boolean, nullable=False, default=True)
+    replicate_prob = Column(Float, nullable=False, default=0.1)
 
     # add these new fields:
     queued = Column(Boolean, nullable=False, default=False)

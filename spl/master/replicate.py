@@ -72,11 +72,12 @@ async def _save_replication_chain_state(db_adapter, job_id, original_task_id, ch
 ###############################################################################
 # Probability-based check for spawning a replicate child
 ###############################################################################
-async def should_replicate(prob: float = DEFAULT_REPLICATE_PROB) -> bool:
+async def should_replicate(db_adapter, job_id) -> bool:
     """
     Return True with probability = prob. Uses `secrets.randbelow` for randomness.
     """
-    threshold = int(1000 * prob)
+    job = await db_adapter.get_job(job_id)
+    threshold = int(1000 * job.replicate_prob)
     return secrets.randbelow(1000) < threshold
 
 
@@ -395,7 +396,7 @@ async def manage_replication_chain(db_adapter, plugin, job_id, original_task_id,
 
         if outcome == 'child_says_match':
             # Possibly replicate again, else finalize => parent's correct
-            if await should_replicate(prob=DEFAULT_REPLICATE_PROB):
+            if await should_replicate(db_adapter, job_id):
                 await _mark_task_replication_pending(db_adapter, c_id_int)
                 new_id = await spawn_replica_task(db_adapter, c_id_int)
                 if not new_id:
@@ -411,7 +412,7 @@ async def manage_replication_chain(db_adapter, plugin, job_id, original_task_id,
 
         elif outcome == 'child_says_mismatch':
             # Possibly replicate again, else finalize => parent's incorrect
-            if await should_replicate(prob=DEFAULT_REPLICATE_PROB):
+            if await should_replicate(db_adapter, job_id):
                 await _mark_task_replication_pending(db_adapter, c_id_int)
                 new_id = await spawn_replica_task(db_adapter, c_id_int)
                 if not new_id:

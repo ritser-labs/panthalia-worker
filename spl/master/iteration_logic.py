@@ -109,7 +109,7 @@ async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_tas
 
         # local check is valid => replicate or finalize => correct
         await db_adapter.update_task_status(task_obj.id, job_id, TaskStatus.ReplicationPending.name)
-        do_replicate = await should_replicate()
+        do_replicate = await should_replicate(db_adapter, job_id)
         if not do_replicate:
             await db_adapter.finalize_sanity_check(task_obj.id, True)
             return task_obj.result
