@@ -166,6 +166,8 @@ class Account(Serializable):
     user_id = Column(String, nullable=False, index=True)
     deposited_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     is_admin = Column(Boolean, nullable=False, default=False)
+    max_credits_balance = Column(Integer, nullable=True)  # or Integer if you prefer
+
 
     tasks = relationship("Task", back_populates="account")
     orders = relationship("Order", back_populates="account")
