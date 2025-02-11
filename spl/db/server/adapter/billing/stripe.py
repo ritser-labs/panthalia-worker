@@ -212,7 +212,8 @@ class DBAdapterStripeBillingMixin:
             deposit_id = await self._create_stripe_authorize_deposit(
                 user_id=user_id,
                 amount=amount,
-                session_id=session.id
+                session_id=session.id,
+                payment_intent_id=session.payment_intent
             )
         except Exception as e:
             self.logger.error(f"[create_stripe_authorization_session] DB error: {e}")
@@ -220,7 +221,7 @@ class DBAdapterStripeBillingMixin:
 
         return {"session_id": session.id, "url": session.url}
 
-    async def _create_stripe_authorize_deposit(self, user_id: str, amount: int, session_id: str) -> int:
+    async def _create_stripe_authorize_deposit(self, user_id: str, amount: int, session_id: str, payment_intent_id: int) -> int:
         """
         Helper that creates a StripeDeposit record flagged as is_authorization=True.
         This record is how we'll detect in the webhook that we want a credit-card hold,
@@ -232,9 +233,8 @@ class DBAdapterStripeBillingMixin:
                 deposit_amount=amount,
                 stripe_session_id=session_id,
                 status='pending',
-                # NEW: add a custom boolean or a new column; or reuse an existing pattern
-                # For example, let's say we add a column `is_authorization` to StripeDeposit:
                 is_authorization=True,   
+                payment_intent_id=payment_intent_id
             )
             session.add(new_dep)
             await session.commit()
@@ -324,3 +324,4 @@ class DBAdapterStripeBillingMixin:
 
         # success => just return
         return
+

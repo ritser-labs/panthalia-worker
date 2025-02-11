@@ -87,9 +87,6 @@ async def handle_newly_assigned_job(
             logger.warning(f"[handle_newly_assigned_job] Failed to assign job {job_obj.id} to {master_id}")
             return
 
-    # Give the user enough deposit to place tasks
-    await db_adapter.admin_deposit_account(job_obj.user_id, deposit_amount)
-
     # 1) Launch SOT
     sot_db_obj, sot_url = await launch_sot(db_adapter, job_obj, db_url)
     # 2) Launch Workers
@@ -154,7 +151,6 @@ async def check_for_new_jobs(
                     db_url=db_url,
                     master_id=MASTER_ID,
                     jobs_processing=jobs_processing,
-                    deposit_amount=999999999,
                     unqueue_if_needed=False
                 )
 
@@ -173,7 +169,6 @@ async def check_for_new_jobs(
                     db_url=db_url,
                     master_id=MASTER_ID,
                     jobs_processing=jobs_processing,
-                    deposit_amount=999999999,
                     unqueue_if_needed=True
                 )
                 capacity -= 1
