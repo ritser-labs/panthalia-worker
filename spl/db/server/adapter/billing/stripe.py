@@ -8,6 +8,10 @@ from .....models import StripeDeposit, HoldType, Hold, CENT_AMOUNT
 from datetime import datetime, timedelta
 from sqlalchemy import select
 
+# Define a minimum checkout amount.
+# For example, if CENT_AMOUNT is the internal unit for 1 cent, then 100 * CENT_AMOUNT represents $1.
+MINIMUM_CHECKOUT_AMOUNT = 10 * 100 * CENT_AMOUNT  # $10 minimum in internal units
+
 class DBAdapterStripeBillingMixin:
     """
     A mixin that adds stripe-billing-related methods to the DB adapter.
@@ -29,9 +33,16 @@ class DBAdapterStripeBillingMixin:
 
     async def create_stripe_credits_session(self, amount: int) -> dict:
         """
-        Creates a Stripe Checkout Session. Also calls self.create_stripe_deposit(...) to record pending deposit.
+        Creates a Stripe Checkout Session. Also calls self.create_stripe_deposit(...) to record a pending deposit.
+        Enforces a minimum checkout amount.
         """
         user_id = self.get_user_id()
+        # Enforce minimum checkout amount
+        if amount < MINIMUM_CHECKOUT_AMOUNT:
+            return {
+                "error": f"Minimum checkout amount is {MINIMUM_CHECKOUT_AMOUNT} (internal units)",
+                "status_code": 400
+            }
         if amount <= 0:
             return {"error": "Invalid amount", "status_code": 400}
 
@@ -55,7 +66,6 @@ class DBAdapterStripeBillingMixin:
             self.logger.error(f"[create_stripe_credits_session] Error from Stripe: {e}")
             return {"error": str(e), "status_code": 500}
 
-        # Insert the deposit row in DB (pending)
         try:
             await self.create_stripe_deposit(user_id, amount, session.id)
         except Exception as e:
@@ -66,8 +76,8 @@ class DBAdapterStripeBillingMixin:
 
     async def handle_stripe_webhook(self, payload: bytes, sig_header: str) -> dict:
         """
-        Called from /stripe/webhook route. On checkout.session.completed, we mark deposit completed
-        and apply the deposit to the user’s balance (creating a credit transaction).
+        Called from /stripe/webhook route. On checkout.session.completed, we mark the deposit completed
+        and apply the deposit to the user's balance.
         """
         if not self.webhook_secret:
             return {"error": "No webhook secret set", "status_code": 500}
@@ -89,17 +99,13 @@ class DBAdapterStripeBillingMixin:
                 self.logger.warning(f"[handle_stripe_webhook] no deposit found for session={stripe_session_id}")
                 return {"status": "ok"}
 
-            # If deposit already had status='completed' ...
             if deposit_obj.status == 'completed' and deposit_obj.credit_transaction_id:
                 self.logger.info(f"[handle_stripe_webhook] deposit {deposit_obj.id} was already credited.")
                 return {"status": "ok"}
 
-            # 1) Distinguish between a normal deposit vs. authorize-only
             if deposit_obj.is_authorization:
-                # => create a new CreditCard hold
                 await self.apply_credit_card_authorization(deposit_obj)
             else:
-                # => normal (existing) logic: add credits
                 await self.apply_stripe_deposit(deposit_obj)
 
         else:
@@ -107,11 +113,10 @@ class DBAdapterStripeBillingMixin:
 
         return {"status": "ok"}
 
-
     async def apply_credit_card_authorization(self, deposit_obj: StripeDeposit):
         """
         For an 'authorize-only' deposit: create a Hold with hold_type=HoldType.CreditCard.
-        The leftover is deposit_obj.deposit_amount, which can be captured or partially used later.
+        The leftover is deposit_obj.deposit_amount.
         """
         user_id = deposit_obj.user_id
         amount = deposit_obj.deposit_amount
@@ -119,14 +124,13 @@ class DBAdapterStripeBillingMixin:
         try:
             async with self.get_async_session() as session:
                 account = await self.get_or_create_account(user_id, session)
-
                 cc_hold = Hold(
                     account_id=account.id,
                     user_id=user_id,
                     hold_type=HoldType.CreditCard,
                     total_amount=amount,
                     used_amount=0.0,
-                    expiry=datetime.utcnow() + timedelta(days=6),  # or your desired expiry
+                    expiry=datetime.utcnow() + timedelta(days=6),
                     charged=False,
                     charged_amount=0.0,
                     parent_hold_id=None,
@@ -134,40 +138,29 @@ class DBAdapterStripeBillingMixin:
                 )
                 session.add(cc_hold)
 
-                # Mark the deposit as completed
                 deposit_obj.status = 'completed'
                 session.add(deposit_obj)
 
                 await session.commit()
-
-                self.logger.info(
-                    f"[apply_credit_card_authorization] Created CC hold={cc_hold.id}, leftover={amount} for user={user_id}"
-                )
-
+                self.logger.info(f"[apply_credit_card_authorization] Created CC hold={cc_hold.id} for user={user_id}")
         except Exception as e:
             self.logger.error(f"[apply_credit_card_authorization] error: {e}")
 
-
     async def apply_stripe_deposit(self, deposit_obj):
         """
-        Actually apply the deposit after it's marked completed:
-          - create a credit transaction with txn_type=CreditTxnType.Add
-          - update user’s balance
-          - link deposit -> transaction
+        Applies the deposit by creating a credit transaction and linking the deposit to the transaction.
         """
         user_id = deposit_obj.user_id
         deposit_amount = deposit_obj.deposit_amount
         deposit_id = deposit_obj.id
 
         try:
-            # Create a new credit transaction for this deposit
             tx = await self.create_credit_transaction_for_user(
                 user_id=user_id,
                 amount=deposit_amount,
                 reason="stripe_deposit",
                 txn_type=CreditTxnType.Add
             )
-            # Link deposit -> transaction
             await self.link_deposit_to_transaction(deposit_id, tx.id)
             self.logger.info(f"[apply_stripe_deposit] deposit {deposit_id} credited user {user_id} with {deposit_amount}")
         except Exception as e:
@@ -176,16 +169,21 @@ class DBAdapterStripeBillingMixin:
     async def create_stripe_authorization_session(self, amount: int) -> dict:
         """
         Creates a Stripe Checkout Session with an uncaptured PaymentIntent (authorize-only).
-        We do NOT immediately charge the user; the card is just authorized.
-        In the Stripe webhook, if `is_authorization=True`, we'll turn that amount into a CreditCard hold.
+        The card is only authorized, not charged immediately.
+        Enforces a minimum checkout amount.
         """
         user_id = self.get_user_id()
+        # Enforce minimum checkout amount
+        if amount < MINIMUM_CHECKOUT_AMOUNT:
+            return {
+                "error": f"Minimum checkout amount is {MINIMUM_CHECKOUT_AMOUNT} (internal units)",
+                "status_code": 400
+            }
         if amount <= 0:
             return {"error": "Invalid amount", "status_code": 400}
 
         try:
             amount_in_cents = int(amount / CENT_AMOUNT)
-
             session = stripe.checkout.Session.create(
                 payment_method_types=["card"],
                 mode="payment",
@@ -198,7 +196,7 @@ class DBAdapterStripeBillingMixin:
                     "quantity": 1,
                 }],
                 payment_intent_data={
-                    "capture_method": "manual"  # The key to only authorize
+                    "capture_method": "manual"
                 },
                 success_url=self.success_url,
                 cancel_url=self.cancel_url,
@@ -207,7 +205,6 @@ class DBAdapterStripeBillingMixin:
             self.logger.error(f"[create_stripe_authorization_session] Error from Stripe: {e}")
             return {"error": str(e), "status_code": 500}
 
-        # Insert a deposit row in DB marked as "authorize_only"
         try:
             deposit_id = await self._create_stripe_authorize_deposit(
                 user_id=user_id,
@@ -224,8 +221,6 @@ class DBAdapterStripeBillingMixin:
     async def _create_stripe_authorize_deposit(self, user_id: str, amount: int, session_id: str, payment_intent_id: int) -> int:
         """
         Helper that creates a StripeDeposit record flagged as is_authorization=True.
-        This record is how we'll detect in the webhook that we want a credit-card hold,
-        *instead* of normal "add credits."
         """
         async with self.get_async_session() as session:
             new_dep = StripeDeposit(
@@ -233,15 +228,13 @@ class DBAdapterStripeBillingMixin:
                 deposit_amount=amount,
                 stripe_session_id=session_id,
                 status='pending',
-                is_authorization=True,   
+                is_authorization=True,
                 payment_intent_id=payment_intent_id
             )
             session.add(new_dep)
             await session.commit()
             await session.refresh(new_dep)
-            self.logger.info(
-                f"[_create_stripe_authorize_deposit] Created authorize-only deposit id={new_dep.id} for user={user_id}, amt={amount}"
-            )
+            self.logger.info(f"[_create_stripe_authorize_deposit] Created authorize-only deposit id={new_dep.id} for user={user_id}, amt={amount}")
             return new_dep.id
 
     async def create_stripe_deposit(self, user_id: str, deposit_amount: int, session_id: str) -> int:
@@ -274,54 +267,33 @@ class DBAdapterStripeBillingMixin:
             await session.refresh(dep_obj)
             logging.info(f"[mark_stripe_deposit_completed] Deposit {dep_obj.id} marked completed.")
             return dep_obj
-    
+
     async def capture_stripe_payment_intent(self, hold: Hold, price: int, session) -> None:
         """
-        Captures the authorized PaymentIntent if:
-          - hold has stripe_deposit_id
-          - that StripeDeposit has a valid payment_intent_id
-        Will capture exactly `price` micro‐USD => convert to cents if needed.
-        If deposit or payment_intent_id is missing, quietly skip capture.
-        If Stripe fails, raise ValueError or log the error.
-
-        :param hold: The credit-card hold we are charging
-        :param price: The amount (in your internal integer format) we want to capture
-        :param session: the current AsyncSession
+        Captures the authorized PaymentIntent for the specified price.
+        If capture fails, raises a ValueError.
         """
         if not hold.stripe_deposit_id:
-            self.logger.debug(
-                f"[capture_stripe_payment_intent] hold={hold.id} => no stripe_deposit_id, skipping capture."
-            )
+            self.logger.debug(f"[capture_stripe_payment_intent] hold={hold.id} => no stripe_deposit_id, skipping capture.")
             return
 
-        # Fetch the StripeDeposit
         stmt = select(StripeDeposit).where(StripeDeposit.id == hold.stripe_deposit_id)
         result = await session.execute(stmt)
         deposit_obj = result.scalar_one_or_none()
         if not deposit_obj or not deposit_obj.payment_intent_id:
-            self.logger.debug(
-                f"[capture_stripe_payment_intent] hold={hold.id} => deposit not found or missing payment_intent_id, skipping."
-            )
+            self.logger.debug(f"[capture_stripe_payment_intent] hold={hold.id} => deposit missing payment_intent_id, skipping capture.")
             return
 
         try:
-            # Convert your micro-dollars to Stripe cents (adjust if you store amounts differently).
             from .....models.enums import CENT_AMOUNT
             capture_amount_in_cents = int(price / CENT_AMOUNT)
-
             stripe.PaymentIntent.capture(
                 deposit_obj.payment_intent_id,
                 amount_to_capture=capture_amount_in_cents
             )
-            self.logger.info(
-                f"[capture_stripe_payment_intent] Captured PaymentIntent={deposit_obj.payment_intent_id} "
-                f"for {capture_amount_in_cents} (cents), hold_id={hold.id}, deposit_id={deposit_obj.id}"
-            )
+            self.logger.info(f"[capture_stripe_payment_intent] Captured PaymentIntent={deposit_obj.payment_intent_id} for {capture_amount_in_cents} cents, hold_id={hold.id}, deposit_id={deposit_obj.id}")
         except stripe.error.StripeError as e:
             self.logger.error(f"[capture_stripe_payment_intent] Stripe capture failed: {e}")
-            # You can raise or return an error dict. Typically raise:
             raise ValueError(f"Stripe capture failed: {e}")
 
-        # success => just return
         return
-
