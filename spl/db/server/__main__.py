@@ -20,11 +20,10 @@ from .db_server_instance import db_adapter_server
 async def background_tasks():
     while True:
         try:
-            # Cleanup old holds
+            # 1) Clean up holds
             await db_adapter_server.check_and_cleanup_holds()
 
-            # Also expire old Stripe sessions
-            # e.g. older_than_minutes=120 => 2 hours
+            # 2) Expire old Stripe sessions
             await db_adapter_server.expire_old_stripe_deposits(older_than_minutes=120)
 
         except Exception as e:
@@ -47,7 +46,6 @@ if __name__ == "__main__":
         ephemeral_addr = get_db_sot_address()
 
         await init_db()
-        # Possibly create a perm for the root wallet
         await db_adapter_server.create_perm(args.root_wallet, get_perm_modify_db())
 
         config = Config()
