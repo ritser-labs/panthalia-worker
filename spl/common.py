@@ -13,6 +13,8 @@ import asyncio
 import aiohttp
 from eth_account import Account
 import io
+from safetensors.torch import load as safetensors_load
+import aiofiles
 
 SOT_PRIVATE_PORT = 5001
 
@@ -71,41 +73,6 @@ Task = namedtuple('Task', [
     'params', 'postedSolution', 'verificationRounds', 'verifierStake',
     'disputerStake'
 ])
-
-def save_to_disk(data, filename):
-    torch.save(data, filename)
-    print(f"Saved to {filename}")
-
-def load_from_disk(filename):
-    if os.path.exists(filename):
-        data = torch.load(filename, map_location=device)
-        print(f"Loaded from {filename}")
-        return data
-    else:
-        print(f"File {filename} does not exist")
-        return None
-
-def save_layer_state_dict(state_dict, filename):
-    torch.save(state_dict, filename)
-    print(f"Layer state dict saved to {filename}")
-
-def load_layer_state_dict(filename):
-    if os.path.exists(filename):
-        state_dict = torch.load(filename)
-        print(f"Layer state dict loaded from {filename}")
-        return state_dict
-    else:
-        print(f"File {filename} does not exist")
-        return None
-
-def upload_tensor(tensor, local_storage_dir):
-    local_file_path = os.path.join(local_storage_dir, f'{int(time.time())}.pt')
-    torch.save(tensor, local_file_path)
-    return f'file://{local_file_path}'
-
-def download_file(url):
-    response = requests.get(url)
-    return torch.load(BytesIO(response.content))
 
 def get_future_version_number(tensor_version_interval):
     return (int(time.time()) // tensor_version_interval + 1) * tensor_version_interval
@@ -213,14 +180,25 @@ async def download_file(
     url,
     retries=3,
     backoff=1,
-    # CHANGED default from 20 -> 300:
     chunk_timeout=300,
     download_type='batch_targets',
-    tensor_name=None
+    tensor_name=None,
+    local_file_path=None
 ):
     """
-    Downloads a .pt or other file from `url` with optional retries/backoff.
-    If chunk_timeout is exceeded when reading a chunk, we retry or fail.
+    Downloads a tensor file from `url` with optional retries/backoff.
+    If local_file_path is provided, writes the downloaded bytes to that file and returns the path.
+    Otherwise, returns the tensor loaded via safetensors_load_file.
+
+    :param url: The URL to download the file from.
+    :param retries: Number of download attempts.
+    :param backoff: Delay (in seconds) multiplier between attempts.
+    :param chunk_timeout: Timeout (in seconds) when reading a chunk.
+    :param download_type: Either 'tensor' or 'batch_targets' (controls locking behavior).
+    :param tensor_name: Optional tensor name to send as a URL parameter.
+    :param local_file_path: If provided, the path to save the downloaded file.
+    :return: Either the loaded tensor (if local_file_path is None) or the local_file_path.
+    :raises: Exception or NoMoreDataException on failure.
     """
     params = {'tensor_name': tensor_name} if tensor_name else None
     for attempt in range(1, retries + 1):
@@ -261,8 +239,14 @@ async def download_file(
                         await asyncio.sleep(backoff * attempt)
                         continue
 
-                    return torch.load(io.BytesIO(content), map_location='cpu')
-
+                    # If a local file path is provided, write the downloaded content there.
+                    if local_file_path is not None:
+                        async with aiofiles.open(local_file_path, 'wb') as f:
+                            await f.write(content)
+                        return local_file_path
+                    else:
+                        # Otherwise, load and return the tensor using safetensors.
+                        return safetensors_load(BytesIO(content))
         except NoMoreDataException:
             raise
         except (asyncio.TimeoutError, aiohttp.ClientError, aiohttp.ClientPayloadError) as e:

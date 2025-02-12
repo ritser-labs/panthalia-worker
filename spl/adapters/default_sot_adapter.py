@@ -29,6 +29,8 @@ from .sot_adapter import BaseSOTAdapter
 # Import your chunked-DCT and AdamW logic
 from ..util import demo
 from ..util.adam import adamw_update
+from safetensors.torch import save_file as safetensors_save_file
+from safetensors.torch import load_file as safetensors_load_file
 
 logging.basicConfig(level=logging.INFO)
 
@@ -166,18 +168,23 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             timestamp = int(time.time())
             random_suffix = random.randint(1000, 9999)
             combined_filename = f'input_{timestamp}_{random_suffix}.pt'
-            combined_tensor = torch.cat([batch_tensor, targets_tensor], dim=0)
+            result_dict = {
+                'inputs': batch_tensor,
+                'targets': targets_tensor
+            }
 
             out_path = os.path.join(self.temp_dir, combined_filename)
 
-            # *** Asynchronous save without 'sendall' ***
             import aiofiles
-            buffer = io.BytesIO()
-            torch.save(combined_tensor, buffer)
-            buffer.seek(0)
+            import io
+            from safetensors.torch import save_file as safetensors_save_file
+
+            mem_buf = io.BytesIO()
+            safetensors_save_file(result_dict, mem_buf)
+            mem_buf.seek(0)
 
             async with aiofiles.open(out_path, 'wb') as f:
-                await f.write(buffer.read())
+                await f.write(mem_buf.read())
 
             return jsonify({
                 'input_url': f'/data/state/temp/{combined_filename}'
@@ -213,7 +220,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                 return jsonify({'error': 'File not found'}), 404
 
             # Load the encoded gradient
-            loaded_obj = torch.load(local_file_path, map_location=device)
+            loaded_obj = safetensors_load_file(local_file_path, device=device)
 
             # Decode partial grads from chunked DCT
             partial_grads = demo.chunked_dct_decode_int8(
@@ -239,13 +246,15 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
             # Update aggregator_sum
             if os.path.exists(self.aggregator_sum_path):
-                aggregator_sum = torch.load(self.aggregator_sum_path, map_location=device)
-                aggregator_sum = aggregator_sum + partial_grads
+                loaded_dict = safetensors_load_file(self.aggregator_sum_path)
+                aggregator_sum = loaded_dict["tensor"].to(device)
             else:
                 aggregator_sum = partial_grads
 
-            torch.save(aggregator_sum, self.aggregator_sum_path + ".tmp")
-            os.rename(self.aggregator_sum_path + ".tmp", self.aggregator_sum_path)
+            tmp_path = self.aggregator_sum_path + ".tmp"
+            safetensors_save_file({"tensor": aggregator_sum}, tmp_path)
+            os.rename(tmp_path, self.aggregator_sum_path)
+
 
             # Update aggregator_count
             updates_count = 0
@@ -375,7 +384,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             fpath = os.path.join(self.base_dir, f'{tensor_name}_{cur_ver}.pt')
             if not os.path.exists(fpath):
                 return jsonify({'error': 'Tensor not found'}), 404
-            t_ = torch.load(fpath, map_location=device)
+            t_ = safetensors_load_file(fpath, device=device)["tensor"]
             return jsonify({'size': t_.numel()})
 
         @self.app.route('/data/state/<path:filename>', methods=['GET'])
@@ -493,7 +502,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         if not os.path.exists(self.aggregator_sum_path):
             return None, None
 
-        aggregator_sum = torch.load(self.aggregator_sum_path, map_location=device)
+        aggregator_sum = safetensors_load_file(self.aggregator_sum_path, device=device)["tensor"]
         updates_count = 0
         if os.path.exists(self.aggregator_count_path):
             with open(self.aggregator_count_path, "r") as f:
@@ -518,17 +527,20 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             logging.error(f"[_finalize_aggregator] Missing old params => cannot finalize from v={old_version}")
             return None, None
 
-        old_params_data = torch.load(old_params_path, map_location=device)
+        old_dict = safetensors_load_file(old_params_path)
+        old_params_data = old_dict["tensor"].to(device)
 
         # Load old Adam moments
         old_m_path = os.path.join(self.base_dir, f"{tensor_name}_adam_m_{old_version}.pt")
         old_v_path = os.path.join(self.base_dir, f"{tensor_name}_adam_v_{old_version}.pt")
         if os.path.exists(old_m_path):
-            m_vector = torch.load(old_m_path, map_location=device)
+            m_vector_dict = safetensors_load_file(old_m_path)
+            m_vector = m_vector_dict["tensor"].to(device)
         else:
             m_vector = torch.zeros_like(old_params_data)
         if os.path.exists(old_v_path):
-            v_vector = torch.load(old_v_path, map_location=device)
+            v_vector_dict = safetensors_load_file(old_v_path)
+            v_vector = v_vector_dict["tensor"].to(device)
         else:
             v_vector = torch.zeros_like(old_params_data)
 
@@ -572,13 +584,13 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         # aggregator_error for chunked‐DCT
         if os.path.exists(self.aggregator_error_path):
-            aggregator_error = torch.load(self.aggregator_error_path, map_location=device)
+            aggregator_error = safetensors_load_file(self.aggregator_error_path, device=device)["tensor"]
             logging.info(f"[_finalize_aggregator] Found aggregator_error with norm={aggregator_error.norm().item():.6f}")
         else:
             aggregator_error = None
 
-        chunk_shape = (512,)  # example
-        k_val = 10
+        chunk_shape = hyperparams['chunk_shape']
+        k_val = hyperparams['k']
         (
             freq_idxs,
             freq_vals_int8,
@@ -599,7 +611,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             f"max_abs={final_diff.abs().max().item():.6f}"
         )
 
-        torch.save(new_error, self.aggregator_error_path + ".tmp")
+        safetensors_save_file({"tensor": new_error}, self.aggregator_error_path + ".tmp")
         os.rename(self.aggregator_error_path + ".tmp", self.aggregator_error_path)
         logging.info(
             f"[_finalize_aggregator] aggregator_error updated => norm={new_error.norm().item():.6f}"
@@ -615,7 +627,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             'pad_count': pad_count,
         }
         diff_file_path = os.path.join(self.base_dir, f"diff_{old_version}_to_{new_version}.pt")
-        torch.save(diff_dict, diff_file_path)
+        safetensors_save_file(diff_dict, diff_file_path)
 
         rel_url = f'/data/state/diff_{old_version}_to_{new_version}.pt'
         self.versioned_diffs[new_version] = (rel_url, time.time())
@@ -632,16 +644,16 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         new_params = old_params_data + decoded_diff
 
         new_params_path = os.path.join(self.base_dir, f"{tensor_name}_{new_version}.pt")
-        torch.save(new_params, new_params_path + ".tmp")
+        safetensors_save_file({"tensor": new_params}, new_params_path + ".tmp")
         os.rename(new_params_path + ".tmp", new_params_path)
 
         # Save new_m, new_v
         new_m_path = os.path.join(self.base_dir, f"{tensor_name}_adam_m_{new_version}.pt")
-        torch.save(new_m, new_m_path + ".tmp")
+        safetensors_save_file({"tensor": new_m}, new_m_path + ".tmp")
         os.rename(new_m_path + ".tmp", new_m_path)
 
         new_v_path = os.path.join(self.base_dir, f"{tensor_name}_adam_v_{new_version}.pt")
-        torch.save(new_v, new_v_path + ".tmp")
+        safetensors_save_file({"tensor": new_v}, new_v_path + ".tmp")
         os.rename(new_v_path + ".tmp", new_v_path)
 
         logging.info(

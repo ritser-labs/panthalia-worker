@@ -11,7 +11,7 @@ from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 import os
 import aiohttp
 import asyncio
-from ..util.docker import janky_url_replace
+from safetensors.torch import load_file as safetensors_load_file
 
 # We'll import the chunked-DCT from demo.py only here
 from ..util import demo
@@ -56,7 +56,7 @@ class ModelAdapter(ABC):
         pass
     
     @abstractmethod
-    async def load_input_tensor(self, input_tensor):
+    async def load_input_tensor(self, input_tensor_dict):
         pass
 
     @abstractmethod
@@ -112,7 +112,7 @@ class ModelAdapter(ABC):
                             tmp_path = tmp_f.name
                             tmp_f.write(file_bytes)
 
-                        loaded_tensor = torch.load(tmp_path, map_location=device)
+                        loaded_tensor = safetensors_load_file(tmp_path, device=device)["tensor"]
                         os.remove(tmp_path)
 
                         param_tensor = loaded_tensor.to(device)
@@ -182,7 +182,7 @@ class StandardModelAdapter(ModelAdapter):
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss
 
-    async def load_input_tensor(self, input_tensor):
+    async def load_input_tensor(self, input_tensor_dict):
         """
         Expects input_tensor: [ batch + batch ] => we split half for input, half for target.
         Also resets leftover step states like prev_error, self.inputs, self.targets.
@@ -191,16 +191,9 @@ class StandardModelAdapter(ModelAdapter):
         self.inputs = None
         self.targets = None
         self.prev_error = None
-
-        if input_tensor is None or not isinstance(input_tensor, torch.Tensor) or input_tensor.numel() == 0:
-            raise ValueError("Invalid or empty input_tensor in load_input_tensor.")
-
-        half = input_tensor.size(0) // 2
-        if half == 0 or (half * 2 != input_tensor.size(0)):
-            raise ValueError("Invalid shape for splitting into (inputs, targets).")
-
-        self.inputs = input_tensor[:half].to(device, non_blocking=True)
-        self.targets = input_tensor[half:].to(device, non_blocking=True)
+        
+        self.inputs = input_tensor_dict['inputs'].to(device, non_blocking=True)
+        self.targets = input_tensor_dict['targets'].to(device, non_blocking=True)
 
     async def execute_step(
         self,

@@ -18,6 +18,8 @@ from .json import load_json, save_json
 
 # NEW: import your AdamW function
 from .adam import adamw_update  # <-- CHANGED: we will use this instead
+from safetensors.torch import save_file as safetensors_save_file
+from safetensors.torch import load_file as safetensors_load_file
 
 def ensure_file_locks(file_locks: dict) -> dict:
     required_keys = [
@@ -92,7 +94,7 @@ async def initialize_tensor(
     if not os.path.exists(file_path):
         logging.info(f"{file_path} is missing; creating from init_tensor(...)")
         tensor = init_tensor_func(zero_init)
-        torch.save(tensor, file_path)
+        safetensors_save_file({"tensor": tensor}, file_path)
 
         block_timestamps[name] = sync_version_number
         await save_json(block_timestamps_file, block_timestamps, file_locks['block_timestamps'])
@@ -178,7 +180,7 @@ async def apply_optimizer(
     if not os.path.exists(old_path):
         raise FileNotFoundError(f"Tensor file not found at {old_path}")
 
-    param_vector = torch.load(old_path, map_location=device).to(device)
+    param_vector = safetensors_load_file(param_vector, device=device)['tensor']
     if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
         raise ValueError(f"NaN/Inf in grads for {tensor_name} -- aborting update.")
 
@@ -187,13 +189,13 @@ async def apply_optimizer(
     old_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{version_number}.pt')
 
     if os.path.exists(old_m_path):
-        m_vector = torch.load(old_m_path, map_location=device)
+        m_vector = safetensors_load_file(m_vector, device=device)['tensor']
     else:
         logging.info(f"No momentum file found for {tensor_name} v{version_number}, using zeros.")
         m_vector = torch.zeros_like(param_vector, device=device)
 
     if os.path.exists(old_v_path):
-        v_vector = torch.load(old_v_path, map_location=device)
+        v_vector = safetensors_load_file(v_vector, device=device)['tensor']
     else:
         logging.info(f"No variance file found for {tensor_name} v{version_number}, using zeros.")
         v_vector = torch.zeros_like(param_vector, device=device)

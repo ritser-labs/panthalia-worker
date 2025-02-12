@@ -139,8 +139,8 @@ def int8_to_float(q: torch.Tensor, scales: torch.Tensor, min_vals: torch.Tensor)
 
 def chunked_dct_encode_int8(
     x: torch.Tensor,
-    chunk_shape: tuple[int, ...],
-    k: int,
+    chunk_shape: torch.Tensor,
+    k: torch.Tensor,
     prev_error: torch.Tensor | None = None,
     norm: str = 'ortho'
 ):
@@ -152,13 +152,17 @@ def chunked_dct_encode_int8(
     4) Reconstruct an approximate DCT (by dequantizing and scattering the values back)
        to compute the residual error.
     5) Returns freq_idxs, freq_vals_int8, scales, min_vals, new_error, and pad_count.
+
+    Note:
+      - chunk_shape is expected to be a 1D torch.Tensor containing the dimensions of each chunk.
+      - k is expected to be a scalar torch.Tensor representing the number of coefficients to retain.
     """
     if prev_error is not None:
         x = x + prev_error
 
     full_shape = x.shape
     total_elems = x.numel()
-    chunk_elems = math.prod(chunk_shape)
+    chunk_elems = int(torch.prod(chunk_shape).item())
 
     # Zero-pad if necessary.
     remainder = total_elems % chunk_elems
@@ -170,7 +174,7 @@ def chunked_dct_encode_int8(
         x = x.flatten()
 
     num_chunks = x.numel() // chunk_elems
-    x_chunks = x.view(num_chunks, *chunk_shape)
+    x_chunks = x.view(num_chunks, *chunk_shape.tolist())
 
     # Apply the nD DCT on each chunk.
     dct_chunks = dct_nd_naive(x_chunks, norm=norm)   # shape: (num_chunks, *chunk_shape)
@@ -178,7 +182,8 @@ def chunked_dct_encode_int8(
 
     # Select top-k coefficients (by absolute value) in each chunk.
     abs_dct = dct_chunks_flat.abs()
-    _, freq_idxs = torch.topk(abs_dct, k, dim=1, largest=True, sorted=False)
+    k_val = int(k.item())
+    _, freq_idxs = torch.topk(abs_dct, k_val, dim=1, largest=True, sorted=False)
     topk_vals = dct_chunks_flat.gather(dim=1, index=freq_idxs)
 
     # Quantize the top-k coefficients.
@@ -198,7 +203,7 @@ def chunked_dct_encode_int8(
     x_recon = x_recon_flat.view(full_shape)
 
     new_error = x[:total_elems].view(full_shape) - x_recon
-    return freq_idxs, freq_vals_int8, scales, min_vals, new_error, pad_count
+    return freq_idxs, freq_vals_int8, scales, min_vals, new_error, torch.tensor(pad_count)
 
 
 def chunked_dct_decode_int8(
@@ -207,9 +212,9 @@ def chunked_dct_decode_int8(
     scales: torch.Tensor,
     min_vals: torch.Tensor,
     x_shape: tuple[int, ...],
-    chunk_shape: tuple[int, ...],
-    norm: str = 'ortho',
-    pad_count: int = 0
+    chunk_shape: torch.Tensor,
+    norm: str,
+    pad_count: torch.Tensor
 ):
     """
     Decode the chunked DCT:
@@ -217,19 +222,23 @@ def chunked_dct_decode_int8(
       2) Scatter them back into the DCT coefficient array.
       3) Apply the inverse nD DCT.
       4) Remove zero-padding and reshape to x_shape.
+
+    Note:
+      - chunk_shape is expected to be a 1D torch.Tensor containing the dimensions of each chunk.
     """
-    chunk_elems = math.prod(chunk_shape)
+    chunk_elems = int(torch.prod(chunk_shape).item())
     num_chunks = freq_idxs.size(0)
 
     freq_vals_float = int8_to_float(freq_vals_int8, scales, min_vals)
     recon_flat = torch.zeros(num_chunks, chunk_elems, device=freq_idxs.device,
                                dtype=freq_vals_float.dtype)
     recon_flat.scatter_(1, freq_idxs, freq_vals_float)
-    recon_chunks = recon_flat.view(num_chunks, *chunk_shape)
+    recon_chunks = recon_flat.view(num_chunks, *chunk_shape.tolist())
     x_chunks = idct_nd_naive(recon_chunks, norm=norm)
     x_approx_flat = x_chunks.reshape(-1)
-    if pad_count > 0:
-        x_approx_flat = x_approx_flat[:-pad_count]
+    pad_count_val = pad_count.item()
+    if pad_count_val > 0:
+        x_approx_flat = x_approx_flat[:-pad_count_val]
     x_approx = x_approx_flat.view(x_shape)
     return x_approx
 
@@ -245,8 +254,8 @@ if __name__ == "__main__":
 
     # Use chunks of shape 64x64 (each chunk has 4096 elements).
     # With k=4096 you retain all coefficients.
-    chunk_shape = (64, 64)
-    k = 4096
+    chunk_shape = torch.tensor([64, 64])
+    k = torch.tensor(4096)
 
     # (Optional) Previous error – here zero.
     prev_error = torch.zeros_like(x)
