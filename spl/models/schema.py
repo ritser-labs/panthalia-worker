@@ -10,7 +10,7 @@ from sqlalchemy.ext.mutable import MutableDict
 from .enums import (
     ServiceType, PermType, OrderType, AccountTxnType, HoldType,
     CreditTxnType, EarningsTxnType, PlatformRevenueTxnType, WithdrawalStatus,
-    TaskStatus, SlotType
+    TaskStatus, SlotType, PluginReviewStatus
 )
 from .base import Base
 import enum
@@ -37,6 +37,8 @@ class Plugin(TimestampMixin, Serializable):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     code = Column(Text, nullable=False)
+    review_status = Column(Enum(PluginReviewStatus), nullable=False, 
+                           default=PluginReviewStatus.Unreviewed)
     jobs = relationship("Job", back_populates="plugin")
 
 class Subnet(Serializable):

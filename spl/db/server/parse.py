@@ -5,41 +5,34 @@ from inspect import signature
 from typing import Any, Dict, get_type_hints, Union, get_origin, get_args
 
 def convert_to_type(value, expected_type):
-    """
-    Convert `value` to the expected Python type/Enum/Union/etc.
-    Handles:
-      - Enum by name
-      - bool from 'true'/'false'/'1'/'0'
-      - list[...] by recursively converting each item
-      - Union[...] by trying each variant
-      - other types via direct constructor
-
-    Raises ValueError if conversion fails.
-    """
     if value is None:
-        # Check if expected_type can accept None, i.e. Union[..., None]
-        if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
-            if type(None) in get_args(expected_type):
-                return None
+        origin = get_origin(expected_type)
+        # Check if the expected type is a Union (including new union syntax in Python 3.10+)
+        if (origin is Union or isinstance(expected_type, types.UnionType)) \
+           and (type(None) in get_args(expected_type)):
+            return None
         raise ValueError(f"Cannot convert None to {expected_type}")
 
-    # 1) If it's an Enum type, convert by name
+    # Handle Enums by name, with a case-insensitive fallback.
     if isinstance(expected_type, type) and issubclass(expected_type, Enum):
-        # Convert string -> Enum member
         try:
             return expected_type[value]
         except KeyError:
+            if isinstance(value, str):
+                for member in expected_type:
+                    if member.value.lower() == value.lower():
+                        return member
             raise ValueError(f"Cannot convert {value!r} to Enum {expected_type.__name__}")
 
-    # 2) If it's a list type => convert each item
+    # Handle list[...] types.
     if get_origin(expected_type) is list:
-        (inner_type,) = get_args(expected_type)  # e.g. List[str]
+        (inner_type,) = get_args(expected_type)
         if not isinstance(value, list):
             raise ValueError(f"Expected list for {expected_type}, got {type(value).__name__}")
         return [convert_to_type(item, inner_type) for item in value]
 
-    # 3) If it's a Union => try each sub-type
-    if get_origin(expected_type) is Union or isinstance(expected_type, types.UnionType):
+    # Handle Union[...] by trying each sub-type.
+    if get_origin(expected_type) in (Union,) or isinstance(expected_type, types.UnionType):
         for sub_type in get_args(expected_type):
             try:
                 return convert_to_type(value, sub_type)
@@ -47,7 +40,7 @@ def convert_to_type(value, expected_type):
                 pass
         raise ValueError(f"Cannot convert {value!r} to any of {get_args(expected_type)}")
 
-    # 4) Special handling for bool from string
+    # Special handling for booleans coming in as strings.
     if expected_type is bool and isinstance(value, str):
         lower_val = value.lower()
         if lower_val in ['true', '1']:
@@ -56,7 +49,7 @@ def convert_to_type(value, expected_type):
             return False
         raise ValueError(f"Cannot convert {value!r} to bool")
 
-    # 5) Otherwise, try direct constructor
+    # Otherwise, attempt a direct conversion.
     try:
         return expected_type(value)
     except Exception as e:

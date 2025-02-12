@@ -5,7 +5,7 @@ import asyncio
 import logging
 import json
 
-from ..models import TaskStatus
+from ..models import TaskStatus, PluginReviewStatus
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +72,21 @@ async def _save_replication_chain_state(db_adapter, job_id, original_task_id, ch
 ###############################################################################
 # Probability-based check for spawning a replicate child
 ###############################################################################
-async def should_replicate(db_adapter, job_id) -> bool:
-    """
-    Return True with probability = prob. Uses `secrets.randbelow` for randomness.
-    """
+async def should_replicate(db_adapter, job_id: int) -> bool:
+    # Retrieve the job record.
     job = await db_adapter.get_job(job_id)
-    threshold = int(1000 * job.replicate_prob)
+    
+    # Retrieve the plugin associated with the job.
+    plugin = await db_adapter.get_plugin(job.plugin_id)
+    
+    # If the plugin is not approved, disable replication.
+    if plugin.review_status != PluginReviewStatus.Approved:
+        replicate_prob = 0.0
+    else:
+        replicate_prob = job.replicate_prob
+
+    # Use secrets.randbelow for randomness.
+    threshold = int(1000 * replicate_prob)
     return secrets.randbelow(1000) < threshold
 
 

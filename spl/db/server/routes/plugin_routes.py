@@ -31,3 +31,22 @@ async def get_plugins_route():
         auth_method=AuthMethod.NONE
     )
     return await route_func()
+
+@app.route('/admin/update_plugin_review_status', methods=['POST'], endpoint='update_plugin_review_status_endpoint')
+async def update_plugin_review_status_route():
+    route_func = create_post_route_return_id(
+        db_adapter_server.update_plugin_review_status,
+        ['plugin_id', 'review_status'],
+        'plugin_id',
+        auth_method=AuthMethod.ADMIN
+    )
+    return await route_func()
+
+@app.route('/admin/plugins', methods=['GET'], endpoint='admin_plugins_endpoint')
+async def admin_plugins_route():
+    route_func = create_get_route(
+        method=db_adapter_server.list_plugins,
+        params=['offset', 'limit', 'review_status'],
+        auth_method=AuthMethod.ADMIN
+    )
+    return await route_func()

@@ -34,7 +34,7 @@ def requires_user_auth_with_adapter(f):
     return requires_user_or_key_auth(get_db_adapter, get_perm_modify_db)(f)
 
 def requires_admin_auth_with_adapter(f):
-    return requires_user_or_key_auth(get_db_adapter, get_perm_modify_db, admin_required=True)(f)
+    return requires_user_or_key_auth(get_db_adapter, get_perm_modify_db, require_admin=True)(f)
 
 def requires_sot_auth_with_adapter(f):
     return requires_sot_auth(get_db_adapter)(f)

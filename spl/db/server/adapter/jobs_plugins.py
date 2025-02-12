@@ -2,10 +2,11 @@
 
 import logging
 from sqlalchemy import select, update
-from ....models import Job, Plugin, Subnet, Task, TaskStatus, Sot
+from ....models import Job, Plugin, Subnet, Task, TaskStatus, Sot, PluginReviewStatus
 from sqlalchemy.orm import joinedload
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 MIN_REPLICATE_PROB = 0.0
 MAX_REPLICATE_PROB = 0.4
@@ -319,3 +320,39 @@ class DBAdapterJobsPluginsMixin:
             result = await session.execute(stmt)
             jobs = result.scalars().all()
             return jobs
+
+    async def update_plugin_review_status(self, plugin_id: int, review_status: PluginReviewStatus):
+        async with self.get_async_session() as session:
+            stmt = (
+                update(Plugin)
+                .where(Plugin.id == plugin_id)
+                .values(review_status=review_status)
+            )
+            await session.execute(stmt)
+            await session.commit()
+            return plugin_id
+    
+    async def list_plugins(self, offset: int = 0, limit: int = 20, review_status: str = 'all'):
+        """
+        Returns a paginated list of Plugin records.
+        
+        :param offset: Number of records to skip.
+        :param limit: Maximum number of records to return.
+        :param review_status: (Optional) a string value, one of 'all', 'unreviewed', 'approved', or 'rejected'
+                              (case insensitive). If provided, only plugins with that status are returned.
+        :return: A list of Plugin objects.
+        :raises ValueError: if an invalid review_status is provided.
+        """
+        stmt = select(Plugin)
+        if review_status != 'all':
+            try:
+                # Convert the provided string (e.g. "approved") to the corresponding enum value.
+                status_enum = PluginReviewStatus(review_status.lower())
+            except Exception as e:
+                raise ValueError("Invalid review_status filter; allowed values are 'all', 'unreviewed', 'approved', 'rejected'.")
+            stmt = stmt.where(Plugin.review_status == status_enum)
+        stmt = stmt.offset(offset).limit(limit)
+        async with self.get_async_session() as session:
+            result = await session.execute(stmt)
+            plugins = result.scalars().all()
+            return plugins

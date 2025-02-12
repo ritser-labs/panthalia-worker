@@ -52,3 +52,8 @@ class SlotType(enum.Enum):
     SOT = "sot"
     WORKER = "worker"
     MASTER = "master"
+
+class PluginReviewStatus(enum.Enum):
+    Unreviewed = "unreviewed"
+    Approved = "approved"
+    Rejected = "rejected"
