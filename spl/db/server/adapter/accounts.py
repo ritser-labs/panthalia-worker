@@ -2,7 +2,7 @@
 
 import logging
 from datetime import datetime
-from sqlalchemy import select
+from sqlalchemy import update, delete, select
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 from eth_account import Account as EthAccount
@@ -11,11 +11,15 @@ from datetime import timedelta
 from ....models import (
     Account, CreditTransaction, CreditTxnType,
     EarningsTransaction, EarningsTxnType, PlatformRevenue, PlatformRevenueTxnType,
-    AccountKey, WithdrawalRequest, WithdrawalStatus, StripeDeposit, Hold, HoldType
+    AccountKey, WithdrawalRequest, WithdrawalStatus, StripeDeposit, Hold, HoldType,
+    Task, Order, AccountTransaction
 )
+import uuid
 from typing import Optional
+from spl.auth.auth0_management import delete_auth0_user
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class DBAdapterAccountsMixin:
     MINIMUM_PAYOUT_AMOUNT = 50.0
@@ -234,3 +238,64 @@ class DBAdapterAccountsMixin:
             await session.refresh(dep_obj)
             logger.info(f"[link_deposit_to_transaction] deposit {deposit_id} linked to credit_tx {credit_tx_id}")
             return dep_obj
+
+    async def delete_account(self):
+        """
+        Anonymizes the current user’s account and associated personal data.
+        This implementation “deletes” the account by replacing the user's identifier
+        with an anonymized value and removing any account keys. Other tables that hold
+        the user_id (such as tasks, orders, transactions, withdrawals, holds) are updated
+        so that the personal identifier is no longer stored.
+
+        Additionally, it calls the Auth0 Management API to delete the Auth0 user.
+        """
+        # Get the current user's original id (assumed to be the Auth0 user id, e.g. "auth0|...")
+        user_id = self.get_user_id()
+
+        async with self.get_async_session() as session:
+            # Fetch the account record for this user
+            stmt = select(Account).where(Account.user_id == user_id)
+            result = await session.execute(stmt)
+            account = result.scalar_one_or_none()
+            if not account:
+                raise ValueError("Account not found.")
+
+            # Preserve the original user_id (to use for the Auth0 deletion call)
+            original_user_id = account.user_id
+
+            # Generate an anonymized user_id—for example, "deleted_<account.id>_<uuid>"
+            new_user_id = f"deleted_{account.id}_{uuid.uuid4().hex}"
+            account.user_id = new_user_id  # update the account record
+
+            # Update all other tables that store the personal user_id.
+            tables = [
+                Order,
+                AccountTransaction,
+                CreditTransaction,
+                EarningsTransaction,
+                WithdrawalRequest,
+                Hold
+            ]
+            for table in tables:
+                upd = (
+                    update(table)
+                    .where(table.user_id == original_user_id)
+                    .values(user_id=new_user_id)
+                )
+                await session.execute(upd)
+
+            # Delete any account keys for this user (since these contain cryptographic material)
+            del_stmt = delete(AccountKey).where(AccountKey.user_id == original_user_id)
+            await session.execute(del_stmt)
+
+            await session.commit()
+
+        # Now delete the user from Auth0 using your management API helper.
+        try:
+            delete_auth0_user(original_user_id)
+            logger.info(f"Auth0 user {original_user_id} deleted successfully.")
+        except Exception as e:
+            logger.error(f"Failed to delete Auth0 user {original_user_id}: {e}")
+            # Depending on your application's policy, you might choose to re-raise here.
+
+        return True

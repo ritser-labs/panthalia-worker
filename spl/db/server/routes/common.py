@@ -23,6 +23,9 @@ class AuthMethod(Enum):
     KEY = 2       # key_auth only
     ADMIN = 3     # user_auth + admin check
     SOT = 4       # SOT auth
+    
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 def get_db_adapter():
     return db_adapter_server

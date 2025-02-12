@@ -15,6 +15,10 @@ needs env variables:
 - `STRIPE_WEBHOOK_SECRET`
 - `STRIPE_SUCCESS_URL`
 - `STRIPE_CANCEL_URL`
+- `PANTHALIA_AUTH0_MGMT_CLIENT_ID`
+- `PANTHALIA_AUTH0_MGMT_CLIENT_SECRET`
+
+ensure that in auth0 dashboard the management api has delete:users permission (in the management api -> apis -> management api -> permissions)
 
 run tests with `pytest spl/tests`
 

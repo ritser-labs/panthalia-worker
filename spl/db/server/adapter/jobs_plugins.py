@@ -6,7 +6,6 @@ from ....models import Job, Plugin, Subnet, Task, TaskStatus, Sot, PluginReviewS
 from sqlalchemy.orm import joinedload
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 MIN_REPLICATE_PROB = 0.0
 MAX_REPLICATE_PROB = 0.4

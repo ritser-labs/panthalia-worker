@@ -11,6 +11,7 @@ from .ephemeral_key import (
 
 # Possibly the same logger you used
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 original_app = Quart(__name__)
 app = cors(original_app, allow_origin="http://localhost:3000")
@@ -43,3 +44,4 @@ from .routes import stripe_routes
 from .routes import subnet_routes
 from .routes import task_routes
 from .routes import withdrawal_routes
+from .routes import account_routes
