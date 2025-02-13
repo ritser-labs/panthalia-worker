@@ -664,15 +664,48 @@ class DBAdapterOrdersTasksMixin:
             raise ValueError("Missing solver hold in incorrect scenario.")
         solver_hold = ask_order.hold
 
+        # 1) Refund the compute buyer:
+        # Free the full bid price from the buyer's hold.
         leftover_amount = bid_order.price
         await self.free_funds_from_hold(session, bid_order.hold, leftover_amount, bid_order)
         logger.info(
             f"[handle_incorrect_resolution_scenario] Freed leftover amount={leftover_amount:.2f} from buyer hold.id={bid_order.hold.id}"
         )
+
+        # 2) Charge the solver’s stake:
         subnet = task.job.subnet
         solver_stake = ask_order.price * subnet.stake_multiplier
         await self.charge_hold_for_price(session, solver_hold, solver_stake)
-        await self.add_platform_revenue(session, solver_stake, PlatformRevenueTxnType.Add)
+
+        # 3) Split the stake:
+        #    - Compute platform fee (same percentage as in the correct scenario)
+        #    - Compute buyer bonus (the remainder)
+        platform_fee = solver_stake * PLATFORM_FEE_PERCENTAGE
+        buyer_bonus = solver_stake - platform_fee
+
+        # Add the platform fee to revenue.
+        await self.add_platform_revenue(session, platform_fee, PlatformRevenueTxnType.Add)
+
+        # 4) Credit the compute buyer (bid owner) with the bonus:
+        buyer_account = await self.get_or_create_account(bid_order.user_id, session)
+        if buyer_bonus > 0:
+            await self.add_earnings_transaction(session, buyer_account, buyer_bonus, EarningsTxnType.Add)
+            logger.info(f"[handle_incorrect_resolution_scenario] Added buyer bonus of {buyer_bonus:.2f} to buyer's earnings (bid owner)")
+            # IMPORTANT: Also create a new earnings hold to reflect the credited bonus.
+            from datetime import datetime, timedelta
+            new_earnings_hold = Hold(
+                account_id=buyer_account.id,
+                user_id=bid_order.user_id,
+                hold_type=HoldType.Earnings,
+                total_amount=buyer_bonus,
+                used_amount=0.0,
+                expiry=datetime.utcnow() + timedelta(days=365),
+                charged=False,
+                charged_amount=0.0,
+                parent_hold_id=None
+            )
+            session.add(new_earnings_hold)
+
 
     async def get_last_task_with_status(self, job_id: int, statuses: list[TaskStatus]):
         async with self.get_async_session() as session:
