@@ -52,6 +52,7 @@ class Subnet(Serializable):
     solve_period = Column(Integer, nullable=False)
     stake_multiplier = Column(Float, nullable=False)
     target_price = Column(Integer, nullable=False)
+    description = Column(String, nullable=False)
     jobs = relationship("Job", back_populates="subnet")
     orders = relationship("Order", back_populates="subnet")
     plugins = relationship("Plugin", back_populates="subnet")

@@ -24,7 +24,7 @@ async def get_subnet_using_address_route():
 async def create_subnet_route():
     route_func = create_post_route_return_id(
         db_adapter_server.create_subnet,
-        ['dispute_period','solve_period','stake_multiplier','target_price'],
+        ['dispute_period','solve_period','stake_multiplier','target_price', 'description'],
         'subnet_id'
     )
     return await route_func()
