@@ -2,16 +2,8 @@
 import logging
 import sys
 
-class SuppressTracebackFilter(logging.Filter):
-    def filter(self, record):
-        if 'ConnectionRefusedError' in record.getMessage() or 'MaxRetryError' in record.getMessage():
-            return False
-        return True
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-logger.addFilter(SuppressTracebackFilter())
 
 # Console handler
 ch = logging.StreamHandler(sys.stdout)
@@ -24,9 +16,9 @@ logger.addHandler(ch)
 gui_log_handler = None
 
 def set_gui_handler(handler):
-    global gui_log_handler
-    if gui_log_handler:
-        logger.removeHandler(gui_log_handler)
-    gui_log_handler = handler
-    if gui_log_handler:
-        logger.addHandler(gui_log_handler)
+    root = logging.getLogger()  # Get the root logger
+    # Optionally, remove any existing GUI handlers from the root logger:
+    for h in root.handlers:
+        if isinstance(h, type(handler)):
+            root.removeHandler(h)
+    root.addHandler(handler)

@@ -8,22 +8,34 @@ from .gui_config import get_private_key, set_private_key, get_config, update_con
 from .logging_config import logger, set_gui_handler
 from .main_logic import main
 from .config import args
-from logging import Handler, LogRecord
 import os
+import signal
 
-from .db_client import have_connected_once, verify_db_connection_and_auth
+# Register global signal handlers in the main (GUI) thread.
+def global_shutdown_handler(signum, frame):
+    logger.info(f"Received signal {signum}; initiating shutdown (global handler).")
+    from .shutdown_flag import set_shutdown_requested
+    set_shutdown_requested(True)
+
+signal.signal(signal.SIGINT, global_shutdown_handler)
+signal.signal(signal.SIGTERM, global_shutdown_handler)
 
 class LogSignal(QtCore.QObject):
     new_log = QtCore.pyqtSignal(str)
 
-class GuiLogHandler(Handler):
+class GuiLogHandler(logging.Handler):
     def __init__(self, signal):
         super().__init__()
         self.signal = signal
 
-    def emit(self, record: LogRecord):
-        msg = self.format(record)
-        self.signal.new_log.emit(msg)
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.signal.new_log.emit(msg)
+        except RuntimeError:
+            # The LogSignal has been deleted (likely because the GUI is closing),
+            # so simply ignore the log message.
+            pass
 
 class LoginDialog(QtWidgets.QDialog):
     def __init__(self):
@@ -56,14 +68,14 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.db_url_edit = QtWidgets.QLineEdit(self.config.get("db_url", ""))
         self.docker_url_edit = QtWidgets.QLineEdit(self.config.get("docker_engine_url", ""))
-        # CHANGED: rename from api_key to private_key
-        self.private_key_edit = QtWidgets.QLineEdit(self.config.get("private_key", "")) 
+        # Use "private_key" (not "api_key")
+        self.private_key_edit = QtWidgets.QLineEdit(self.config.get("private_key", ""))
         self.private_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.subnet_id_edit = QtWidgets.QLineEdit(str(self.config.get("subnet_id", "")))
 
         layout.addRow("DB URL:", self.db_url_edit)
         layout.addRow("Docker Engine URL:", self.docker_url_edit)
-        layout.addRow("Private Key:", self.private_key_edit)  # CHANGED: was API Key
+        layout.addRow("Private Key:", self.private_key_edit)
         layout.addRow("Subnet ID:", self.subnet_id_edit)
 
         self.save_btn = QtWidgets.QPushButton("Save")
@@ -94,7 +106,22 @@ class SettingsDialog(QtWidgets.QDialog):
             "subnet_id": new_subnet_id
         }
 
-        update_config({k:v for k,v in update_data.items() if v is not None and v != ""})
+        # Save the updated configuration
+        update_config({k: v for k, v in update_data.items() if v is not None and v != ""})
+        
+        # ---- NEW CODE: update the global args and DB adapter ----
+        from .config import args, load_config
+        config = load_config()
+        args.private_key = config.get("private_key")
+        args.db_url = config.get("db_url")
+        args.docker_engine_url = config.get("docker_engine_url")
+        args.subnet_id = config.get("subnet_id")
+        from .db_client import db_adapter
+        db_adapter.base_url = args.db_url.rstrip('/')
+        db_adapter.private_key = args.private_key
+        from .logging_config import logger
+        logger.info("Configuration updated. New private key and connection parameters applied.")
+        # ---- end NEW CODE ----
 
         self.accept()
 
@@ -122,6 +149,12 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg = SettingsDialog()
         dlg.exec_()
 
+    # NEW: Override closeEvent to trigger graceful shutdown
+    def closeEvent(self, event):
+        from .shutdown_flag import set_shutdown_requested
+        set_shutdown_requested(True)
+        event.accept()
+
 def run_worker_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(main())
@@ -131,6 +164,9 @@ def run_gui(args):
     private_key = get_private_key()
     app = QtWidgets.QApplication(sys.argv)
 
+    # Connect the aboutToQuit signal to trigger shutdown
+    app.aboutToQuit.connect(lambda: __import__("spl.worker.shutdown_flag", fromlist=["set_shutdown_requested"]).set_shutdown_requested(True))
+
     if not private_key:
         dlg = LoginDialog()
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
@@ -138,7 +174,8 @@ def run_gui(args):
         private_key = get_private_key()
 
     loop = asyncio.new_event_loop()
-    worker_thread = threading.Thread(target=run_worker_loop, args=(loop,), daemon=True)
+    # Remove daemon=True so we can join the thread later
+    worker_thread = threading.Thread(target=run_worker_loop, args=(loop,))
     worker_thread.start()
 
     log_signal = LogSignal()
@@ -151,4 +188,9 @@ def run_gui(args):
     window = MainWindow(log_signal)
     window.resize(800, 600)
     window.show()
-    sys.exit(app.exec_())
+
+    exit_code = app.exec_()
+
+    # Wait for the worker thread to complete its graceful shutdown
+    worker_thread.join()
+    sys.exit(exit_code)

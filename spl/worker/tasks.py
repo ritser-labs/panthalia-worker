@@ -1,3 +1,4 @@
+# spl/worker/tasks.py
 import time
 import json
 import logging
@@ -17,6 +18,8 @@ from ..plugins.manager import get_plugin
 
 import torch
 import aiohttp
+
+from .shutdown_flag import is_shutdown_requested  # Import the shutdown flag
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +75,25 @@ async def get_ask_price():
     return subnet_db.target_price
 
 async def deposit_stake():
+    """
+    Create ask orders (“stakes”) only if we are not shutting down.
+    """
+    if await is_shutdown_requested():
+        logger.info("Shutdown requested; skipping deposit_stake (no new orders will be created).")
+        return
+
     global concurrent_tasks_counter
-    if (await task_queue.queue_length() + concurrent_tasks_counter) > args.max_tasks_handling:
+    current_queue_length = await task_queue.queue_length()
+    async with concurrent_tasks_counter_lock:
+        total_in_progress = current_queue_length + concurrent_tasks_counter
+    if total_in_progress > args.max_tasks_handling:
         logger.debug("Too many tasks being processed. Not depositing more stakes.")
         return
 
     num_orders = await db_adapter.get_num_orders(args.subnet_id, OrderType.Ask.name, False)
     logger.info(f"Current number of stakes: {num_orders}")
 
+    # Create new ask orders only if needed
     for _ in range(args.max_stakes - num_orders):
         price = await get_ask_price()
         await db_adapter.create_order(None, args.subnet_id, OrderType.Ask.name, price, None)
@@ -122,7 +136,7 @@ async def handle_task(task, time_invoked):
     async with task_start_times_lock:
         task_start_times[task.id] = time.time()
 
-    # Attempt to process the queue
+    # Attempt to process the queue (the actual processing logic remains unchanged)
     await process_tasks()
 
 # -------------------------------------------------------------------------

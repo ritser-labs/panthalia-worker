@@ -260,6 +260,18 @@ class DBAdapterClient:
             logger.error(response['error'])
             return None
         return [self._deserialize(Task, task) for task in response]
+    
+    @typechecked
+    async def get_orders_for_user(self, offset: int, limit: int) -> Optional[List[Order]]:
+        params = {
+            'offset': offset,
+            'limit': limit
+        }
+        response = await self._authenticated_request('GET', '/get_orders_for_user', params=params)
+        if 'error' in response:
+            logger.error(response['error'])
+            return []
+        return [self._deserialize(Order, order) for order in response]
 
     @typechecked
     async def get_task_count_for_job(self, job_id: int) -> Optional[int]:
