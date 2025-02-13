@@ -132,7 +132,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.text_edit = QtWidgets.QTextEdit()
         self.text_edit.setReadOnly(True)
         self.setCentralWidget(self.text_edit)
-
+        
+        # Optionally add a status bar if you want to show shutdown messages
+        self.statusBar().showMessage("")
+        
         menubar = self.menuBar()
         settings_menu = menubar.addMenu("Settings")
         settings_action = QtWidgets.QAction("Edit Settings", self)
@@ -141,6 +144,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.log_signal = log_signal
         self.log_signal.new_log.connect(self.update_log)
+        self.worker_thread = None  # This will be set later
 
     def update_log(self, msg):
         self.text_edit.append(msg)
@@ -149,11 +153,18 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg = SettingsDialog()
         dlg.exec_()
 
-    # NEW: Override closeEvent to trigger graceful shutdown
+    # NEW: Override closeEvent to trigger graceful shutdown without closing immediately
     def closeEvent(self, event):
         from .shutdown_flag import set_shutdown_requested
+        # Trigger shutdown
         set_shutdown_requested(True)
-        event.accept()
+        # Instead of disabling the entire window, just update the status bar and log.
+        self.statusBar().showMessage("Shutdown initiated – please wait until shutdown is complete...")
+        self.text_edit.append("Shutdown initiated – waiting for all in-flight tasks to complete...")
+        # Ignore the close event so that the window remains visible until the shutdown completes.
+        event.ignore()
+
+
 
 def run_worker_loop(loop):
     asyncio.set_event_loop(loop)
@@ -164,7 +175,7 @@ def run_gui(args):
     private_key = get_private_key()
     app = QtWidgets.QApplication(sys.argv)
 
-    # Connect the aboutToQuit signal to trigger shutdown
+    # Connect the aboutToQuit signal to trigger shutdown.
     app.aboutToQuit.connect(lambda: __import__("spl.worker.shutdown_flag", fromlist=["set_shutdown_requested"]).set_shutdown_requested(True))
 
     if not private_key:
@@ -174,7 +185,6 @@ def run_gui(args):
         private_key = get_private_key()
 
     loop = asyncio.new_event_loop()
-    # Remove daemon=True so we can join the thread later
     worker_thread = threading.Thread(target=run_worker_loop, args=(loop,))
     worker_thread.start()
 
@@ -186,11 +196,25 @@ def run_gui(args):
     set_gui_handler(gui_handler)
 
     window = MainWindow(log_signal)
+    # Attach the worker thread reference to the window (if needed later).
+    window.worker_thread = worker_thread
     window.resize(800, 600)
     window.show()
 
-    exit_code = app.exec_()
+    # --- NEW CODE: QTimer to poll worker thread status ---
+    shutdown_timer = QtCore.QTimer()
+    shutdown_timer.setInterval(500)  # check every 500 ms
 
-    # Wait for the worker thread to complete its graceful shutdown
+    def check_shutdown():
+        # Once the worker thread has finished, quit the application.
+        if not worker_thread.is_alive():
+            app.quit()
+
+    shutdown_timer.timeout.connect(check_shutdown)
+    shutdown_timer.start()
+    # --- end NEW CODE ---
+
+    exit_code = app.exec_()
+    # At this point, the worker thread should have completed graceful shutdown.
     worker_thread.join()
     sys.exit(exit_code)
