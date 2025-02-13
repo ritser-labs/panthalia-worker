@@ -786,64 +786,6 @@ class DBAdapterOrdersTasksMixin:
                     logger.error(f"[check_and_cleanup_holds] Failed to finalize task {task_id} as incorrect: {e}")
 
 
-
-    async def get_global_stats(self) -> dict:
-        """
-        Return a dictionary of various global statistics:
-          - total $ in open (unmatched) orders
-          - number of open (unmatched) orders
-          - number of tasks in completed statuses
-          - volume = sum of bid prices for tasks that ended up completed
-        """
-        from ....models import TaskStatus, OrderType
-
-        completed_statuses = [TaskStatus.ResolvedCorrect, TaskStatus.ResolvedIncorrect]
-
-        async with self.get_async_session() as session:
-            # total $ in open orders
-            stmt_sum_open = select(func.sum(Order.price)).where(
-                Order.bid_task_id.is_(None),
-                Order.ask_task_id.is_(None)
-            )
-            sum_open_result = await session.execute(stmt_sum_open)
-            total_open_orders_dollar = sum_open_result.scalar() or 0.0
-
-            # num of open (unmatched) orders
-            stmt_count_open = select(func.count(Order.id)).where(
-                Order.bid_task_id.is_(None),
-                Order.ask_task_id.is_(None)
-            )
-            count_open_result = await session.execute(stmt_count_open)
-            num_open_orders = count_open_result.scalar() or 0
-
-            # num completed tasks
-            stmt_count_completed = select(func.count(Task.id)).where(
-                Task.status.in_(completed_statuses)
-            )
-            count_completed_result = await session.execute(stmt_count_completed)
-            num_completed_tasks = count_completed_result.scalar() or 0
-
-            # volume (for completed matched bids)
-            # We'll interpret "volume" as sum of the *bid* side for tasks that ended up completed.
-            stmt_volume = (
-                select(func.sum(Order.price))
-                .join(Task, Order.bid_task_id == Task.id)
-                .where(
-                    Order.order_type == OrderType.Bid,
-                    Order.ask_task_id.isnot(None),  # matched with an ask
-                    Task.status.in_(completed_statuses)
-                )
-            )
-            volume_result = await session.execute(stmt_volume)
-            volume = volume_result.scalar() or 0.0
-
-            return {
-                "total_open_orders_dollar": int(total_open_orders_dollar),
-                "num_open_orders": int(num_open_orders),
-                "num_completed_tasks": int(num_completed_tasks),
-                "volume": int(volume)
-            }
-
     async def get_orders_for_user(self, offset: int = 0, limit: int = 20):
         """
         Return a paginated list of orders for the current user.

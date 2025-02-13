@@ -45,3 +45,4 @@ from .routes import subnet_routes
 from .routes import task_routes
 from .routes import withdrawal_routes
 from .routes import account_routes
+from .routes import global_routes
