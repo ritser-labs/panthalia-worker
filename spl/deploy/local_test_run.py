@@ -131,9 +131,9 @@ def delete_old_tensor_files(directory, timestamps_file, last_future_version_file
     with open(last_future_version_file, 'r') as f:
         last_future_version = json.load(f)
 
-    tensor_files = glob.glob(os.path.join(directory, '*.pt'))
-    latest_files = {f"{name}_{version}.pt" for name, version in block_timestamps.items()}
-    last_future_version_files = {f"{name}_{version}.pt" for name, version in last_future_version.items()}
+    tensor_files = glob.glob(os.path.join(directory, '*.safetensors'))
+    latest_files = {f"{name}_{version}.safetensors" for name, version in block_timestamps.items()}
+    last_future_version_files = {f"{name}_{version}.safetensors" for name, version in last_future_version.items()}
 
     for tensor_file in tensor_files:
         if os.path.basename(tensor_file) not in latest_files and os.path.basename(tensor_file) not in last_future_version_files:
