@@ -11,15 +11,16 @@ MIN_REPLICATE_PROB = 0.0
 MAX_REPLICATE_PROB = 0.4
 
 class DBAdapterJobsPluginsMixin:
-    async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int, initial_state_url: str='', replicate_prob: float=0.1):
+    async def create_job(self, name: str, plugin_id: int, sot_url: str, iteration: int, initial_state_url: str='', replicate_prob: float=0.1):
         async with self.get_async_session() as session:
             if replicate_prob < MIN_REPLICATE_PROB or replicate_prob > MAX_REPLICATE_PROB:
                 logger.warning(f"[create_job] replicate_prob={replicate_prob} out of range.")
                 return None
+            plugin = await session.get(Plugin, plugin_id)
             new_job = Job(
                 name=name,
                 plugin_id=plugin_id,
-                subnet_id=subnet_id,
+                subnet_id=plugin.subnet_id,
                 user_id=self.get_user_id(),
                 sot_url=sot_url,
                 iteration=iteration,
@@ -55,11 +56,12 @@ class DBAdapterJobsPluginsMixin:
             await session.execute(stmt)
             await session.commit()
 
-    async def create_plugin(self, name: str, code: str):
+    async def create_plugin(self, name: str, code: str, subnet_id: int):
         async with self.get_async_session() as session:
             new_plugin = Plugin(
                 name=name,
-                code=code
+                code=code,
+                subnet_id=subnet_id,
             )
             session.add(new_plugin)
             await session.commit()

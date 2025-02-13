@@ -17,7 +17,7 @@ async def get_plugin_route():
 async def create_plugin_route():
     route_func = create_post_route_return_id(
         db_adapter_server.create_plugin,
-        ['name','code'],
+        ['name','code', 'subnet_id'],
         'plugin_id',
         auth_method=AuthMethod.USER
     )

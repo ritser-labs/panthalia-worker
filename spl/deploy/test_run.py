@@ -57,8 +57,8 @@ LOG_FILE = os.path.join(LOG_DIR, 'test_run.log')
 BLOCK_TIMESTAMPS_FILE = os.path.join(STATE_DIR, 'block_timestamps.json')
 STATE_FILE = os.path.join(STATE_DIR, 'state.json')  # State file to save/load state
 plugin_file = os.path.join(parent_dir, 'plugins', 'plugin.py')
-REMOTE_MODEL_FILE = '/app/spl/data/state/model.pt'
-LOCAL_MODEL_FILE = os.path.join(parent_dir, 'data', 'state', 'model.pt')
+REMOTE_MODEL_FILE = '/app/spl/data/state/model.safetensors'
+LOCAL_MODEL_FILE = os.path.join(parent_dir, 'data', 'state', 'model.safetensors')
 
 GUESSED_SUBNET_ID = 1
 GUESSED_PLUGIN_ID = 1
@@ -158,8 +158,8 @@ def delete_old_tensor_files(directory, timestamps_file):
     with open(timestamps_file, 'r') as f:
         block_timestamps = json.load(f)
 
-    tensor_files = glob.glob(os.path.join(directory, '*.pt'))
-    latest_files = {f"{name}_{version}.pt" for name, version in block_timestamps.items()}
+    tensor_files = glob.glob(os.path.join(directory, '*.safetensors'))
+    latest_files = {f"{name}_{version}.safetensors" for name, version in block_timestamps.items()}
 
     for tensor_file in tensor_files:
         if os.path.basename(tensor_file) not in latest_files:
@@ -556,7 +556,6 @@ async def main():
 
         async with aiofiles.open(plugin_file, mode='r') as f:
             code = await f.read()
-        plugin_id = await db_adapter.create_plugin('plugin', code)
 
         subnet_id = await db_adapter.create_subnet(
             list(subnet_addresses.values())[0],
@@ -566,6 +565,7 @@ async def main():
             token_address,
             args.group
         )
+        plugin_id = await db_adapter.create_plugin('plugin', code, subnet_id)
 
         plugin = await get_plugin(plugin_id, db_adapter)
 

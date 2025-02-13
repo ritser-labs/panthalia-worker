@@ -16,6 +16,7 @@ from .base import Base
 import enum
 
 CENT_AMOUNT = 10**6 # how much for 1 cent
+DOLLAR_AMOUNT = 100 * CENT_AMOUNT
 
 class Serializable(Base):
     __abstract__ = True
@@ -39,6 +40,9 @@ class Plugin(TimestampMixin, Serializable):
     code = Column(Text, nullable=False)
     review_status = Column(Enum(PluginReviewStatus), nullable=False, 
                            default=PluginReviewStatus.Unreviewed)
+    subnet_id = Column(Integer, ForeignKey('subnets.id'), nullable=False)
+    
+    subnet = relationship("Subnet", back_populates="plugins")
     jobs = relationship("Job", back_populates="plugin")
 
 class Subnet(Serializable):
@@ -50,6 +54,7 @@ class Subnet(Serializable):
     target_price = Column(Integer, nullable=False)
     jobs = relationship("Job", back_populates="subnet")
     orders = relationship("Order", back_populates="subnet")
+    plugins = relationship("Plugin", back_populates="subnet")
 
 class Job(TimestampMixin, Serializable):
     __tablename__ = 'jobs'

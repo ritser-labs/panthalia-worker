@@ -18,7 +18,7 @@ async def get_job_route():
 async def create_job_route():
     route_func = create_post_route_return_id(
         db_adapter_server.create_job,
-        required_keys=['name','plugin_id','subnet_id','sot_url','iteration','initial_state_url', 'replicate_prob'],
+        required_keys=['name','plugin_id','sot_url','iteration','initial_state_url', 'replicate_prob'],
         id_key='job_id',
         auth_method=AuthMethod.USER
     )

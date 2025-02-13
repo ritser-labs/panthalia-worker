@@ -108,11 +108,10 @@ class DBAdapterClient:
         return await self._fetch_entity('/get_job', Job, params={'job_id': job_id})
 
     @typechecked
-    async def create_job(self, name: str, plugin_id: int, subnet_id: int, sot_url: str, iteration: int, initial_state_url: str='') -> Optional[int]:
+    async def create_job(self, name: str, plugin_id: int, sot_url: str, iteration: int, initial_state_url: str='') -> Optional[int]:
         data = {
             'name': name,
             'plugin_id': plugin_id,
-            'subnet_id': subnet_id,
             'sot_url': sot_url,
             'iteration': iteration,
             'initial_state_url': initial_state_url
@@ -167,10 +166,11 @@ class DBAdapterClient:
         return await self._fetch_entity('/get_plugin', Plugin, params={'plugin_id': plugin_id})
 
     @typechecked
-    async def create_plugin(self, name: str, code: str) -> Optional[int]:
+    async def create_plugin(self, name: str, code: str, subnet_id: int) -> Optional[int]:
         data = {
             'name': name,
-            'code': code
+            'code': code,
+            'subnet_id': subnet_id
         }
         response = await self._authenticated_request('POST', '/create_plugin', data=data)
         return self._extract_id(response, 'plugin_id')

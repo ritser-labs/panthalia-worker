@@ -8,7 +8,7 @@ from .adapters.default_sot_adapter import DefaultSOTAdapter
 from .adapters.plugins import StandardPlugin
 from .tokenizer import CharacterLevelTokenizer
 
-import os
+import torch
 
 ################################################################
 # 1) Set up model, dataset, etc.
@@ -69,8 +69,8 @@ exported_plugin = StandardPlugin(
     tensor_version_interval=TENSOR_VERSION_INTERVAL,
     expected_worker_time=3,
     max_concurrent_iterations=4,
-    chunk_shape=(64, 64),
-    k=2,
+    chunk_shape=torch.tensor((64, 64)),
+    k=torch.tensor((2)),
 )
 
 sot_adapter.hyperparams_getter = exported_plugin.get_sot_learning_hyperparameters

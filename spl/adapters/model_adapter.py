@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 import logging
 import torch
 import time
-from ..device import device
+from ..device import device, safetensors_device
 from ..common import get_future_version_number, download_file
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -11,7 +11,7 @@ from fairscale.nn.model_parallel.initialize import initialize_model_parallel
 import os
 import aiohttp
 import asyncio
-from ..util.docker import janky_url_replace
+from safetensors.torch import load_file as safetensors_load_file
 
 # We'll import the chunked-DCT from demo.py only here
 from ..util import demo
@@ -56,7 +56,7 @@ class ModelAdapter(ABC):
         pass
     
     @abstractmethod
-    async def load_input_tensor(self, input_tensor):
+    async def load_input_tensor(self, input_tensor_dict):
         pass
 
     @abstractmethod
@@ -112,7 +112,7 @@ class ModelAdapter(ABC):
                             tmp_path = tmp_f.name
                             tmp_f.write(file_bytes)
 
-                        loaded_tensor = torch.load(tmp_path, map_location=device)
+                        loaded_tensor = safetensors_load_file(tmp_path, device=safetensors_device)["tensor"].to(device)
                         os.remove(tmp_path)
 
                         param_tensor = loaded_tensor.to(device)
@@ -182,7 +182,7 @@ class StandardModelAdapter(ModelAdapter):
         loss = self.loss_fn(reshaped_logits, reshaped_targets)
         return loss
 
-    async def load_input_tensor(self, input_tensor):
+    async def load_input_tensor(self, input_tensor_dict):
         """
         Expects input_tensor: [ batch + batch ] => we split half for input, half for target.
         Also resets leftover step states like prev_error, self.inputs, self.targets.
@@ -191,16 +191,9 @@ class StandardModelAdapter(ModelAdapter):
         self.inputs = None
         self.targets = None
         self.prev_error = None
-
-        if input_tensor is None or not isinstance(input_tensor, torch.Tensor) or input_tensor.numel() == 0:
-            raise ValueError("Invalid or empty input_tensor in load_input_tensor.")
-
-        half = input_tensor.size(0) // 2
-        if half == 0 or (half * 2 != input_tensor.size(0)):
-            raise ValueError("Invalid shape for splitting into (inputs, targets).")
-
-        self.inputs = input_tensor[:half].to(device, non_blocking=True)
-        self.targets = input_tensor[half:].to(device, non_blocking=True)
+        
+        self.inputs = input_tensor_dict['inputs'].to(device, non_blocking=True)
+        self.targets = input_tensor_dict['targets'].to(device, non_blocking=True)
 
     async def execute_step(
         self,
@@ -266,8 +259,8 @@ class StandardModelAdapter(ModelAdapter):
         total_loss /= accum_steps
 
         # chunked-DCT encode, reusing self.prev_error so residual accumulates
-        chunk_shape = task_params['chunk_shape']
-        k_for_encoding = task_params['k']
+        chunk_shape = self.plugin.chunk_shape
+        k_for_encoding = self.plugin.k
         (
             freq_idxs,
             freq_vals_int8,
@@ -285,12 +278,12 @@ class StandardModelAdapter(ModelAdapter):
         self.prev_error = new_error
 
         encoded_dict = {
-            'freq_idxs': freq_idxs.cpu(),
-            'freq_vals_int8': freq_vals_int8.cpu(),
-            'freq_scales': freq_scales.cpu(),
-            'freq_zero_points': freq_zero_points.cpu(),
+            'freq_idxs': freq_idxs,
+            'freq_vals_int8': freq_vals_int8,
+            'freq_scales': freq_scales,
+            'freq_zero_points': freq_zero_points,
             'chunk_shape': chunk_shape,
-            'orig_shape': accum_grads.shape,
+            'orig_shape': torch.tensor(accum_grads.shape, dtype=torch.int64),
             'pad_count': pad_count
         }
 
@@ -354,7 +347,7 @@ class StandardModelAdapter(ModelAdapter):
         freq_zero_points_t = diff_data['freq_zero_points'].clone().detach().to(device=device, dtype=torch.float32)
 
         chunk_shape = tuple(diff_data['chunk_shape'])
-        orig_shape = tuple(diff_data['orig_shape'])
+        orig_shape = tuple(diff_data['orig_shape'].tolist())
         pad_count = diff_data.get('pad_count', 0)
 
         param_diff = demo.chunked_dct_decode_int8(

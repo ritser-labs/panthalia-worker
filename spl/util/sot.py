@@ -7,7 +7,7 @@ import asyncio
 import logging
 import tracemalloc
 
-from ..device import device
+from ..device import device, safetensors_device
 from ..common import (
     get_current_version_number,
     get_future_version_number,
@@ -18,6 +18,8 @@ from .json import load_json, save_json
 
 # NEW: import your AdamW function
 from .adam import adamw_update  # <-- CHANGED: we will use this instead
+from safetensors.torch import save_file as safetensors_save_file
+from safetensors.torch import load_file as safetensors_load_file
 
 def ensure_file_locks(file_locks: dict) -> dict:
     required_keys = [
@@ -40,7 +42,7 @@ def get_local_file_path(url: str, request, state_dir: str) -> str | None:
     return os.path.join(state_dir, relative_path)
 
 def version_number_exists(version_number: int, tensor_name: str, state_dir: str) -> bool:
-    path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
+    path = os.path.join(state_dir, f'{tensor_name}_{version_number}.safetensors')
     return os.path.exists(path)
 
 def log_memory_usage(note='', enabled=False):
@@ -87,12 +89,12 @@ async def initialize_tensor(
     last_future_version_number = await load_json(last_future_version_file, {}, file_locks['last_future_version_number'])
 
     sync_version_number = block_timestamps.get(name, 0)
-    file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.pt')
+    file_path = os.path.join(state_dir, f'{name}_{sync_version_number}.safetensors')
 
     if not os.path.exists(file_path):
         logging.info(f"{file_path} is missing; creating from init_tensor(...)")
         tensor = init_tensor_func(zero_init)
-        torch.save(tensor, file_path)
+        safetensors_save_file({"tensor": tensor}, file_path)
 
         block_timestamps[name] = sync_version_number
         await save_json(block_timestamps_file, block_timestamps, file_locks['block_timestamps'])
@@ -169,31 +171,31 @@ async def apply_optimizer(
 ):
     """
     Applies AdamW to param_vector using first and second moment states in
-    f'{tensor_name}_adam_m_{version_number}.pt' and f'{tensor_name}_adam_v_{version_number}.pt'.
+    f'{tensor_name}_adam_m_{version_number}.safetensors' and f'{tensor_name}_adam_v_{version_number}.safetensors'.
 
     Returns:
       new_params, new_m, new_v
     """
-    old_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.pt')
+    old_path = os.path.join(state_dir, f'{tensor_name}_{version_number}.safetensors')
     if not os.path.exists(old_path):
         raise FileNotFoundError(f"Tensor file not found at {old_path}")
 
-    param_vector = torch.load(old_path, map_location=device).to(device)
+    param_vector = safetensors_load_file(param_vector, device=safetensors_device)['tensor'].to(device)
     if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
         raise ValueError(f"NaN/Inf in grads for {tensor_name} -- aborting update.")
 
     # Load or init the old m, v
-    old_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.pt')
-    old_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{version_number}.pt')
+    old_m_path = os.path.join(state_dir, f'{tensor_name}_adam_m_{version_number}.safetensors')
+    old_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{version_number}.safetensors')
 
     if os.path.exists(old_m_path):
-        m_vector = torch.load(old_m_path, map_location=device)
+        m_vector = safetensors_load_file(m_vector, device=safetensors_device)['tensor'].to(device)
     else:
         logging.info(f"No momentum file found for {tensor_name} v{version_number}, using zeros.")
         m_vector = torch.zeros_like(param_vector, device=device)
 
     if os.path.exists(old_v_path):
-        v_vector = torch.load(old_v_path, map_location=device)
+        v_vector = safetensors_load_file(v_vector, device=safetensors_device)['tensor'].to(device)
     else:
         logging.info(f"No variance file found for {tensor_name} v{version_number}, using zeros.")
         v_vector = torch.zeros_like(param_vector, device=device)
@@ -231,20 +233,20 @@ async def update_block_timestamps(
     old_ts = block_timestamps.get(tensor_name, 0)
     future_ts = get_future_version_number(interval)
     if old_ts < future_ts:
-        src = os.path.join(state_dir, f'{tensor_name}_{old_ts}.pt')
-        dst = os.path.join(state_dir, f'{tensor_name}_{future_ts}.pt')
+        src = os.path.join(state_dir, f'{tensor_name}_{old_ts}.safetensors')
+        dst = os.path.join(state_dir, f'{tensor_name}_{future_ts}.safetensors')
         if os.path.exists(src) and not os.path.exists(dst):
             shutil.copy(src, dst)
             logging.info(f"[update_block_timestamps] Copied {src} -> {dst}")
 
-            src_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_ts}.pt')
-            dst_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{future_ts}.pt')
+            src_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_ts}.safetensors')
+            dst_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{future_ts}.safetensors')
             if os.path.exists(src_m) and not os.path.exists(dst_m):
                 shutil.copy(src_m, dst_m)
                 logging.info(f"[update_block_timestamps] Copied {src_m} -> {dst_m}")
 
-            src_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{old_ts}.pt')
-            dst_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{future_ts}.pt')
+            src_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{old_ts}.safetensors')
+            dst_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{future_ts}.safetensors')
             if os.path.exists(src_v) and not os.path.exists(dst_v):
                 shutil.copy(src_v, dst_v)
                 logging.info(f"[update_block_timestamps] Copied {src_v} -> {dst_v}")
@@ -276,22 +278,22 @@ async def cleanup_old_timestamp(
         logging.debug("[cleanup_old_timestamp] No timestamp change; skipping old cleanup.")
         return
 
-    new_file = os.path.join(state_dir, f'{tensor_name}_{new_block_ts}.pt')
+    new_file = os.path.join(state_dir, f'{tensor_name}_{new_block_ts}.safetensors')
     if not os.path.exists(new_file):
         logging.warning(f"[cleanup_old_timestamp] Skipping removal of old block {old_block_timestamp} because {new_file} doesn't exist.")
         return
 
-    old_file = os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.pt')
+    old_file = os.path.join(state_dir, f'{tensor_name}_{old_block_timestamp}.safetensors')
     if os.path.exists(old_file):
         logging.info(f"[cleanup_old_timestamp] Removing old file {old_file}")
         os.remove(old_file)
 
-    old_mom = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.pt')
+    old_mom = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_block_timestamp}.safetensors')
     if os.path.exists(old_mom):
         logging.info(f"[cleanup_old_timestamp] Removing old momentum {old_mom}")
         os.remove(old_mom)
 
-    old_var = os.path.join(state_dir, f'{tensor_name}_adam_v_{old_block_timestamp}.pt')
+    old_var = os.path.join(state_dir, f'{tensor_name}_adam_v_{old_block_timestamp}.safetensors')
     if os.path.exists(old_var):
         logging.info(f"[cleanup_old_timestamp] Removing old variance {old_var}")
         os.remove(old_var)
@@ -319,20 +321,20 @@ async def update_cleanup_timestamps(
         )
 
         if old_ts < current_version:
-            src = os.path.join(state_dir, f'{tensor_name}_{old_ts}.pt')
-            dst = os.path.join(state_dir, f'{tensor_name}_{current_version}.pt')
+            src = os.path.join(state_dir, f'{tensor_name}_{old_ts}.safetensors')
+            dst = os.path.join(state_dir, f'{tensor_name}_{current_version}.safetensors')
             if os.path.exists(src) and not os.path.exists(dst):
                 shutil.copy(src, dst)
                 logging.info(f"[update_cleanup_timestamps] Copied {src} -> {dst}")
 
-                src_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_ts}.pt')
-                dst_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{current_version}.pt')
+                src_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{old_ts}.safetensors')
+                dst_m = os.path.join(state_dir, f'{tensor_name}_adam_m_{current_version}.safetensors')
                 if os.path.exists(src_m) and not os.path.exists(dst_m):
                     shutil.copy(src_m, dst_m)
                     logging.info(f"[update_cleanup_timestamps] Copied {src_m} -> {dst_m}")
 
-                src_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{old_ts}.pt')
-                dst_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{current_version}.pt')
+                src_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{old_ts}.safetensors')
+                dst_v = os.path.join(state_dir, f'{tensor_name}_adam_v_{current_version}.safetensors')
                 if os.path.exists(src_v) and not os.path.exists(dst_v):
                     shutil.copy(src_v, dst_v)
                     logging.info(f"[update_cleanup_timestamps] Copied {src_v} -> {dst_v}")
