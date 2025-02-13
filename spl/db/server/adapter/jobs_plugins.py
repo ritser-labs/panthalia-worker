@@ -1,7 +1,7 @@
 # spl/db/server/adapter/jobs_plugins.py
 
 import logging
-from sqlalchemy import select, update
+from sqlalchemy import select, update, desc
 from ....models import Job, Plugin, Subnet, Task, TaskStatus, Sot, PluginReviewStatus
 from sqlalchemy.orm import joinedload
 
@@ -63,6 +63,7 @@ class DBAdapterJobsPluginsMixin:
                 name=name,
                 code=code,
                 subnet_id=subnet_id,
+                user_id=self.get_user_id()
             )
             session.add(new_plugin)
             await session.commit()
@@ -102,9 +103,14 @@ class DBAdapterJobsPluginsMixin:
             jobs_without_instances = result.scalars().all()
             return jobs_without_instances
 
-    async def get_plugins(self):
+    async def get_plugins(self, offset: int = 0, limit: int = 20):
         async with self.get_async_session() as session:
-            stmt = select(Plugin)
+            stmt = (
+                select(Plugin)
+                .where(Plugin.user_id == self.get_user_id())  # filter to only the current user's plugins
+                .offset(offset)
+                .limit(limit)
+            )
             result = await session.execute(stmt)
             plugins = result.scalars().all()
             return plugins
@@ -358,3 +364,17 @@ class DBAdapterJobsPluginsMixin:
             result = await session.execute(stmt)
             plugins = result.scalars().all()
             return plugins
+
+    async def get_jobs_for_user(self, offset: int = 0, limit: int = 20):
+        async with self.get_async_session() as session:
+            stmt = (
+                select(Job)
+                .where(Job.user_id == self.get_user_id())
+                .order_by(desc(Job.submitted_at))  # order by submission time; adjust as needed
+                .offset(offset)
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            jobs = result.scalars().all()
+            # Return jobs as dictionaries so the route can jsonify them directly.
+            return [job.as_dict() for job in jobs]

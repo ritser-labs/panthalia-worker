@@ -36,6 +36,7 @@ class TimestampMixin:
 class Plugin(TimestampMixin, Serializable):
     __tablename__ = 'plugins'
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
     name = Column(String, index=True)
     code = Column(Text, nullable=False)
     review_status = Column(Enum(PluginReviewStatus), nullable=False, 

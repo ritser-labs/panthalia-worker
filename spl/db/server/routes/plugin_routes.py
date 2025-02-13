@@ -23,12 +23,12 @@ async def create_plugin_route():
     )
     return await route_func()
 
-@app.route('/get_plugins', methods=['GET'], endpoint='get_plugins_endpoint')
+@app.route('/user/get_plugins', methods=['GET'], endpoint='get_plugins_endpoint')
 async def get_plugins_route():
     route_func = create_get_route(
         method=db_adapter_server.get_plugins,
-        params=[],
-        auth_method=AuthMethod.NONE
+        params=['offset', 'limit'],
+        auth_method=AuthMethod.USER
     )
     return await route_func()
 

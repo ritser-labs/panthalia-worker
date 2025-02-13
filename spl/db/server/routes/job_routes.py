@@ -144,3 +144,12 @@ async def get_total_state_updates_for_job_route():
         auth_method=AuthMethod.NONE
     )
     return await route_func()
+
+@app.route('/user/get_jobs', methods=['GET'], endpoint='user_get_jobs_endpoint')
+async def user_get_jobs_route():
+    route_func = create_get_route(
+        method=db_adapter_server.get_jobs_for_user,
+        params=['offset', 'limit'],
+        auth_method=AuthMethod.USER
+    )
+    return await route_func()
