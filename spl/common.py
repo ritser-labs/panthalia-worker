@@ -188,7 +188,7 @@ async def download_file(
     """
     Downloads a tensor file from `url` with optional retries/backoff.
     If local_file_path is provided, writes the downloaded bytes to that file and returns the path.
-    Otherwise, returns the tensor loaded via safetensors_load_file.
+    Otherwise, returns the tensor loaded via safetensors_load.
 
     :param url: The URL to download the file from.
     :param retries: Number of download attempts.
@@ -245,8 +245,8 @@ async def download_file(
                             await f.write(content)
                         return local_file_path
                     else:
-                        # Otherwise, load and return the tensor using safetensors.
-                        return safetensors_load(BytesIO(content))
+                        # NOTE: Pass the raw bytes directly since safetensors_load expects a bytes-like object.
+                        return safetensors_load(content)
         except NoMoreDataException:
             raise
         except (asyncio.TimeoutError, aiohttp.ClientError, aiohttp.ClientPayloadError) as e:

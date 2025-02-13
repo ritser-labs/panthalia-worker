@@ -41,6 +41,8 @@ class StandardPlugin:
         self.preload_batch_count = preload_batch_count
         self.chunk_shape = chunk_shape
         self.k = k
+        
+        self.model_adapter.plugin = self
     
     def get_master_learning_hyperparameters(self):
         return {
@@ -48,8 +50,6 @@ class StandardPlugin:
             'accumulations_per_step': self.accumulations_per_step,
             'tensor_version_interval': self.tensor_version_interval,
             'expected_worker_time': self.expected_worker_time,
-            'chunk_shape': self.chunk_shape,
-            'k': self.k,
         }
     
     def get_sot_learning_hyperparameters(self, current_iteration):

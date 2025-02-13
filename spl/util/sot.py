@@ -7,7 +7,7 @@ import asyncio
 import logging
 import tracemalloc
 
-from ..device import device
+from ..device import device, safetensors_device
 from ..common import (
     get_current_version_number,
     get_future_version_number,
@@ -180,7 +180,7 @@ async def apply_optimizer(
     if not os.path.exists(old_path):
         raise FileNotFoundError(f"Tensor file not found at {old_path}")
 
-    param_vector = safetensors_load_file(param_vector, device=device)['tensor']
+    param_vector = safetensors_load_file(param_vector, device=safetensors_device)['tensor'].to(device)
     if torch.isnan(grads_flat).any() or torch.isinf(grads_flat).any():
         raise ValueError(f"NaN/Inf in grads for {tensor_name} -- aborting update.")
 
@@ -189,13 +189,13 @@ async def apply_optimizer(
     old_v_path = os.path.join(state_dir, f'{tensor_name}_adam_v_{version_number}.pt')
 
     if os.path.exists(old_m_path):
-        m_vector = safetensors_load_file(m_vector, device=device)['tensor']
+        m_vector = safetensors_load_file(m_vector, device=safetensors_device)['tensor'].to(device)
     else:
         logging.info(f"No momentum file found for {tensor_name} v{version_number}, using zeros.")
         m_vector = torch.zeros_like(param_vector, device=device)
 
     if os.path.exists(old_v_path):
-        v_vector = safetensors_load_file(v_vector, device=device)['tensor']
+        v_vector = safetensors_load_file(v_vector, device=safetensors_device)['tensor'].to(device)
     else:
         logging.info(f"No variance file found for {tensor_name} v{version_number}, using zeros.")
         v_vector = torch.zeros_like(param_vector, device=device)

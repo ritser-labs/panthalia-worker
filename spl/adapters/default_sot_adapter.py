@@ -16,7 +16,7 @@ from ..common import (
     get_future_version_number,
     NoMoreDataException
 )
-from ..device import device
+from ..device import device, safetensors_device
 from ..util.sot import (
     version_number_exists,
     get_local_file_path,
@@ -175,16 +175,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
             out_path = os.path.join(self.temp_dir, combined_filename)
 
-            import aiofiles
-            import io
-            from safetensors.torch import save_file as safetensors_save_file
-
-            mem_buf = io.BytesIO()
-            safetensors_save_file(result_dict, mem_buf)
-            mem_buf.seek(0)
-
-            async with aiofiles.open(out_path, 'wb') as f:
-                await f.write(mem_buf.read())
+            safetensors_save_file(result_dict, out_path)
 
             return jsonify({
                 'input_url': f'/data/state/temp/{combined_filename}'
@@ -220,16 +211,16 @@ class DefaultSOTAdapter(BaseSOTAdapter):
                 return jsonify({'error': 'File not found'}), 404
 
             # Load the encoded gradient
-            loaded_obj = safetensors_load_file(local_file_path, device=device)
+            loaded_obj = safetensors_load_file(local_file_path, device=safetensors_device)
 
             # Decode partial grads from chunked DCT
             partial_grads = demo.chunked_dct_decode_int8(
-                loaded_obj['freq_idxs'],
-                loaded_obj['freq_vals_int8'],
-                loaded_obj['freq_scales'],
-                loaded_obj['freq_zero_points'],
-                x_shape=loaded_obj['orig_shape'],
-                chunk_shape=loaded_obj['chunk_shape'],
+                loaded_obj['freq_idxs'].to(device),
+                loaded_obj['freq_vals_int8'].to(device),
+                loaded_obj['freq_scales'].to(device),
+                loaded_obj['freq_zero_points'].to(device),
+                x_shape=tuple(loaded_obj['orig_shape'].tolist()),
+                chunk_shape=loaded_obj['chunk_shape'].to(device),
                 norm='ortho',
                 pad_count=loaded_obj.get('pad_count', 0)
             ).to(device)
@@ -384,7 +375,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             fpath = os.path.join(self.base_dir, f'{tensor_name}_{cur_ver}.pt')
             if not os.path.exists(fpath):
                 return jsonify({'error': 'Tensor not found'}), 404
-            t_ = safetensors_load_file(fpath, device=device)["tensor"]
+            t_ = safetensors_load_file(fpath, device=safetensors_device)["tensor"].to(device)
             return jsonify({'size': t_.numel()})
 
         @self.app.route('/data/state/<path:filename>', methods=['GET'])
@@ -502,7 +493,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
         if not os.path.exists(self.aggregator_sum_path):
             return None, None
 
-        aggregator_sum = safetensors_load_file(self.aggregator_sum_path, device=device)["tensor"]
+        aggregator_sum = safetensors_load_file(self.aggregator_sum_path, device=safetensors_device)["tensor"].to(device)
         updates_count = 0
         if os.path.exists(self.aggregator_count_path):
             with open(self.aggregator_count_path, "r") as f:
@@ -584,7 +575,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
 
         # aggregator_error for chunked‐DCT
         if os.path.exists(self.aggregator_error_path):
-            aggregator_error = safetensors_load_file(self.aggregator_error_path, device=device)["tensor"]
+            aggregator_error = safetensors_load_file(self.aggregator_error_path, device=safetensors_device)["tensor"].to(device)
             logging.info(f"[_finalize_aggregator] Found aggregator_error with norm={aggregator_error.norm().item():.6f}")
         else:
             aggregator_error = None
@@ -623,7 +614,7 @@ class DefaultSOTAdapter(BaseSOTAdapter):
             'freq_scales': freq_scales,
             'freq_zero_points': freq_zero_points,
             'chunk_shape': chunk_shape,
-            'orig_shape': final_diff.shape,
+            'orig_shape': torch.tensor(final_diff.shape, dtype=torch.int64),
             'pad_count': pad_count,
         }
         diff_file_path = os.path.join(self.base_dir, f"diff_{old_version}_to_{new_version}.pt")

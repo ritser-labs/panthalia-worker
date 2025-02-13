@@ -69,8 +69,8 @@ exported_plugin = StandardPlugin(
     tensor_version_interval=TENSOR_VERSION_INTERVAL,
     expected_worker_time=3,
     max_concurrent_iterations=4,
-    chunk_shape=torch.Tensor((64, 64)),
-    k=torch.Tensor(2),
+    chunk_shape=torch.tensor((64, 64)),
+    k=torch.tensor((2)),
 )
 
 sot_adapter.hyperparams_getter = exported_plugin.get_sot_learning_hyperparameters

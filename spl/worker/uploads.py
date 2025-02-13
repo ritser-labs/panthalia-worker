@@ -4,10 +4,10 @@ import requests
 import logging
 from tqdm import tqdm
 import io
-from safetensors.torch import save_file as safetensors_save_file
 import torch
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from .config import args
+import safetensors.torch  # Import safetensors.torch to use its save function
 
 logger = logging.getLogger(__name__)
 
@@ -17,13 +17,17 @@ def create_callback(encoder, pbar):
     return callback
 
 async def upload_tensor(tensor, tensor_name, sot_url, retries=3, backoff=1):
-    mem_buf = io.BytesIO()
-    save_dict = None
+    # Prepare the dictionary to be saved
     if isinstance(tensor, torch.Tensor):
         save_dict = {"tensor": tensor}
     elif isinstance(tensor, dict):
         save_dict = tensor
-    safetensors_save_file(save_dict, mem_buf)
+    else:
+        raise ValueError("tensor must be a torch.Tensor or a dict of tensors")
+    
+    # Use safetensors.torch.save to get raw bytes
+    data_bytes = safetensors.torch.save(save_dict)
+    mem_buf = io.BytesIO(data_bytes)
     mem_buf.seek(0)
 
     encoder = MultipartEncoder(

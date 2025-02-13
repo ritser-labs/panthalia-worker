@@ -2,19 +2,14 @@
 import json
 import base64
 import torch
-from safetensors.torch import save_file as safetensors_save_file
-from safetensors.torch import load_file as safetensors_load_file
-import io
+from safetensors.torch import save as safetensors_save, load as safetensors_load
 import logging
 
 def serialize_data(obj):
     try:
         if isinstance(obj, torch.Tensor):
-            # Create an in-memory buffer and store with safetensors
-            mem_buf = io.BytesIO()
-            safetensors_save_file({"tensor": obj}, mem_buf)
-            raw_bytes = mem_buf.getvalue()
-
+            # Serialize the tensor directly to bytes using safetensors.torch.save
+            raw_bytes = safetensors_save({"tensor": obj})
             return {
                 'type': 'tensor',
                 'data': base64.b64encode(raw_bytes).decode('utf-8')
@@ -39,13 +34,11 @@ def deserialize_data(data):
         obj_type = data.get('type')
         obj_data = data.get('data')
 
-        if data.get('type') == 'tensor':
-            encoded_str = data['data']
+        if obj_type == 'tensor':
+            encoded_str = obj_data
             raw_bytes = base64.b64decode(encoded_str.encode('utf-8'))
-
-            # Load from in-memory buffer
-            mem_buf = io.BytesIO(raw_bytes)
-            loaded = safetensors_load_file(mem_buf)  # returns dict[str, Tensor]
+            # Load the tensor directly from the raw bytes
+            loaded = safetensors_load(raw_bytes)  # returns dict[str, Tensor]
             return loaded['tensor']
         elif obj_type == 'tuple':
             return tuple(deserialize_data(item) for item in obj_data)
