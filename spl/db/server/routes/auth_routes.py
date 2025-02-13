@@ -50,22 +50,22 @@ async def account_key_from_public_key_route():
     )
     return await route_func()
 
-@app.route('/get_account_keys', methods=['GET'], endpoint='get_account_keys_endpoint')
+@app.route('/user/get_account_keys', methods=['GET'], endpoint='get_account_keys_endpoint')
 async def get_account_keys_route():
     from .common import create_get_route
     route_func = create_get_route(
         method=db_adapter_server.get_account_keys,
-        params=[],
+        params=['offset', 'limit'],
         auth_method=AuthMethod.USER
     )
     return await route_func()
 
-@app.route('/get_balance', methods=['GET'], endpoint='get_balance_endpoint')
+@app.route('/user/balance_and_holds', methods=['GET'], endpoint='get_balance_endpoint')
 async def get_balance_route():
     from .common import create_get_route
     route_func = create_get_route(
         method=db_adapter_server.get_balance_details_for_user,
-        params=[],
+        params=['offset', 'limit'],
         auth_method=AuthMethod.USER
     )
     return await route_func()

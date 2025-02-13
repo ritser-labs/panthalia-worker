@@ -369,8 +369,12 @@ class DBAdapterClient:
         return response if isinstance(response, dict) else None
 
     @typechecked
-    async def get_account_keys(self) -> Optional[List[Dict[str, Any]]]:
-        response = await self._authenticated_request('GET', '/get_account_keys')
+    async def get_account_keys(self, offset: int, limit: int) -> Optional[List[Dict[str, Any]]]:
+        params = {
+            'offset': offset,
+            'limit': limit
+        }
+        response = await self._authenticated_request('GET', '/get_account_keys', params=params)
         return response if isinstance(response, list) else None
 
     @typechecked

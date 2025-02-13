@@ -131,10 +131,10 @@ class DBAdapterAccountsMixin:
             account_key = result.scalar_one_or_none()
             return account_key
 
-    async def get_account_keys(self):
+    async def get_account_keys(self, offset: int = 0, limit: int = 20):
         user_id = self.get_user_id()
         async with self.get_async_session() as session:
-            stmt = select(AccountKey).filter_by(user_id=user_id)
+            stmt = select(AccountKey).filter_by(user_id=user_id).offset(offset).limit(limit)
             result = await session.execute(stmt)
             account_keys = result.scalars().all()
             return account_keys
