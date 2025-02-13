@@ -51,12 +51,11 @@ async def test_holds_flow_end_to_end(db_adapter_server_fixture):
         assert inv_1["invariant_holds"], f"Invariant broken after initial deposits: {inv_1}"
 
         # 3) Create plugin, subnet, job
-        plugin_id = await server.create_plugin(name="HoldsFlowPlugin", code="print('test holds flow')")
         subnet_id = await server.create_subnet(dispute_period=300, solve_period=600, stake_multiplier=2.0)
+        plugin_id = await server.create_plugin(name="HoldsFlowPlugin", code="print('test holds flow')", subnet_id=subnet_id)
         job_id = await server.create_job(
             name="HoldsFlowJob",
             plugin_id=plugin_id,
-            subnet_id=subnet_id,
             sot_url="http://dummy_sot",
             iteration=0
         )

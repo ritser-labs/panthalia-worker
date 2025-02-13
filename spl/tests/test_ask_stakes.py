@@ -23,12 +23,11 @@ async def test_ask_order_reserves_full_stake(db_adapter_server_fixture):
         buyer_user = "ask_test_buyer"
         server._user_id_getter = lambda: buyer_user
 
-        plugin_id = await server.create_plugin(name="AskTest Plugin", code="print('ask test')")
         subnet_id = await server.create_subnet(dispute_period=300, solve_period=300, stake_multiplier=2.0)
+        plugin_id = await server.create_plugin(name="AskTest Plugin", code="print('ask test')", subnet_id=subnet_id)
         job_id = await server.create_job(
             name="AskTestJob",
             plugin_id=plugin_id,
-            subnet_id=subnet_id,
             sot_url="http://fake-sot",
             iteration=0
         )

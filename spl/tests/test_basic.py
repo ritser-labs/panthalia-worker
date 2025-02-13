@@ -10,12 +10,11 @@ async def test_basic_setup(db_adapter_server_fixture):
     async with original_app.test_request_context('/'):
         server = db_adapter_server_fixture
 
-        plugin_id = await server.create_plugin(name="Test Plugin", code="print('hello')")
         subnet_id = await server.create_subnet(dispute_period=3600, solve_period=1800, stake_multiplier=1.5)
+        plugin_id = await server.create_plugin(name="Test Plugin", code="print('hello')", subnet_id=subnet_id)
         job_id = await server.create_job(
             name="Test Job",
             plugin_id=plugin_id,
-            subnet_id=subnet_id,
             sot_url="http://panthalia.com",
             iteration=0
         )

@@ -27,12 +27,11 @@ async def test_earnings_and_balances_scenario():
         buyer_server = DBAdapterServer(user_id_getter=lambda: "testbuyer")
         solver_server = DBAdapterServer(user_id_getter=lambda: "solveruser")
 
-        plugin_id = await buyer_server.create_plugin(name="Test Plugin", code="print('earning')")
         subnet_id = await buyer_server.create_subnet(dispute_period=3600, solve_period=1800, stake_multiplier=2.0)
+        plugin_id = await buyer_server.create_plugin(name="Test Plugin", code="print('earning')", subnet_id=subnet_id)
         job_id = await buyer_server.create_job(
             name="BalanceTesting Job",
             plugin_id=plugin_id,
-            subnet_id=subnet_id,
             sot_url="http://panthalia.com",
             iteration=0
         )

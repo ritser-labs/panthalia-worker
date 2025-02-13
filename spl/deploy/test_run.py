@@ -556,7 +556,6 @@ async def main():
 
         async with aiofiles.open(plugin_file, mode='r') as f:
             code = await f.read()
-        plugin_id = await db_adapter.create_plugin('plugin', code)
 
         subnet_id = await db_adapter.create_subnet(
             list(subnet_addresses.values())[0],
@@ -566,6 +565,7 @@ async def main():
             token_address,
             args.group
         )
+        plugin_id = await db_adapter.create_plugin('plugin', code, subnet_id)
 
         plugin = await get_plugin(plugin_id, db_adapter)
 

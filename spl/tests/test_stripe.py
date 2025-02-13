@@ -1,10 +1,13 @@
+# file: spl/tests/test_stripe.py
+
 import pytest
 import json
 from unittest.mock import patch
 from sqlalchemy import select
 from spl.db.server.app import original_app
-from spl.models import StripeDeposit, Hold
+from spl.models import StripeDeposit, Hold, DOLLAR_AMOUNT
 from spl.models.enums import HoldType
+
 
 @pytest.mark.asyncio
 async def test_stripe_add_credits_flow(db_adapter_server_fixture):
@@ -23,8 +26,13 @@ async def test_stripe_add_credits_flow(db_adapter_server_fixture):
         test_user_id = "stripe_credits_user"
         server._user_id_getter = lambda: test_user_id
 
+        # ───────────────────────────────────────────────────────
+        # FIX: ensure the user has an account before deposit usage checks
+        # ───────────────────────────────────────────────────────
+        await server.get_or_create_account(test_user_id)
+
         # 1) Create a new stripe "credits" session
-        amount = 100
+        amount = 100 * DOLLAR_AMOUNT
         session_response = await server.create_stripe_credits_session(amount)
         assert "session_id" in session_response, "Expected a Stripe session_id in response"
         session_id = session_response["session_id"]
@@ -115,8 +123,13 @@ async def test_stripe_authorization_flow(db_adapter_server_fixture):
         test_user_id = "stripe_auth_user"
         server._user_id_getter = lambda: test_user_id
 
+        # ───────────────────────────────────────────────────────
+        # FIX: ensure the user has an account before deposit usage checks
+        # ───────────────────────────────────────────────────────
+        await server.get_or_create_account(test_user_id)
+
         # 1) Create a new stripe authorization session
-        amount = 300
+        amount = 300 * DOLLAR_AMOUNT
         session_response = await server.create_stripe_authorization_session(amount)
         assert "session_id" in session_response, "Expected a Stripe session_id in response"
         session_id = session_response["session_id"]
