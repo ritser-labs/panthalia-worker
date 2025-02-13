@@ -32,11 +32,11 @@ async def reject_withdrawal_route():
     )
     return await route_func()
 
-@app.route('/get_pending_withdrawals', methods=['GET'], endpoint='get_pending_withdrawals_endpoint')
-async def get_pending_withdrawals_route():
+@app.route('/admin/withdrawals', methods=['GET'], endpoint='admin_withdrawals_endpoint')
+async def admin_withdrawals_route():
     route_func = create_get_route(
-        method=db_adapter_server.get_pending_withdrawals,
-        params=['offset', 'limit'],
+        method=db_adapter_server.get_withdrawals,
+        params=['status', 'offset', 'limit'],
         auth_method=AuthMethod.ADMIN
     )
     return await route_func()

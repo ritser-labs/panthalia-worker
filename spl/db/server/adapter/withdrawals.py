@@ -215,16 +215,21 @@ class DBAdapterWithdrawalsMixin:
             await session.commit()
             return True
 
-    async def get_pending_withdrawals(self, offset: int = 0, limit: int = 20) -> list[WithdrawalRequest]:
+    async def get_withdrawals(self, status: str = "all", offset: int = 0, limit: int = 20) -> list[WithdrawalRequest]:
         """
-        Return a paginated list of withdrawals whose status is currently PENDING.
+        Return a paginated list of withdrawals filtered by status.
+        If status is "all", no filtering is applied.
         """
+        from ....models.enums import WithdrawalStatus
         async with self.get_async_session() as session:
-            stmt = (
-                select(WithdrawalRequest)
-                .where(WithdrawalRequest.status == WithdrawalStatus.PENDING)
-                .offset(offset)
-                .limit(limit)
-            )
+            stmt = select(WithdrawalRequest)
+            if status.lower() != "all":
+                try:
+                    # Convert the provided status to the enum (expects values like "pending", "finalized", or "rejected")
+                    status_enum = WithdrawalStatus(status.lower())
+                except ValueError:
+                    raise ValueError("Invalid withdrawal status provided. Allowed values: pending, finalized, rejected, or 'all'.")
+                stmt = stmt.where(WithdrawalRequest.status == status_enum)
+            stmt = stmt.offset(offset).limit(limit)
             result = await session.execute(stmt)
             return result.scalars().all()
