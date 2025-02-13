@@ -36,7 +36,7 @@ async def get_num_orders_route():
 async def get_orders_for_user_route():
     route_func = create_get_route(
         method=db_adapter_server.get_orders_for_user,
-        params=[],
+        params=['offset', 'limit'],
         auth_method=AuthMethod.USER
     )
     return await route_func()

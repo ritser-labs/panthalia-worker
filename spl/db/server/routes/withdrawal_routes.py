@@ -36,7 +36,7 @@ async def reject_withdrawal_route():
 async def get_pending_withdrawals_route():
     route_func = create_get_route(
         method=db_adapter_server.get_pending_withdrawals,
-        params=[],
+        params=['offset', 'limit'],
         auth_method=AuthMethod.ADMIN
     )
     return await route_func()
@@ -45,7 +45,7 @@ async def get_pending_withdrawals_route():
 async def get_withdrawals_for_user_route():
     route_func = create_get_route(
         method=db_adapter_server.get_withdrawals_for_user,
-        params=[],
+        params=['offset', 'limit'],
         auth_method=AuthMethod.USER
     )
     return await route_func()

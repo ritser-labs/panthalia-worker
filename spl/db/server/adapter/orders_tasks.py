@@ -844,18 +844,23 @@ class DBAdapterOrdersTasksMixin:
                 "volume": int(volume)
             }
 
-    async def get_orders_for_user(self):
+    async def get_orders_for_user(self, offset: int = 0, limit: int = 20):
+        """
+        Return a paginated list of orders for the current user.
+        """
         async with self.get_async_session() as session:
             user_id = self.get_user_id()  # use the session-based user
             stmt = (
                 select(Order)
                 .where(Order.user_id == user_id)
                 .order_by(Order.id.desc())
+                .offset(offset)
+                .limit(limit)
             )
             result = await session.execute(stmt)
             orders = result.scalars().all()
-            # convert each to as_dict if you want to return it directly
             return [o.as_dict() for o in orders]
+
         
     async def get_unmatched_orders_for_job(self, job_id: int):
         """
