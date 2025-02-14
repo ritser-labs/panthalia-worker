@@ -173,8 +173,8 @@ class Instance(Serializable):
 class Account(Serializable):
     __tablename__ = 'accounts'
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, nullable=False, index=True)
-    deposited_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+    user_id = Column(String, nullable=False, index=True, unique=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     is_admin = Column(Boolean, nullable=False, default=False)
     max_credits_balance = Column(Integer, nullable=True)  # or Integer if you prefer
 

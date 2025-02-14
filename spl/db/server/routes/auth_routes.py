@@ -69,3 +69,4 @@ async def get_balance_route():
         auth_method=AuthMethod.USER
     )
     return await route_func()
+

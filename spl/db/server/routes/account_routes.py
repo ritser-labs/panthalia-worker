@@ -1,5 +1,5 @@
 # spl/db/server/routes/account_routes.py
-from .common import create_post_route, AuthMethod
+from .common import create_post_route, create_get_route, AuthMethod
 from ..app import app
 from ..db_server_instance import db_adapter_server
 
@@ -20,5 +20,15 @@ async def delete_account_route():
          db_adapter_server.delete_account,
          required_keys=[],  # no extra parameters required
          auth_method=AuthMethod.USER
+    )
+    return await route_func()
+
+@app.route('/user/account', methods=['GET'], endpoint='get_account_endpoint')
+async def get_account_route():
+    # Use our adapter function via a get-route with USER auth
+    route_func = create_get_route(
+        method=db_adapter_server.get_account,
+        params=[],
+        auth_method=AuthMethod.USER
     )
     return await route_func()

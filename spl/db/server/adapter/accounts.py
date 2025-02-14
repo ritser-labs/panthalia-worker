@@ -39,7 +39,7 @@ class DBAdapterAccountsMixin:
 
             new_account = Account(
                 user_id=user_id,
-                deposited_at=datetime.utcnow()
+                created_at=datetime.utcnow()
             )
             session.add(new_account)
             await session.commit()
@@ -299,3 +299,8 @@ class DBAdapterAccountsMixin:
             # Depending on your application's policy, you might choose to re-raise here.
 
         return True
+
+    async def get_account(self) -> dict:
+        user_id = self.get_user_id()
+        account = await self.get_or_create_account(user_id)
+        return account.as_dict()
