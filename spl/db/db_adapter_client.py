@@ -172,7 +172,7 @@ class DBAdapterClient:
         return await self._fetch_entity('/get_subnet', Subnet, params={'subnet_id': subnet_id})
 
     @typechecked
-    async def create_subnet(self, dispute_period: int, solve_period: int, stake_multiplier: float, target_price: int=1, description: str | None = '') -> Optional[int]:
+    async def create_subnet_key(self, dispute_period: int, solve_period: int, stake_multiplier: float, target_price: int=1, description: str | None = '') -> Optional[int]:
         data = {
             'dispute_period': dispute_period,
             'solve_period': solve_period,
@@ -180,7 +180,7 @@ class DBAdapterClient:
             'target_price': target_price,
             'description': description
         }
-        response = await self._authenticated_request('POST', '/create_subnet', data=data)
+        response = await self._authenticated_request('POST', '/key/create_subnet', data=data)
         return self._extract_id(response, 'subnet_id')
 
     @typechecked

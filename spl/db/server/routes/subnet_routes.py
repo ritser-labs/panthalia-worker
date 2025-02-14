@@ -36,12 +36,23 @@ async def get_subnet_of_plugin_route():
     )
     return await route_func()
 
-@app.route('/create_subnet', methods=['POST'], endpoint='create_subnet_endpoint')
+@app.route('/admin/create_subnet', methods=['POST'], endpoint='create_subnet_admin_endpoint')
 async def create_subnet_route():
     route_func = create_post_route_return_id(
         db_adapter_server.create_subnet,
         ['dispute_period','solve_period','stake_multiplier','target_price', 'description'],
-        'subnet_id'
+        'subnet_id',
+        auth_method=AuthMethod.ADMIN
+    )
+    return await route_func()
+
+@app.route('/key/create_subnet', methods=['POST'], endpoint='create_subnet_key_endpoint')
+async def create_subnet_route():
+    route_func = create_post_route_return_id(
+        db_adapter_server.create_subnet,
+        ['dispute_period','solve_period','stake_multiplier','target_price', 'description'],
+        'subnet_id',
+        auth_method=AuthMethod.KEY
     )
     return await route_func()
 

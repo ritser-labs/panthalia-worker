@@ -393,7 +393,7 @@ async def main():
 
         logging.info(f'Time in string: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
         
-        subnet_id = await db_adapter.create_subnet(
+        subnet_id = await db_adapter.create_subnet_key(
             5 * 60,
             20 * 60,
             10
