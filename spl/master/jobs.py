@@ -93,7 +93,7 @@ async def handle_newly_assigned_job(
     # 1) Launch SOT
     sot_db_obj, sot_url = await launch_sot(db_adapter, job_obj, db_url)
     # 2) Launch Workers
-    #await launch_workers(db_adapter, job_obj, db_url, args.num_workers)
+    await launch_workers(db_adapter, job_obj, db_url, args.num_workers)
 
     # 3) Start local Master logic
     master_task = asyncio.create_task(
