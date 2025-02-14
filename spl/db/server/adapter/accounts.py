@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import update, delete, select
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from eth_account import Account as EthAccount
 from datetime import timedelta
 
@@ -42,7 +43,17 @@ class DBAdapterAccountsMixin:
                 created_at=datetime.utcnow()
             )
             session.add(new_account)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                # Another concurrent request may have created the account.
+                result = await session.execute(stmt)
+                account = result.scalar_one_or_none()
+                if account:
+                    return account
+                else:
+                    raise
             await session.refresh(new_account)
             return new_account
         finally:
