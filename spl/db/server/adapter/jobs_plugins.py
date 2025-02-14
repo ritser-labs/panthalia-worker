@@ -109,6 +109,28 @@ class DBAdapterJobsPluginsMixin:
             result = await session.execute(stmt)
             subnet = result.scalar_one_or_none()
             return subnet
+    
+    async def get_subnet_of_job(self, job_id: int):
+        async with self.get_async_session() as session:
+            stmt = (
+                select(Job)
+                .options(joinedload(Job.subnet))  # Eagerly load the subnet relationship
+                .filter_by(id=job_id)
+            )
+            result = await session.execute(stmt)
+            job = result.scalar_one_or_none()
+            return job.subnet if job else None
+
+    async def get_subnet_of_plugin(self, plugin_id: int):
+        async with self.get_async_session() as session:
+            stmt = (
+                select(Plugin)
+                .options(joinedload(Plugin.subnet))  # Eagerly load the subnet relationship
+                .filter_by(id=plugin_id)
+            )
+            result = await session.execute(stmt)
+            plugin = result.scalar_one_or_none()
+            return plugin.subnet if plugin else None
 
     async def get_jobs_without_instances(self):
         from ....models import Instance

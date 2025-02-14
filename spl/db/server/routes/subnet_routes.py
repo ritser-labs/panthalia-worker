@@ -20,6 +20,22 @@ async def get_subnet_using_address_route():
     )
     return await route_func()
 
+@app.route('/get_subnet_of_job', methods=['GET'], endpoint='get_subnet_of_job_endpoint')
+async def get_subnet_of_job_route():
+    route_func = create_get_route(
+        method=db_adapter_server.get_subnet_of_job,
+        params=['job_id']
+    )
+    return await route_func()
+
+@app.route('/get_subnet_of_plugin', methods=['GET'], endpoint='get_subnet_of_plugin_endpoint')
+async def get_subnet_of_plugin_route():
+    route_func = create_get_route(
+        method=db_adapter_server.get_subnet_of_plugin,
+        params=['plugin_id']
+    )
+    return await route_func()
+
 @app.route('/create_subnet', methods=['POST'], endpoint='create_subnet_endpoint')
 async def create_subnet_route():
     route_func = create_post_route_return_id(
