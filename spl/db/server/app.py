@@ -1,7 +1,7 @@
-# spl/db/server/app.py
+# file: spl/db/server/app.py
 
 import logging
-from quart import Quart
+from quart import Quart, jsonify
 from quart_cors import cors
 from .ephemeral_key import (
     generate_ephemeral_db_sot_key,
@@ -15,6 +15,12 @@ logger.setLevel(logging.DEBUG)
 
 original_app = Quart(__name__)
 app = cors(original_app, allow_origin="http://localhost:3000")
+
+# Global error handler for unhandled exceptions
+@app.errorhandler(Exception)
+async def global_error_handler(error):
+    logger.exception("Unhandled error: %s", error)
+    return jsonify({"error": str(error)}), 500
 
 # Set up any globals you need (e.g. permission settings)
 _perm_modify_db = None

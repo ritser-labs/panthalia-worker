@@ -26,8 +26,8 @@ async def background_tasks():
             # 2) Expire old Stripe sessions
             await db_adapter_server.expire_old_stripe_deposits(older_than_minutes=120)
 
-        except Exception as e:
-            logger.error(f"Error in background_tasks: {e}")
+        except Exception:
+            logger.exception("Error in background_tasks")
         await asyncio.sleep(5)
 
 if __name__ == "__main__":
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     set_perm_modify_db(args.perm)
 
     async def main():
-        # 1) create ephemeral DB key
+        # 1) Create ephemeral DB key
         generate_ephemeral_db_sot_key()
         ephemeral_addr = get_db_sot_address()
 
