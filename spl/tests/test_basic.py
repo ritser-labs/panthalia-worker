@@ -16,7 +16,8 @@ async def test_basic_setup(db_adapter_server_fixture):
             name="Test Job",
             plugin_id=plugin_id,
             sot_url="http://panthalia.com",
-            iteration=0
+            iteration=0,
+            limit_price=1
         )
 
         job = await server.get_job(job_id)

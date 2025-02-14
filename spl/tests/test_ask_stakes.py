@@ -29,7 +29,8 @@ async def test_ask_order_reserves_full_stake(db_adapter_server_fixture):
             name="AskTestJob",
             plugin_id=plugin_id,
             sot_url="http://fake-sot",
-            iteration=0
+            iteration=0,
+            limit_price=1
         )
 
         # Buyer deposit => 100 => leftover=100

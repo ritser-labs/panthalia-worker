@@ -18,12 +18,21 @@ async def get_job_route():
 async def create_job_route():
     route_func = create_post_route_return_id(
         db_adapter_server.create_job,
-        required_keys=['name','plugin_id','sot_url','iteration','initial_state_url', 'replicate_prob'],
+        required_keys=['name','plugin_id','sot_url','iteration','initial_state_url', 'replicate_prob', 'limit_price'],
         id_key='job_id',
         auth_method=AuthMethod.USER
     )
     return await route_func()
 
+@app.route('/update_job_limit_price', methods=['POST'], endpoint='update_job_limit_price_endpoint')
+async def update_job_limit_price_route():
+    route_func = create_post_route_return_id(
+        db_adapter_server.update_job_limit_price,
+        ['job_id', 'new_limit_price'],
+        'success',
+        auth_method=AuthMethod.USER  # only the job owner (authenticated user) can change it
+    )
+    return await route_func()
 
 @app.route('/update_job_iteration', methods=['POST'], endpoint='update_job_iteration_endpoint')
 async def update_job_iteration_route():

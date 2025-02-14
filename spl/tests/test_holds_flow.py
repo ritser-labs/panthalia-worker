@@ -57,7 +57,8 @@ async def test_holds_flow_end_to_end(db_adapter_server_fixture):
             name="HoldsFlowJob",
             plugin_id=plugin_id,
             sot_url="http://dummy_sot",
-            iteration=0
+            iteration=0,
+            limit_price=1
         )
 
         # 4) Create a new Task => status=SelectingSolver

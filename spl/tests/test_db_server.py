@@ -28,7 +28,8 @@ async def test_basic_setup(db_adapter_server_fixture):
             name="Test Job",
             plugin_id=plugin_id,
             sot_url="http://panthalia.com",
-            iteration=0
+            iteration=0,
+            limit_price=1
         )
 
         job = await server.get_job(job_id)
@@ -58,7 +59,8 @@ async def test_create_cc_hold_and_use_for_bid(db_adapter_server_fixture):
             name="Bid Job",
             plugin_id=plugin_id,
             sot_url="http://sot_url",
-            iteration=0
+            iteration=0,
+            limit_price=1
         )
 
         async with server.get_async_session() as session:

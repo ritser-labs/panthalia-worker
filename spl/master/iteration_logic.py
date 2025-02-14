@@ -244,6 +244,13 @@ async def _finalize_sanity_check(db_adapter: DBAdapterClient, job_id: int, task_
     if not success:
         logger.error("[_finalize_sanity_check] finalize_sanity_check call failed")
 
+async def get_bid_price(db_adapter, job_id):
+    """
+    Retrieve or compute the next bid price using the job's limit_price.
+    """
+    job_obj = await db_adapter.get_job(job_id)
+    return job_obj.limit_price
+
 
 ###############################################################################
 # create_bids_and_tasks wrapper used in re-creation
@@ -263,7 +270,8 @@ async def submit_task_with_persist(db_adapter, job_id: int, iteration_number: in
             )
 
         try:
-            created = await db_adapter.create_bids_and_tasks(job_id, 1, 1, params_str, None)
+            bid_price = await get_bid_price(db_adapter, job_id)
+            created = await db_adapter.create_bids_and_tasks(job_id, 1, bid_price, params_str, None)
             # If a list is returned instead of a dict, wrap it in a dictionary.
             if isinstance(created, list):
                 created = {"created_items": created}

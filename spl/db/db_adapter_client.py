@@ -108,18 +108,6 @@ class DBAdapterClient:
         return await self._fetch_entity('/get_job', Job, params={'job_id': job_id})
 
     @typechecked
-    async def create_job(self, name: str, plugin_id: int, sot_url: str, iteration: int, initial_state_url: str='') -> Optional[int]:
-        data = {
-            'name': name,
-            'plugin_id': plugin_id,
-            'sot_url': sot_url,
-            'iteration': iteration,
-            'initial_state_url': initial_state_url
-        }
-        response = await self._authenticated_request('POST', '/create_job', data=data)
-        return self._extract_id(response, 'job_id')
-
-    @typechecked
     async def update_job_iteration(self, job_id: int, new_iteration: int) -> bool:
         data = {
             'job_id': job_id,

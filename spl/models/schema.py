@@ -75,7 +75,7 @@ class Job(TimestampMixin, Serializable):
     active = Column(Boolean, nullable=False, default=True)
     replicate_prob = Column(Float, nullable=False, default=0.1)
 
-    # add these new fields:
+    limit_price = Column(Integer, nullable=False)
     queued = Column(Boolean, nullable=False, default=False)
     assigned_master_id = Column(String, nullable=True, index=True)
 

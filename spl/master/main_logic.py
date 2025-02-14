@@ -330,13 +330,6 @@ class Master:
                 if resp.status != 200:
                     logger.error(f"[update_latest_loss] error => {await resp.text()}")
 
-    async def get_bid_price(self) -> int:
-        """
-        Retrieve or compute the next bid price. Default: just use subnet_db.target_price
-        """
-        subnet_db = await self.db_adapter.get_subnet(self.subnet_id)
-        return subnet_db.target_price
-
     def generate_message(self, endpoint: str) -> str:
         import uuid
         nonce = str(uuid.uuid4())

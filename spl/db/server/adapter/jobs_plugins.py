@@ -11,7 +11,9 @@ MIN_REPLICATE_PROB = 0.0
 MAX_REPLICATE_PROB = 0.4
 
 class DBAdapterJobsPluginsMixin:
-    async def create_job(self, name: str, plugin_id: int, sot_url: str, iteration: int, initial_state_url: str='', replicate_prob: float=0.1):
+    async def create_job(self, name: str, plugin_id: int, sot_url: str,
+                         iteration: int, limit_price: int, initial_state_url: str='', 
+                         replicate_prob: float=0.1):
         async with self.get_async_session() as session:
             if replicate_prob < MIN_REPLICATE_PROB or replicate_prob > MAX_REPLICATE_PROB:
                 logger.warning(f"[create_job] replicate_prob={replicate_prob} out of range.")
@@ -26,12 +28,29 @@ class DBAdapterJobsPluginsMixin:
                 iteration=iteration,
                 done=False,
                 initial_state_url=initial_state_url,
-                replicate_prob=replicate_prob
+                replicate_prob=replicate_prob,
+                limit_price=limit_price
             )
             session.add(new_job)
             await session.commit()
             await session.refresh(new_job)
             return new_job.id
+
+    async def update_job_limit_price(self, job_id: int, new_limit_price: int):
+        async with self.get_async_session() as session:
+            job = await session.get(Job, job_id)
+            if not job:
+                logger.warning(f"[update_job_limit_price] job_id={job_id} not found.")
+                return {"error": "Job not found"}
+            if job.user_id != self.get_user_id():
+                logger.warning(f"[update_job_limit_price] job_id={job_id} does not belong to user {self.get_user_id()}.")
+                return {"error": "Not authorized"}
+            if not job.active:
+                logger.warning(f"[update_job_limit_price] job_id={job_id} is not active.")
+                return {"error": "Job is not active"}
+            job.limit_price = new_limit_price
+            await session.commit()
+            return {"success": True}
 
     async def create_subnet(self, dispute_period: int, solve_period: int, stake_multiplier: float, target_price: float=1, description: str=''):
         async with self.get_async_session() as session:
