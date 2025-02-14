@@ -1,4 +1,4 @@
-# file: spl/db/server/app.py
+# spl/db/server/app.py
 
 import logging
 from quart import Quart
@@ -8,15 +8,15 @@ from .ephemeral_key import (
     get_db_sot_private_key,
     get_db_sot_address,
 )
+from .rate_limiter import init_rate_limiter  # import the initializer
 
-# Possibly the same logger you used
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 original_app = Quart(__name__)
 app = cors(original_app, allow_origin="http://localhost:3000")
 
-# This sets or gets your "modify DB" permission int
+# Set up any globals you need (e.g. permission settings)
 _perm_modify_db = None
 
 def set_perm_modify_db(perm):
@@ -26,23 +26,27 @@ def set_perm_modify_db(perm):
 def get_perm_modify_db():
     return _perm_modify_db
 
+# Initialize the rate limiter here:
+init_rate_limiter(app)
 
 ###############################################################################
-#  Force-load route files (like you do) ...
+# Force-load route files
 ###############################################################################
-from .routes import auth_routes
-from .routes import debug_routes
-from .routes import health_routes
-from .routes import instance_routes
-from .routes import job_routes
-from .routes import master_state_routes
-from .routes import order_routes
-from .routes import perms_routes
-from .routes import plugin_routes
-from .routes import sot_routes
-from .routes import stripe_routes
-from .routes import subnet_routes
-from .routes import task_routes
-from .routes import withdrawal_routes
-from .routes import account_routes
-from .routes import global_routes
+from .routes import (
+    auth_routes,
+    debug_routes,
+    health_routes,
+    instance_routes,
+    job_routes,
+    master_state_routes,
+    order_routes,
+    perms_routes,
+    plugin_routes,
+    sot_routes,
+    stripe_routes,
+    subnet_routes,
+    task_routes,
+    withdrawal_routes,
+    account_routes,
+    global_routes,
+)

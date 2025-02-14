@@ -23,6 +23,7 @@ docker
 eth-account
 stripe
 cachetools
+quart-rate-limiter
 
 aiosqlite
 sqlalchemy
