@@ -419,3 +419,11 @@ class DBAdapterJobsPluginsMixin:
             jobs = result.scalars().all()
             # Return jobs as dictionaries so the route can jsonify them directly.
             return [job.as_dict() for job in jobs]
+    
+    async def get_subnets(self, offset: int = 0, limit: int = 20):
+        async with self.get_async_session() as session:
+            stmt = select(Subnet).offset(offset).limit(limit)
+            result = await session.execute(stmt)
+            subnets = result.scalars().all()
+            # Convert each Subnet ORM object to a dict using its as_dict() method.
+            return [s.as_dict() for s in subnets]

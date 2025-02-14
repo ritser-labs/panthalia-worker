@@ -53,3 +53,12 @@ async def set_subnet_target_price_route():
         auth_method=AuthMethod.KEY
     )
     return await route_func()
+
+@app.route('/get_subnets', methods=['GET'], endpoint='get_subnets_endpoint')
+async def get_subnets_route():
+    route_func = create_get_route(
+        method=db_adapter_server.get_subnets,
+        params=['offset', 'limit'],
+        auth_method=AuthMethod.USER
+    )
+    return await route_func()
