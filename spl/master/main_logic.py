@@ -233,22 +233,40 @@ class Master:
                 )
                 iteration_state["result"] = final_result or {}
 
-                # FIX BELOW:
-                numeric_keys = [int(k) for k in iteration_state.keys() if k.isdigit()]
-                if numeric_keys:
-                    last_key = max(numeric_keys)
-                    last_result = iteration_state.get(str(last_key), {})
-                else:
-                    last_result = {}
+                # Correct way: read from iteration_state["result"] instead of iteration_state
+                all_partials = iteration_state.get("result", {})
+                if not isinstance(all_partials, dict):
+                    all_partials = {}
 
-                if last_result and "loss" in last_result and "version_number" in last_result:
-                    loss_val = last_result["loss"]
-                    if isinstance(loss_val, (int, float)):
+                # Grab the "largest" (most recent) numeric key from the partials
+                numeric_keys = []
+                for k in all_partials.keys():
+                    try:
+                        numeric_keys.append(float(k))
+                    except ValueError:
+                        pass
+
+                if numeric_keys:
+                    # Convert back to string because the dictionary keys are strings
+                    last_key_str = str(max(numeric_keys))
+                    last_partial = all_partials.get(last_key_str, {})
+                    
+                    # Check for "loss" and "version_number" in that partial
+                    if "loss" in last_partial and "version_number" in last_partial:
+                        loss_val = last_partial["loss"]
+                        version_num = last_partial["version_number"]
+                        
+                        # Append to self.losses or do any other business logic
                         self.losses.append(loss_val)
-                        version_num = last_result["version_number"]
                         await self.update_latest_loss(loss_val, version_num)
                     else:
-                        self.logger.error(f"[main_iteration] Iter={iteration_number} => invalid loss value type.")
+                        self.logger.warning(
+                            f"[main_iteration] Iter={iteration_number} => last partial missing 'loss' or 'version_number'"
+                        )
+                else:
+                    self.logger.warning(
+                        f"[main_iteration] Iter={iteration_number} => no numeric partial-keys found in iteration_state['result']"
+                    )
 
                 # Bump the job iteration and finalize
                 await self.db_adapter.update_job_iteration(self.job_id, iteration_number + 1)
