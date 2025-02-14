@@ -87,7 +87,7 @@ class DBAdapterHoldsMixin:
         hold = (await session.execute(query)).scalars().first()
         if not hold:
             raise ValueError(
-                f"No suitable hold found with leftover ΓëÑ {required_amount} to place this {order_type} order."
+                f"No suitable hold found with leftover >= {required_amount} to place this {order_type} order."
             )
         return hold
 

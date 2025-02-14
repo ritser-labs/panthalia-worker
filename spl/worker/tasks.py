@@ -74,8 +74,17 @@ async def wait_for_version_advance(local_version: int, sot_url: str,
     return local_version
 
 async def get_ask_price():
-    subnet_db = await db_adapter.get_subnet(args.subnet_id)
-    return subnet_db.target_price
+    if args.limit_price is None:
+        raise ValueError("No limit price configured. Please provide a valid limit price.")
+    from ..models.schema import DOLLAR_AMOUNT
+    # If the value is a float (e.g. provided via CLI), assume it is in dollars
+    # and multiply by DOLLAR_AMOUNT. If it's already an int, assume it's scaled.
+    if not isinstance(args.limit_price, int):
+        price = int(float(args.limit_price) * DOLLAR_AMOUNT)
+    else:
+        price = args.limit_price
+    return price
+
 
 async def deposit_stake():
     """

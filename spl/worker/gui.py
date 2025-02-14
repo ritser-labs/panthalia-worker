@@ -59,6 +59,8 @@ class LoginDialog(QtWidgets.QDialog):
             self.accept()
 
 class SettingsDialog(QtWidgets.QDialog):
+    update_target_price_signal = QtCore.pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Settings")
@@ -68,15 +70,20 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.db_url_edit = QtWidgets.QLineEdit(self.config.get("db_url", ""))
         self.docker_url_edit = QtWidgets.QLineEdit(self.config.get("docker_engine_url", ""))
-        # Use "private_key" (not "api_key")
         self.private_key_edit = QtWidgets.QLineEdit(self.config.get("private_key", ""))
         self.private_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.subnet_id_edit = QtWidgets.QLineEdit(str(self.config.get("subnet_id", "")))
+        self.limit_price_edit = QtWidgets.QLineEdit(str(self.config.get("limit_price", "")))
+
+        # Initially display a placeholder.
+        self.target_price_label = QtWidgets.QLabel("Fetching...")
 
         layout.addRow("DB URL:", self.db_url_edit)
         layout.addRow("Docker Engine URL:", self.docker_url_edit)
         layout.addRow("Private Key:", self.private_key_edit)
         layout.addRow("Subnet ID:", self.subnet_id_edit)
+        layout.addRow("Limit Price:", self.limit_price_edit)
+        layout.addRow("Reference Target Price:", self.target_price_label)
 
         self.save_btn = QtWidgets.QPushButton("Save")
         self.save_btn.clicked.connect(self.save_settings)
@@ -84,46 +91,89 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.setLayout(layout)
 
+        self.update_target_price_signal.connect(self.set_target_price)
+        self.fetch_and_update_target_price()
+
+    def set_target_price(self, price):
+        self.target_price_label.setText(str(price))
+
+    def fetch_and_update_target_price(self):
+        try:
+            future = asyncio.run_coroutine_threadsafe(self.fetch_target_price(), worker_loop)
+            def done_callback(fut):
+                try:
+                    result = fut.result()
+                except Exception:
+                    result = "Error"
+                self.update_target_price_signal.emit(str(result))
+            future.add_done_callback(done_callback)
+        except Exception as e:
+            self.target_price_label.setText("Error fetching target price")
+
+    async def fetch_target_price(self):
+        from .db_client import db_adapter
+        from ..models.schema import DOLLAR_AMOUNT
+        subnet_db = await db_adapter.get_subnet(args.subnet_id)
+        target_price = getattr(subnet_db, 'target_price', None)
+        if target_price is not None:
+            # Convert the stored integer value into dollars for display purposes.
+            return target_price / DOLLAR_AMOUNT
+        return "N/A"
+
     def save_settings(self):
         new_db_url = self.db_url_edit.text().strip()
         new_docker_url = self.docker_url_edit.text().strip()
         new_private_key = self.private_key_edit.text().strip()
         new_subnet_id = self.subnet_id_edit.text().strip()
+        new_limit_price = self.limit_price_edit.text().strip()
 
         try:
-            if new_subnet_id:
-                new_subnet_id = int(new_subnet_id)
-            else:
-                new_subnet_id = None
+            new_subnet_id = int(new_subnet_id) if new_subnet_id else None
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Subnet ID", "Subnet ID must be an integer.")
             return
+
+        # Force the user to provide a limit price.
+        if not new_limit_price:
+            QtWidgets.QMessageBox.warning(self, "Missing Limit Price", "Limit Price is required.")
+            return
+
+        try:
+            # Convert input from dollars to float first
+            new_limit_price_float = float(new_limit_price)
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "Invalid Limit Price", "Limit Price must be a number.")
+            return
+
+        # Multiply by DOLLAR_AMOUNT to convert dollars to the scaled integer
+        from ..models.schema import DOLLAR_AMOUNT
+        new_limit_price_int = int(new_limit_price_float * DOLLAR_AMOUNT)
 
         update_data = {
             "db_url": new_db_url,
             "docker_engine_url": new_docker_url,
             "private_key": new_private_key,
-            "subnet_id": new_subnet_id
+            "subnet_id": new_subnet_id,
+            "limit_price": new_limit_price_int  # store as integer
         }
 
-        # Save the updated configuration
         update_config({k: v for k, v in update_data.items() if v is not None and v != ""})
-        
-        # ---- NEW CODE: update the global args and DB adapter ----
+
         from .config import args, load_config
         config = load_config()
         args.private_key = config.get("private_key")
         args.db_url = config.get("db_url")
         args.docker_engine_url = config.get("docker_engine_url")
         args.subnet_id = config.get("subnet_id")
+        args.limit_price = config.get("limit_price")
         from .db_client import db_adapter
         db_adapter.base_url = args.db_url.rstrip('/')
         db_adapter.private_key = args.private_key
         from .logging_config import logger
         logger.info("Configuration updated. New private key and connection parameters applied.")
-        # ---- end NEW CODE ----
-
         self.accept()
+
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_signal):
@@ -179,15 +229,21 @@ def run_gui(args):
     app.aboutToQuit.connect(lambda: __import__("spl.worker.shutdown_flag", fromlist=["set_shutdown_requested"]).set_shutdown_requested(True))
 
     if not private_key:
+        from .gui import LoginDialog  # Import here if needed.
         dlg = LoginDialog()
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             sys.exit(0)
         private_key = get_private_key()
 
+    # Create a new asyncio event loop for the worker and store it in a global variable.
     loop = asyncio.new_event_loop()
+    global worker_loop
+    worker_loop = loop
     worker_thread = threading.Thread(target=run_worker_loop, args=(loop,))
     worker_thread.start()
 
+    # Setup GUI logging.
+    from .gui import LogSignal, GuiLogHandler, MainWindow  # Ensure these are imported appropriately.
     log_signal = LogSignal()
     gui_handler = GuiLogHandler(log_signal)
     gui_handler.setLevel(logging.DEBUG)
@@ -196,25 +252,16 @@ def run_gui(args):
     set_gui_handler(gui_handler)
 
     window = MainWindow(log_signal)
-    # Attach the worker thread reference to the window (if needed later).
     window.worker_thread = worker_thread
     window.resize(800, 600)
     window.show()
 
-    # --- NEW CODE: QTimer to poll worker thread status ---
+    # QTimer to poll the worker thread status.
     shutdown_timer = QtCore.QTimer()
-    shutdown_timer.setInterval(500)  # check every 500 ms
-
-    def check_shutdown():
-        # Once the worker thread has finished, quit the application.
-        if not worker_thread.is_alive():
-            app.quit()
-
-    shutdown_timer.timeout.connect(check_shutdown)
+    shutdown_timer.setInterval(500)
+    shutdown_timer.timeout.connect(lambda: app.quit() if not worker_thread.is_alive() else None)
     shutdown_timer.start()
-    # --- end NEW CODE ---
 
     exit_code = app.exec_()
-    # At this point, the worker thread should have completed graceful shutdown.
     worker_thread.join()
     sys.exit(exit_code)

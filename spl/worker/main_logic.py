@@ -33,6 +33,7 @@ async def graceful_shutdown():
             logger.info(f"Cancelled unmatched order {order_id}")
         except Exception as e:
             logger.error(f"Error cancelling order {order_id}: {e}")
+            await mark_order_cancelled(order_id)
     
     # Now wait until no orders remain in processing (pending or processing)
     while True:
