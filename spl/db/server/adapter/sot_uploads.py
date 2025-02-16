@@ -2,9 +2,10 @@
 import time
 import boto3
 from datetime import datetime, timedelta
-from sqlalchemy import select, func, asc
+from sqlalchemy import select, func, desc
 from ....models import SotUpload
 from ....models import Job
+import os
 
 MAX_PER_USER_BYTES = 1_000_000_000_000  # 1 TB
 
@@ -82,3 +83,40 @@ class DBAdapterSotUploadsMixin:
                         break
             await session.commit()
         return True
+
+    async def get_sot_download_url(self, job_id: int) -> dict:
+        # Query the most recent SotUpload record for the job.
+        async with self.get_async_session() as session:
+            stmt = (
+                select(SotUpload)
+                .where(SotUpload.job_id == job_id)
+                .order_by(desc(SotUpload.created_at))
+            )
+            res = await session.execute(stmt)
+            upload = res.scalar_one_or_none()
+            if not upload:
+                return {"error": "No SotUpload found for given job id."}
+
+        # Get S3 bucket from environment variables.
+        s3_bucket = os.getenv("PANTHALIA_S3_BUCKET_NAME")
+        if not s3_bucket:
+            return {"error": "S3 bucket not configured."}
+
+        # Create a boto3 S3 client.
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+            region_name=os.getenv("AWS_REGION", "us-east-1")
+        )
+
+        try:
+            # Generate a presigned URL valid for 1 hour (3600 seconds).
+            download_url = s3_client.generate_presigned_url(
+                ClientMethod='get_object',
+                Params={'Bucket': s3_bucket, 'Key': upload.s3_key},
+                ExpiresIn=3600
+            )
+            return {"download_url": download_url}
+        except Exception as e:
+            return {"error": str(e)}

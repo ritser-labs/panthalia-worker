@@ -31,3 +31,20 @@ async def prune_old_sot_uploads_route():
         auth_method=AuthMethod.KEY
     )
     return await route_func()
+
+@app.route('/get_sot_download_url', methods=['GET'], endpoint='get_sot_download_url_endpoint')
+async def get_sot_download_url_route():
+    """
+    GET /get_sot_download_url?job_id=XYZ
+
+    Returns a JSON object like:
+      { "download_url": "<presigned URL>" }
+    
+    or an error message if not found.
+    """
+    route_func = create_get_route(
+        method=db_adapter_server.get_sot_download_url,
+        params=['job_id'],
+        auth_method=AuthMethod.USER
+    )
+    return await route_func()

@@ -73,41 +73,31 @@ async def remove_iteration_entry(db_adapter, job_id: int, state_key: str, iterat
 # Wait for the final result, re-creating forcibly deleted tasks if needed
 ###############################################################################
 async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_task_id: int):
-    """
-    Poll the original solver Task until it is final or forcibly removed.
-    If the job becomes inactive, then:
-      - If the task is still in the initial SelectingSolver phase, abort (and delete any unmatched order).
-      - Otherwise (if the task is already past that phase), continue polling until a final result is obtained.
-    """
     while True:
-        # 1) Fetch the original task.
         task_obj = await db_adapter.get_task(original_task_id)
         if not task_obj:
             return None
 
-        # 2) If the job is now inactive...
         job_obj = await db_adapter.get_job(job_id)
         if not job_obj or not job_obj.active:
+            logger.warning(f"[wait_for_result] job {job_id} is inactive - task {original_task_id} status={task_obj.status}")
             if task_obj.status == TaskStatus.SelectingSolver.name:
-                logger.error(f"[wait_for_result] job {job_id} is inactive => aborting task {original_task_id}.")
-                # If the task still has an unmatched order, delete it.
-                if task_obj.bid and task_obj.ask is None:
+                logger.error(f"[wait_for_result] job {job_id} is inactive; attempting to abort task {original_task_id}")
+                if task_obj.bid:  # assume we only have a bid order in SelectingSolver
                     try:
+                        # Use your existing delete_order endpoint
                         await db_adapter.delete_order(task_obj.bid.id)
-                        logger.info(f"[wait_for_result] Deleted unmatched bid order {task_obj.bid.id} for inactive job {job_id}.")
+                        logger.info(f"[wait_for_result] Successfully deleted unmatched bid order {task_obj.bid.id}")
                     except Exception as e:
-                        logger.error(f"[wait_for_result] Failed to delete unmatched bid order: {e}")
-                elif task_obj.ask and task_obj.bid is None:
-                    try:
-                        await db_adapter.delete_order(task_obj.ask.id)
-                        logger.info(f"[wait_for_result] Deleted unmatched ask order {task_obj.ask.id} for inactive job {job_id}.")
-                    except Exception as e:
-                        logger.error(f"[wait_for_result] Failed to delete unmatched ask order: {e}")
+                        logger.error(f"[wait_for_result] delete_order failed with error: {e}; will retry in polling loop")
+                        # Rather than aborting, wait briefly and continue polling.
+                        await asyncio.sleep(0.5)
+                        continue
+                # If delete_order succeeded, we assume the task is aborted so we return None.
                 return None
             else:
-                # If task status is not SelectingSolver, we ignore the inactive job status
-                # and continue polling to let the pending replication or result resolution finish.
-                logger.debug(f"[wait_for_result] job {job_id} is inactive but task {original_task_id} already advanced (status={task_obj.status}); continuing.")
+                logger.debug(f"[wait_for_result] job {job_id} is inactive but task already advanced (status={task_obj.status}); continuing.")
+
 
         # 3) If the task is final, return its result.
         if task_obj.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
@@ -312,11 +302,16 @@ async def submit_task_with_persist(db_adapter, job_id: int, iteration_number: in
                 return created
 
         except Exception as e:
+            # If the error message indicates the job is inactive, stop retrying.
+            if "inactive job" in str(e).lower():
+                logger.info(
+                    f"[submit_task_with_persist] job {job_id} is inactive; aborting task creation."
+                )
+                return None
             logger.error(f"[submit_task_with_persist] attempt #{attempt}, error => {e}")
 
         await asyncio.sleep(retry_delay)
         retry_delay = min(2 * retry_delay, 60)
-
 
 
 ###############################################################################
