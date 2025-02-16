@@ -82,6 +82,8 @@ async def should_replicate(db_adapter, job_id: int) -> bool:
     # If the plugin is not approved, disable replication.
     if plugin.review_status != PluginReviewStatus.Approved:
         replicate_prob = 0.0
+    elif not job.active:
+        replicate_prob = 0.0
     else:
         replicate_prob = job.replicate_prob
 

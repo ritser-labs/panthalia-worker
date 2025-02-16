@@ -102,17 +102,34 @@ async def handle_newly_assigned_job(
     )
     jobs_processing[job_obj.id] = master_task
 
-async def finalize_inactive_job(db_adapter, job_obj):
-    logger.info(f"[finalize_inactive_job] Finalizing inactive job {job_obj.id}...")
-    try:
-        await upload_sot_state_if_needed(db_adapter, job_obj)
-    except Exception as e:
-        logger.error(f"[finalize_inactive_job] Error while uploading SOT final state for job {job_obj.id}: {e}", exc_info=True)
-    unmatched_orders = await db_adapter.get_unmatched_orders_for_job(job_obj.id)
-    for order in unmatched_orders:
-        await db_adapter.delete_order(order.id)
-    await release_instances_for_job(db_adapter, job_obj.id)
+# Global dictionary to track finalization locks per job_id.
+_finalize_job_locks = {}
 
+async def finalize_inactive_job(db_adapter, job_obj):
+    job_id = job_obj.id
+
+    # Get (or create) a lock for this job.
+    lock = _finalize_job_locks.setdefault(job_id, asyncio.Lock())
+
+    # If the lock is already acquired, another finalization is in progress.
+    if lock.locked():
+        logger.info(f"[finalize_inactive_job] Job {job_id} is already being finalized. Skipping duplicate execution.")
+        return
+
+    async with lock:
+        logger.info(f"[finalize_inactive_job] Finalizing inactive job {job_id}...")
+        try:
+            await upload_sot_state_if_needed(db_adapter, job_obj)
+        except Exception as e:
+            logger.error(
+                f"[finalize_inactive_job] Error while uploading SOT final state for job {job_id}: {e}",
+                exc_info=True
+            )
+        # Removed deletion of unmatched orders (now handled in wait_for_result).
+        await release_instances_for_job(db_adapter, job_id)
+        await db_adapter.update_job_queue_status(job_id, new_queued=False, assigned_master_id=None)
+    # Optionally remove the lock so the dictionary doesn't grow indefinitely.
+    _finalize_job_locks.pop(job_id, None)
 
 async def check_for_new_jobs(
     private_key: str,

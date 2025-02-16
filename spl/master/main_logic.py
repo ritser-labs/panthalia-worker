@@ -124,11 +124,12 @@ class Master:
                 self.done = True
                 break
 
-            # If the job is inactive, cancel all pending iterations and exit.
+            # Instead of cancelling tasks immediately when inactive,
+            # wait for all pending iterations to complete.
             if not job_obj.active:
-                logger.info(f"[Master.run_main] job {self.job_id} is inactive; cancelling pending iterations.")
-                for task in self.tasks:
-                    task.cancel()
+                logger.info(f"[Master.run_main] job {self.job_id} is inactive; awaiting pending iterations to finish.")
+                if self.tasks:
+                    await asyncio.gather(*self.tasks, return_exceptions=True)
                 self.tasks.clear()
                 self.done = True
                 break
@@ -234,12 +235,13 @@ class Master:
                     original_task_id=original_task_id
                 )
                 if final_result is None:
-                    self.logger.info(f"[main_iteration] Iter={iteration_number} => job inactive, skipping result processing.")
+                    self.logger.info(f"[main_iteration] Iter={iteration_number} => job inactive and task aborted, skipping result processing.")
                     iteration_state["result"] = {}
                     iteration_state["stage"] = "done"
                     await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
                     await remove_iteration_entry(self.db_adapter, self.job_id, self.state_key, iteration_number)
                     break
+
 
                 iteration_state["result"] = final_result or {}
 
