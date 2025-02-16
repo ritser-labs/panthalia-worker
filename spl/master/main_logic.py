@@ -231,6 +231,14 @@ class Master:
                     job_id=self.job_id,
                     original_task_id=original_task_id
                 )
+                if final_result is None:
+                    self.logger.info(f"[main_iteration] Iter={iteration_number} => job inactive, skipping result processing.")
+                    iteration_state["result"] = {}
+                    iteration_state["stage"] = "done"
+                    await save_iteration_state(self.db_adapter, self.job_id, self.state_key, iteration_number, iteration_state)
+                    await remove_iteration_entry(self.db_adapter, self.job_id, self.state_key, iteration_number)
+                    break
+
                 iteration_state["result"] = final_result or {}
 
                 # Correct way: read from iteration_state["result"] instead of iteration_state

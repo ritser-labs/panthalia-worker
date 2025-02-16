@@ -55,4 +55,5 @@ from .routes import (
     withdrawal_routes,
     account_routes,
     global_routes,
+    sot_uploads_routes
 )

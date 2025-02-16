@@ -75,59 +75,62 @@ async def remove_iteration_entry(db_adapter, job_id: int, state_key: str, iterat
 async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_task_id: int):
     """
     Poll the original solver Task until it is final or forcibly removed.
-    If it hits SolutionSubmitted => local check => replicate => ...
-    The final correctness is decided by manage_replication_chain or local pass/fail.
+    If the job becomes inactive, exit the loop so that the master task
+    can finish and trigger cleanup of unmatched orders.
     """
     from ..models import TaskStatus
     import asyncio
 
     while True:
-        # 1) If forcibly removed => done
+        # 1) If the original task was forcibly removed => done
         task_obj = await db_adapter.get_task(original_task_id)
         if not task_obj:
             return None
 
-        # 2) If final => return
+        # NEW CHECK: If the job is now inactive, break out.
+        job_obj = await db_adapter.get_job(job_id)
+        if not job_obj or not job_obj.active:
+            if task_obj.status == TaskStatus.SelectingSolver.name:
+                logger.error(f"[wait_for_result] job {job_id} is inactive => aborting task {original_task_id}.")
+                return None
+
+        # 2) If the task is final, return its result.
         if task_obj.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
             return task_obj.result
 
-        # 3) If not yet SolutionSubmitted => poll
+        # 3) If not yet SolutionSubmitted or ReplicationPending => poll again.
         if task_obj.status not in [TaskStatus.SolutionSubmitted.name, TaskStatus.ReplicationPending.name]:
             await asyncio.sleep(0.5)
             continue
 
-        # 4) If we are here => we have a final partial posted => local check
+        # 4) If we are here but the task has no result yet, poll again.
         if not task_obj.result:
             await asyncio.sleep(0.5)
             continue
 
         is_valid = await plugin.call_submodule("model_adapter", "run_sanity_check", task_obj.result)
         if not is_valid:
-            # finalize => incorrect
+            # Finalize as incorrect and return result.
             await db_adapter.finalize_sanity_check(task_obj.id, False)
             return task_obj.result
 
-        # local check is valid => replicate or finalize => correct
+        # Local check passed – update status to ReplicationPending.
         await db_adapter.update_task_status(task_obj.id, job_id, TaskStatus.ReplicationPending.name)
         do_replicate = await should_replicate(db_adapter, job_id)
         if not do_replicate:
             await db_adapter.finalize_sanity_check(task_obj.id, True)
             return task_obj.result
 
-        # spawn replicate child
+        # Spawn a replicate child.
         child_id = await spawn_replica_task(db_adapter, parent_task_id=task_obj.id)
         if not child_id:
-            # fallback => finalize => correct
+            # Fallback: finalize as correct.
             await db_adapter.finalize_sanity_check(task_obj.id, True)
             return task_obj.result
 
-        # 5) Manage indefinite chain
+        # 5) Manage the replication chain.
         chain_outcome = await manage_replication_chain(db_adapter, plugin, job_id, task_obj.id, child_id)
-        if chain_outcome == "chain_fail":
-            # we have already finalized => parent's=incorrect
-            return task_obj.result
-        elif chain_outcome == "chain_success":
-            # we have already finalized => parent's=correct
+        if chain_outcome in ("chain_fail", "chain_success"):
             return task_obj.result
 
         await asyncio.sleep(0.5)

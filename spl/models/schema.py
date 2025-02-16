@@ -314,3 +314,19 @@ class StripeDeposit(Base):
 
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
     updated_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+
+class SotUpload(Serializable):
+    __tablename__ = 'sot_uploads'
+    id = Column(Integer, primary_key=True, index=True)
+    
+    job_id = Column(Integer, ForeignKey('jobs.id'), nullable=False)
+    user_id = Column(String, nullable=False, index=True)
+    s3_key = Column(String, nullable=False)             # e.g. "myfolder/job_<id>_2025_02_12.safetensors"
+    file_size_bytes = Column(Integer, nullable=False)    # total bytes
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(UTC))
+    
+    # e.g. so we can quickly query older than 48h
+    # (though we rely on AWS lifecycle to truly remove the object from S3)
+    # and then remove the DB record ourselves.
+    def __repr__(self):
+        return f"<SotUpload id={self.id}, job_id={self.job_id}, s3_key={self.s3_key}, file_size={self.file_size_bytes}>"

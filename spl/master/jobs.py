@@ -9,9 +9,10 @@ from ..db.db_adapter_client import DBAdapterClient
 from ..models import ServiceType
 from .deploy import launch_sot, launch_workers, run_master_task
 from .config import args
-from .main_logic import Master
+from .sot_upload import upload_sot_state_if_needed
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # For the multi-master scenario, define a unique ID for this Master instance
 MASTER_ID = f"{socket.gethostname()}_{os.getpid()}"
@@ -192,16 +193,23 @@ async def check_for_new_jobs(
                     await db_adapter.update_job_active(job_obj.id, False)
 
             else:
+                logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive.")
                 # job is inactive => let the Master finish on its own
                 if master_task:
                     if master_task.done():
                         # The Master has finished => we can free local processes
-                        logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive & Master is done => freeing instances.")
-                        # Optionally remove unmatched orders here (if desired):
+                        logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive & Master is done => deleting unmatched orders.")
                         unmatched_orders = await db_adapter.get_unmatched_orders_for_job(job_obj.id)
                         for order in unmatched_orders:
                             await db_adapter.delete_order(order.id)
 
+                        logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive & Master is done => uploading sot state.")
+                        try:
+                            await upload_sot_state_if_needed(db_adapter, job_obj)
+                        except Exception as e:
+                            logger.error(f"[check_for_new_jobs] Error while uploading SOT final state: {e}", exc_info=True)
+                            
+                        logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive & Master is done => freeing instances.")
                         await release_instances_for_job(db_adapter, job_obj.id)
                         jobs_processing.pop(job_obj.id, None)
 
