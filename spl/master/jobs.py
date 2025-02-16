@@ -102,6 +102,17 @@ async def handle_newly_assigned_job(
     )
     jobs_processing[job_obj.id] = master_task
 
+async def finalize_inactive_job(db_adapter, job_obj):
+    logger.info(f"[finalize_inactive_job] Finalizing inactive job {job_obj.id}...")
+    try:
+        await upload_sot_state_if_needed(db_adapter, job_obj)
+    except Exception as e:
+        logger.error(f"[finalize_inactive_job] Error while uploading SOT final state for job {job_obj.id}: {e}", exc_info=True)
+    unmatched_orders = await db_adapter.get_unmatched_orders_for_job(job_obj.id)
+    for order in unmatched_orders:
+        await db_adapter.delete_order(order.id)
+    await release_instances_for_job(db_adapter, job_obj.id)
+
 
 async def check_for_new_jobs(
     private_key: str,
@@ -197,32 +208,17 @@ async def check_for_new_jobs(
                 # job is inactive => let the Master finish on its own
                 if master_task:
                     if master_task.done():
-                        # The Master has finished => we can free local processes
                         logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive & Master is done => deleting unmatched orders.")
-                        unmatched_orders = await db_adapter.get_unmatched_orders_for_job(job_obj.id)
-                        for order in unmatched_orders:
-                            await db_adapter.delete_order(order.id)
-
-                        logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive & Master is done => uploading sot state.")
-                        try:
-                            await upload_sot_state_if_needed(db_adapter, job_obj)
-                        except Exception as e:
-                            logger.error(f"[check_for_new_jobs] Error while uploading SOT final state: {e}", exc_info=True)
-                            
-                        logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive & Master is done => freeing instances.")
-                        await release_instances_for_job(db_adapter, job_obj.id)
+                        await finalize_inactive_job(db_adapter, job_obj)
                         jobs_processing.pop(job_obj.id, None)
-
                     else:
                         # The Master is still running => do nothing; let it complete
+                        logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive & Master is still running.")
                         pass
                 else:
-                    # If no local task => no reason to keep instance(s). Possibly free them.
-                    # This scenario could happen if we never started the Master for it.
-                    unmatched_orders = await db_adapter.get_unmatched_orders_for_job(job_obj.id)
-                    for order in unmatched_orders:
-                        await db_adapter.delete_order(order.id)
-                    await release_instances_for_job(db_adapter, job_obj.id)
+                    logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive but no local task found.")
+                    await finalize_inactive_job(db_adapter, job_obj)
+
 
         # Optional debugging:
         jobs_in_progress = await db_adapter.get_jobs_in_progress() or []

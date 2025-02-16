@@ -60,6 +60,15 @@ async def get_task_count_for_job():
     count = await db_adapter_server.get_task_count_for_job(job_id)
     return jsonify(count), 200
 
+@app.route('/job_has_matched_task', methods=['GET'], endpoint='job_has_matched_task_endpoint')
+async def job_has_matched_task_route():
+    # This endpoint expects a query parameter "job_id" and returns {"has_match": bool}
+    route_func = create_get_route(
+        method=db_adapter_server.job_has_matched_task,
+        params=['job_id'],
+        auth_method=AuthMethod.KEY
+    )
+    return await route_func()
 
 @app.route('/get_task_count_by_status_for_job', methods=['GET'], endpoint='get_task_count_by_status_for_job_endpoint')
 async def get_task_count_by_status_for_job():

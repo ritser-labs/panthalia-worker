@@ -262,9 +262,17 @@ class DBAdapterClient:
         return [self._deserialize(Order, order) for order in response]
 
     @typechecked
-    async def get_task_count_for_job(self, job_id: int) -> Optional[int]:
-        response = await self._authenticated_request('GET', '/get_task_count_for_job', params={'job_id': job_id})
-        return response.get('task_count')
+    async def job_has_matched_task(self, job_id: int) -> bool:
+        """
+        Calls the new /job_has_matched_task endpoint.
+        Expects a JSON response like: {"has_match": <bool>}
+        and returns the boolean value.
+        """
+        response = await self._authenticated_request('GET', '/job_has_matched_task', params={'job_id': job_id})
+        # If response is not a dict, assume False.
+        if isinstance(response, dict):
+            return response.get('has_match', False)
+        return False
 
     @typechecked
     async def get_task_count_by_status_for_job(self, job_id: int, statuses: List[str]) -> Optional[Dict[str, int]]:
