@@ -41,11 +41,9 @@ class PluginProxy:
         self.port = port
         self.base_url = f"http://{host}:{port}/execute"
 
-        # ---------- ADDED: Indefinite timeout to avoid session-level timeouts ----------
-        # We simply give a None total timeout so the plugin can take as long as needed.
+        # Indefinite timeout to avoid session-level timeouts.
         timeout = aiohttp.ClientTimeout(total=None)
         self.session = aiohttp.ClientSession(timeout=timeout)
-        # ------------------------------------------------------------------------------
 
     async def call_remote(self, function, args=None, kwargs=None):
         payload = {
@@ -64,16 +62,13 @@ class PluginProxy:
 
             content_type = response.headers.get('Content-Type', '')
             if 'application/octet-stream' in content_type:
-                # Read entire binary response at once
                 data = await response.read()
                 return data
 
-            # JSON response
             text = await response.text()
             response_obj = json.loads(text)
             result_serialized = response_obj.get('result')
             if result_serialized is None:
-                # Maybe it's an error
                 if 'error' in response_obj:
                     raise Exception(response_obj['error'])
                 raise Exception("No 'result' in response.")
@@ -135,11 +130,6 @@ def setup_dir():
         sys.path.append(global_plugin_dir)
         logger.info(f"Added {global_plugin_dir} to sys.path")
 
-    tmp_dir = "/tmp"
-    if not os.path.exists(tmp_dir):
-        os.makedirs(tmp_dir)
-        logger.info(f"Created temporary directory at {tmp_dir}")
-
 def create_subdirectory(path):
     if not os.path.exists(path):
         os.makedirs(path)
@@ -147,9 +137,7 @@ def create_subdirectory(path):
 
 def copy_if_missing(src, dst):
     if os.path.exists(src) and not os.path.exists(dst):
-        # Ensure the parent directories of the destination path exist
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-
         if os.path.isdir(src):
             shutil.copytree(src, dst)
             logger.info(f"Copied directory from {src} to {dst}")
@@ -225,18 +213,14 @@ async def build_image():
 def is_gpu_available():
     """Check if an NVIDIA GPU is available on the host system."""
     try:
-        # Try running nvidia-smi
         subprocess.run(["nvidia-smi"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return True
     except (FileNotFoundError, subprocess.CalledProcessError):
-        # nvidia-smi not found or returns an error, assume no GPU
         return False
 
 async def setup_docker_container(plugin_id, plugin_package_dir, host_port, forwarded_port=None):
     container_name = CONTAINER_NAME_TEMPLATE.format(plugin_id=plugin_id)
-
     server_url = f"http://localhost:{host_port}/execute"
-    tmp_dir = "/tmp"
 
     # Check for GPU availability
     gpu_available = is_gpu_available()
@@ -269,13 +253,10 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port, forwa
             mem_limit=mem_limit,
             pids_limit=pids_limit,
             volumes={
-                plugin_package_dir: {'bind': docker_plugin_dir, 'mode': 'rw'},
-                tmp_dir: {'bind': tmp_dir, 'mode': 'rw'}
+                plugin_package_dir: {'bind': docker_plugin_dir, 'mode': 'ro'}
             },
             environment={
-                "TMPDIR": tmp_dir,
                 "PIP_NO_CACHE_DIR": "off",
-                "HOME": tmp_dir,
                 "PLUGIN_ID": str(plugin_id),
                 "PORT": str(host_port),
                 "DOCKER_PLUGIN_DIR": docker_plugin_dir
