@@ -174,7 +174,6 @@ class SettingsDialog(QtWidgets.QDialog):
         self.accept()
 
 
-
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_signal):
         super().__init__()
@@ -196,6 +195,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_signal.new_log.connect(self.update_log)
         self.worker_thread = None  # This will be set later
 
+        # Track whether graceful shutdown has been initiated
+        self.shutdown_initiated = False
+
     def update_log(self, msg):
         self.text_edit.append(msg)
 
@@ -203,16 +205,41 @@ class MainWindow(QtWidgets.QMainWindow):
         dlg = SettingsDialog()
         dlg.exec_()
 
-    # NEW: Override closeEvent to trigger graceful shutdown without closing immediately
     def closeEvent(self, event):
         from .shutdown_flag import set_shutdown_requested
-        # Trigger shutdown
-        set_shutdown_requested(True)
-        # Instead of disabling the entire window, just update the status bar and log.
-        self.statusBar().showMessage("Shutdown initiated – please wait until shutdown is complete...")
-        self.text_edit.append("Shutdown initiated – waiting for all in-flight tasks to complete...")
-        # Ignore the close event so that the window remains visible until the shutdown completes.
-        event.ignore()
+
+        if not self.shutdown_initiated:
+            # FIRST ATTEMPT: Inform the user about the graceful shutdown.
+            info_box = QtWidgets.QMessageBox(self)
+            info_box.setIcon(QtWidgets.QMessageBox.Information)
+            info_box.setWindowTitle("Graceful Shutdown Initiated")
+            info_box.setText(
+                "A graceful shutdown attempt is being initiated.\n\n"
+                "The worker will try to complete all in-flight tasks before closing."
+            )
+            info_box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+            info_box.exec_()
+
+            # Now initiate graceful shutdown.
+            self.shutdown_initiated = True
+            set_shutdown_requested(True)
+            self.statusBar().showMessage("Graceful shutdown initiated – waiting for all in-flight tasks to complete...")
+            self.text_edit.append("Graceful shutdown initiated – waiting for all in-flight tasks to complete...")
+            event.ignore()
+        else:
+            # SECOND ATTEMPT: Confirm forceful exit of the entire process.
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Force Close Worker",
+                "Force closing will immediately terminate the program. This may cause you to fail assigned tasks.\n\nAre you sure you want to forcefully close the worker?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No
+            )
+            if reply == QtWidgets.QMessageBox.Yes:
+                # Forcefully terminate the entire process.
+                os._exit(0)
+            else:
+                event.ignore()
 
 
 
