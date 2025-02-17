@@ -1,41 +1,48 @@
-# Base image with PyTorch and CUDA
-FROM pytorch/pytorch:1.7.0-cuda11.0-cudnn8-devel
+# ===== Stage 1: Builder Stage =====
+FROM python:3.10-slim AS builder
 
-# Update conda and install Python 3.11
-RUN conda install -y python=3.11 && conda clean -afy
-
-# Upgrade pip to ensure it works well with Python 3.11
-RUN python -m pip install --upgrade pip
-
-# (Optional) Remove any psutil artifacts pre-installed in the image
-# - This step ensures that any old psutil .so files are removed.
-RUN python -m pip uninstall -y psutil || true
-RUN rm -f /opt/conda/lib/python3.11/site-packages/psutil/_psutil_linux*.so || true
-
-# Reinstall psutil explicitly at a known version to avoid mismatched .so
-RUN python -m pip install --no-cache-dir psutil==6.1.0
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    TMPDIR=/tmp
-
-# Create and set the working directory
+# Set working directory and noninteractive mode for apt-get
 WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Ensure the data directory exists and is writable
-RUN mkdir -p /app/data && chmod 777 /app/data
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy and install requirements using Python 3.11
-COPY requirements.txt /app/requirements.txt
+# Copy the requirements file and install dependencies into a virtual environment
+COPY requirements.txt .
+RUN python -m venv /venv && \
+    /venv/bin/pip install --upgrade pip && \
+    /venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# Install all other Python packages. We ignore-installed to ensure pip
-# re-resolves dependencies, but keep the pinned psutil from the prior step.
-RUN python -m pip install --no-cache-dir --ignore-installed pyyaml \
-    -r requirements.txt
+# Copy the rest of the application code
+COPY . .
 
-# Expose the server port
+# ===== Stage 2: Runtime Stage =====
+FROM python:3.10-slim
+
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /venv
+
+COPY --from=builder /app/requirements.txt /app/requirements.txt
+
+RUN /venv/bin/pip install --upgrade pip && \
+    /venv/bin/pip install --no-cache-dir -r requirements.txt
+
+COPY --from=builder /app /app
+
+# Add these lines to create a writable state directory for the plugin
+RUN mkdir -p /app/data/state && chown -R nobody:nogroup /app/data/state
+
+ENV PATH="/venv/bin:$PATH"
+
 EXPOSE 8001
-
-# Define the command to run the server script
 CMD ["python", "-m", "plugin_code.server"]
