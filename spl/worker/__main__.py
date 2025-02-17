@@ -1,4 +1,12 @@
 # spl/worker/__main__.py
+
+if __name__ == "__main__" and __package__ is None:
+    from os import path
+    import sys
+    # Insert the parent directory of the worker package into sys.path
+    sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
+    __package__ = "spl.worker"
+
 import os
 from .config import args
 from .logging_config import logger
