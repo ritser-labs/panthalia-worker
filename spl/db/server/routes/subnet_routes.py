@@ -40,7 +40,7 @@ async def get_subnet_of_plugin_route():
 async def create_subnet_route():
     route_func = create_post_route_return_id(
         db_adapter_server.create_subnet,
-        ['dispute_period','solve_period','stake_multiplier','target_price', 'description'],
+        ['dispute_period','solve_period','stake_multiplier','target_price', 'description', 'docker_image'],
         'subnet_id',
         auth_method=AuthMethod.ADMIN
     )
@@ -50,7 +50,7 @@ async def create_subnet_route():
 async def create_subnet_route():
     route_func = create_post_route_return_id(
         db_adapter_server.create_subnet,
-        ['dispute_period','solve_period','stake_multiplier','target_price', 'description'],
+        ['dispute_period','solve_period','stake_multiplier','target_price', 'description', 'docker_image'],
         'subnet_id',
         auth_method=AuthMethod.KEY
     )

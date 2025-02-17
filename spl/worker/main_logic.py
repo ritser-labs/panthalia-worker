@@ -92,7 +92,8 @@ async def main():
         logger.info("Shutdown requested before main loop start. Exiting.")
         return
 
-    await ensure_docker_image()
+    subnet_obj = await db_adapter.get_subnet(subnet_id)
+    await ensure_docker_image(subnet_obj.docker_image)
     logger.info("Docker image ensured upon worker startup.")
 
     subnet_in_db = await db_adapter.get_subnet(subnet_id)
