@@ -10,8 +10,13 @@ from .ephemeral_key import (
 )
 from .rate_limiter import init_rate_limiter  # import the initializer
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 original_app = Quart(__name__)
 app = cors(original_app, allow_origin="http://localhost:3000")
@@ -55,4 +60,5 @@ from .routes import (
     withdrawal_routes,
     account_routes,
     global_routes,
+    sot_uploads_routes
 )

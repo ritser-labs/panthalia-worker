@@ -9,9 +9,10 @@ from ..db.db_adapter_client import DBAdapterClient
 from ..models import ServiceType
 from .deploy import launch_sot, launch_workers, run_master_task
 from .config import args
-from .main_logic import Master
+from .sot_upload import upload_sot_state_if_needed
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # For the multi-master scenario, define a unique ID for this Master instance
 MASTER_ID = f"{socket.gethostname()}_{os.getpid()}"
@@ -101,6 +102,32 @@ async def handle_newly_assigned_job(
     )
     jobs_processing[job_obj.id] = master_task
 
+# Global dictionary to track finalization locks per job_id.
+_finalize_job_locks = {}
+
+async def finalize_inactive_job(db_adapter, job_obj):
+    job_id = job_obj.id
+
+    # Get (or create) a lock for this job.
+    lock = _finalize_job_locks.setdefault(job_id, asyncio.Lock())
+
+    # If the lock is already acquired, another finalization is in progress.
+    if lock.locked():
+        logger.info(f"[finalize_inactive_job] Job {job_id} is already being finalized. Skipping duplicate execution.")
+        return
+
+    async with lock:
+        logger.info(f"[finalize_inactive_job] Finalizing inactive job {job_id}...")
+        try:
+            await upload_sot_state_if_needed(db_adapter, job_obj)
+        except Exception as e:
+            logger.error(f"[finalize_inactive_job] Error while uploading SOT final state for job {job_id}: {e}", exc_info=True)
+        await release_instances_for_job(db_adapter, job_id)
+        await db_adapter.update_job_queue_status(job_id, new_queued=False, assigned_master_id=None)
+    # Optionally remove the lock so the dictionary doesn't grow indefinitely.
+    _finalize_job_locks.pop(job_id, None)
+
+
 
 async def check_for_new_jobs(
     private_key: str,
@@ -110,18 +137,21 @@ async def check_for_new_jobs(
     deploy_type: str,
     num_master_wallets: int
 ):
-    """
-    The main loop that:
-      1) Auto-queues any unassigned+active jobs.
-      2) Assigns or re-assigns queued jobs to this Master if capacity remains.
-      3) Manages inactivity/timeouts.
-      4) Once a job becomes inactive, let its Master finish gracefully. Only
-         after the Master is truly done do we free local processes.
-    """
     db_adapter = DBAdapterClient(db_url, private_key)
-
-    # A dict mapping job_id -> an asyncio.Task representing this Master’s local run
     jobs_processing = {}
+
+    # Helper: delete unmatched orders for a job immediately.
+    async def delete_unmatched_orders(db_adapter, job_id: int):
+        try:
+            unmatched_orders = await db_adapter.get_unmatched_orders_for_job(job_id)
+            for order in unmatched_orders:
+                try:
+                    await db_adapter.delete_order(order.id)
+                    logger.info(f"[delete_unmatched_orders] Deleted unmatched order {order.id} for job {job_id}")
+                except Exception as e:
+                    logger.error(f"[delete_unmatched_orders] Failed to delete order {order.id}: {e}")
+        except Exception as ex:
+            logger.error(f"[delete_unmatched_orders] Error fetching unmatched orders for job {job_id}: {ex}")
 
     while True:
         # (A) Auto-queue any active, unassigned, unqueued jobs:
@@ -130,23 +160,16 @@ async def check_for_new_jobs(
             logger.info(f"[check_for_new_jobs] Auto-queuing active job {job_obj.id}.")
             await db_adapter.update_job_queue_status(job_obj.id, new_queued=True, assigned_master_id=None)
 
-        # Remove any local tasks that finished:
-        done_jobs = []
-        for j_id, master_task in jobs_processing.items():
-            if master_task.done():
-                done_jobs.append(j_id)
+        # Remove finished tasks:
+        done_jobs = [j_id for j_id, master_task in jobs_processing.items() if master_task.done()]
         for dj in done_jobs:
             jobs_processing.pop(dj, None)
 
         # Fetch all jobs assigned to this Master:
         assigned_jobs_in_db = await db_adapter.get_jobs_assigned_to_master(MASTER_ID) or []
-
-        # For any assigned job that *we* have no local task for, spin up SOT/Workers + Master
         for assigned_job in assigned_jobs_in_db:
             if assigned_job.active and assigned_job.id not in jobs_processing:
                 logger.info(f"[check_for_new_jobs] Found assigned job {assigned_job.id}, launching Master tasks.")
-                # Launch SOT + workers => run Master
-                # Re-use your code that does so in e.g. handle_newly_assigned_job
                 await handle_newly_assigned_job(
                     db_adapter=db_adapter,
                     job_obj=assigned_job,
@@ -157,7 +180,7 @@ async def check_for_new_jobs(
                     unqueue_if_needed=False
                 )
 
-        # Check capacity vs. queued jobs
+        # Check capacity vs. queued jobs:
         current_count = len(jobs_processing)
         capacity = args.max_concurrent_jobs - current_count
         if capacity > 0:
@@ -176,45 +199,33 @@ async def check_for_new_jobs(
                 )
                 capacity -= 1
 
-        # Now handle assigned jobs (some possibly inactive). 
+        # Now handle assigned jobs (some possibly inactive).
         assigned_active_jobs = await db_adapter.get_jobs_assigned_to_master(MASTER_ID) or []
         for job_obj in assigned_active_jobs:
             master_task = jobs_processing.get(job_obj.id, None)
 
             if job_obj.active:
-                #
                 # Possibly check for inactivity/timeouts:
-                #
                 job_state = await db_adapter.get_master_state_for_job(job_obj.id)
                 last_t = job_state.get("last_task_creation_time", None)
                 if last_t is not None and (time.time() - last_t > TIMEOUT_SECONDS):
-                    logger.info(f"[check_for_new_jobs] job {job_obj.id} timed out => marking inactive.")
+                    logger.info(f"[check_for_new_jobs] Job {job_obj.id} timed out => marking inactive.")
                     await db_adapter.update_job_active(job_obj.id, False)
-
             else:
-                # job is inactive => let the Master finish on its own
+                logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive.")
+                # Immediately delete unmatched orders for this job.
+                await delete_unmatched_orders(db_adapter, job_obj.id)
                 if master_task:
                     if master_task.done():
-                        # The Master has finished => we can free local processes
-                        logger.info(f"[check_for_new_jobs] job {job_obj.id} is inactive & Master is done => freeing instances.")
-                        # Optionally remove unmatched orders here (if desired):
-                        unmatched_orders = await db_adapter.get_unmatched_orders_for_job(job_obj.id)
-                        for order in unmatched_orders:
-                            await db_adapter.delete_order(order.id)
-
-                        await release_instances_for_job(db_adapter, job_obj.id)
+                        logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive & Master is done => finalizing job.")
+                        await finalize_inactive_job(db_adapter, job_obj)
                         jobs_processing.pop(job_obj.id, None)
-
                     else:
-                        # The Master is still running => do nothing; let it complete
-                        pass
+                        logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive & Master is still running.")
+                        # We already deleted unmatched orders; let the Master finish its finalization.
                 else:
-                    # If no local task => no reason to keep instance(s). Possibly free them.
-                    # This scenario could happen if we never started the Master for it.
-                    unmatched_orders = await db_adapter.get_unmatched_orders_for_job(job_obj.id)
-                    for order in unmatched_orders:
-                        await db_adapter.delete_order(order.id)
-                    await release_instances_for_job(db_adapter, job_obj.id)
+                    logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive but no local task found.")
+                    await finalize_inactive_job(db_adapter, job_obj)
 
         # Optional debugging:
         jobs_in_progress = await db_adapter.get_jobs_in_progress() or []
@@ -222,7 +233,6 @@ async def check_for_new_jobs(
             active_count = sum(1 for j in jobs_in_progress if j.active)
             logger.debug(f"[check_for_new_jobs] Currently {active_count} active job(s).")
         else:
-            logger.debug("[check_for_new_jobs] No jobs_in_progress found.")
+            logger.debug("[check_for_new_jobs] No jobs in progress found.")
 
-        # final short sleep
         await asyncio.sleep(2)

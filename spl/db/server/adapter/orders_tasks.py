@@ -281,9 +281,9 @@ class DBAdapterOrdersTasksMixin:
                 # NEW LOGIC: Also delete the corresponding Task, if any
                 # ───────────────────────────────────────────────────────────
                 if order.order_type == OrderType.Bid and order.bid_task:
-                    session.delete(order.bid_task)
+                    await session.delete(order.bid_task)
                 elif order.order_type == OrderType.Ask and order.ask_task:
-                    session.delete(order.ask_task)
+                    await session.delete(order.ask_task)
 
                 # Now delete the actual Order
                 await session.delete(order)
@@ -882,3 +882,13 @@ class DBAdapterOrdersTasksMixin:
 
             # Combine & return. (No duplicates, since Bids & Asks are disjoint.)
             return unmatched_bids + unmatched_asks
+
+    async def job_has_matched_task(self, job_id: int) -> bool:
+        async with self.get_async_session() as session:
+            stmt = select(func.count(Task.id)).where(
+                Task.job_id == job_id,
+                Task.ask.has()  # Changed here from .isnot(None)
+            )
+            res = await session.execute(stmt)
+            count = res.scalar_one()
+            return {'has_match': count > 0}

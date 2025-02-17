@@ -172,13 +172,14 @@ class DBAdapterClient:
         return await self._fetch_entity('/get_subnet', Subnet, params={'subnet_id': subnet_id})
 
     @typechecked
-    async def create_subnet_key(self, dispute_period: int, solve_period: int, stake_multiplier: float, target_price: int=1, description: str | None = '') -> Optional[int]:
+    async def create_subnet_key(self, dispute_period: int, solve_period: int, stake_multiplier: float, target_price: int=1, description: str | None = '', docker_image = 'ritser/panthalia-plugin-host:0.0.0') -> Optional[int]:
         data = {
             'dispute_period': dispute_period,
             'solve_period': solve_period,
             'stake_multiplier': stake_multiplier,
             'target_price': target_price,
-            'description': description
+            'description': description,
+            'docker_image': docker_image
         }
         response = await self._authenticated_request('POST', '/key/create_subnet', data=data)
         return self._extract_id(response, 'subnet_id')
@@ -262,9 +263,17 @@ class DBAdapterClient:
         return [self._deserialize(Order, order) for order in response]
 
     @typechecked
-    async def get_task_count_for_job(self, job_id: int) -> Optional[int]:
-        response = await self._authenticated_request('GET', '/get_task_count_for_job', params={'job_id': job_id})
-        return response.get('task_count')
+    async def job_has_matched_task(self, job_id: int) -> bool:
+        """
+        Calls the new /job_has_matched_task endpoint.
+        Expects a JSON response like: {"has_match": <bool>}
+        and returns the boolean value.
+        """
+        response = await self._authenticated_request('GET', '/job_has_matched_task', params={'job_id': job_id})
+        # If response is not a dict, assume False.
+        if isinstance(response, dict):
+            return response.get('has_match', False)
+        return False
 
     @typechecked
     async def get_task_count_by_status_for_job(self, job_id: int, statuses: List[str]) -> Optional[Dict[str, int]]:
@@ -760,3 +769,42 @@ class DBAdapterClient:
             data=data
         )
         return response.get("success", False)
+
+    @typechecked
+    async def record_sot_upload(self, job_id: int, user_id: str, s3_key: str, file_size_bytes: int) -> Optional[int]:
+        """
+        Creates a new row in 'sot_uploads' for the final SOT upload.
+        Returns the new row's ID or None on error.
+        """
+        data = {
+            'job_id': job_id,
+            'user_id': user_id,
+            's3_key': s3_key,
+            'file_size_bytes': file_size_bytes
+        }
+        resp = await self._authenticated_request('POST', '/record_sot_upload', data=data)
+        if 'error' in resp:
+            return None
+        return resp.get('sot_upload_id')
+    
+    @typechecked
+    async def prune_old_sot_uploads(self, user_id: str) -> bool:
+        """
+        Asks the DB to prune old SOT uploads for a given user if total usage > 1 TB, 
+        or older than 48h, etc. Returns True if okay, else False.
+        """
+        data = {'user_id': user_id}
+        resp = await self._authenticated_request('POST', '/prune_old_sot_uploads', data=data)
+        return resp.get('success', False)
+
+    @typechecked
+    async def get_sot_upload_usage(self, user_id: str) -> int:
+        """
+        Returns the sum of file_size_bytes for all SOT uploads belonging to user_id, 
+        or 0 if none.
+        """
+        params = {'user_id': user_id}
+        resp = await self._authenticated_request('GET', '/get_sot_upload_usage', params=params)
+        if 'error' in resp:
+            return 0
+        return resp.get('total_usage_bytes', 0)

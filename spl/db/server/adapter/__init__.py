@@ -14,6 +14,7 @@ from .billing.stripe import DBAdapterStripeBillingMixin
 from .balance_details import DBAdapterBalanceDetailsMixin
 from .withdrawals import DBAdapterWithdrawalsMixin
 from .globals import DBAdapterGlobalMixin
+from .sot_uploads import DBAdapterSotUploadsMixin
 
 # If you need user_id_getter from auth:
 from ....auth.view import (get_user_id as default_get_user_id,
@@ -31,6 +32,7 @@ class DBAdapterServer(
     DBAdapterBalanceDetailsMixin,
     DBAdapterWithdrawalsMixin,
     DBAdapterGlobalMixin,
+    DBAdapterSotUploadsMixin,
 ):
     def __init__(self, user_id_getter=None, is_key_auth=None):
         super().__init__()

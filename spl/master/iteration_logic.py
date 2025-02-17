@@ -73,67 +73,70 @@ async def remove_iteration_entry(db_adapter, job_id: int, state_key: str, iterat
 # Wait for the final result, re-creating forcibly deleted tasks if needed
 ###############################################################################
 async def wait_for_result(db_adapter, plugin, sot_url, job_id: int, original_task_id: int):
-    """
-    Poll the original solver Task until it is final or forcibly removed.
-    If it hits SolutionSubmitted => local check => replicate => ...
-    The final correctness is decided by manage_replication_chain or local pass/fail.
-    """
-    from ..models import TaskStatus
-    import asyncio
-
     while True:
-        # 1) If forcibly removed => done
         task_obj = await db_adapter.get_task(original_task_id)
         if not task_obj:
             return None
 
-        # 2) If final => return
+        job_obj = await db_adapter.get_job(job_id)
+        if not job_obj or not job_obj.active:
+            logger.warning(f"[wait_for_result] job {job_id} is inactive - task {original_task_id} status={task_obj.status}")
+            if task_obj.status == TaskStatus.SelectingSolver.name:
+                logger.error(f"[wait_for_result] job {job_id} is inactive; attempting to abort task {original_task_id}")
+                if task_obj.bid:  # assume we only have a bid order in SelectingSolver
+                    try:
+                        # Use your existing delete_order endpoint
+                        await db_adapter.delete_order(task_obj.bid.id)
+                        logger.info(f"[wait_for_result] Successfully deleted unmatched bid order {task_obj.bid.id}")
+                    except Exception as e:
+                        logger.error(f"[wait_for_result] delete_order failed with error: {e}; will retry in polling loop")
+                        # Rather than aborting, wait briefly and continue polling.
+                        await asyncio.sleep(0.5)
+                        continue
+                # If delete_order succeeded, we assume the task is aborted so we return None.
+                return None
+            else:
+                logger.debug(f"[wait_for_result] job {job_id} is inactive but task already advanced (status={task_obj.status}); continuing.")
+
+
+        # 3) If the task is final, return its result.
         if task_obj.status in [TaskStatus.ResolvedCorrect.name, TaskStatus.ResolvedIncorrect.name]:
             return task_obj.result
 
-        # 3) If not yet SolutionSubmitted => poll
+        # 4) If the task is not yet in a phase where a result is expected, sleep and poll again.
         if task_obj.status not in [TaskStatus.SolutionSubmitted.name, TaskStatus.ReplicationPending.name]:
             await asyncio.sleep(0.5)
             continue
 
-        # 4) If we are here => we have a final partial posted => local check
+        # 5) If there is no result yet, wait.
         if not task_obj.result:
             await asyncio.sleep(0.5)
             continue
 
+        # 6) Run sanity check on the partial result.
         is_valid = await plugin.call_submodule("model_adapter", "run_sanity_check", task_obj.result)
         if not is_valid:
-            # finalize => incorrect
             await db_adapter.finalize_sanity_check(task_obj.id, False)
             return task_obj.result
 
-        # local check is valid => replicate or finalize => correct
+        # 7) Update status to ReplicationPending and check if we should replicate.
         await db_adapter.update_task_status(task_obj.id, job_id, TaskStatus.ReplicationPending.name)
         do_replicate = await should_replicate(db_adapter, job_id)
         if not do_replicate:
             await db_adapter.finalize_sanity_check(task_obj.id, True)
             return task_obj.result
 
-        # spawn replicate child
+        # 8) Spawn a replica and manage the replication chain.
         child_id = await spawn_replica_task(db_adapter, parent_task_id=task_obj.id)
         if not child_id:
-            # fallback => finalize => correct
             await db_adapter.finalize_sanity_check(task_obj.id, True)
             return task_obj.result
 
-        # 5) Manage indefinite chain
         chain_outcome = await manage_replication_chain(db_adapter, plugin, job_id, task_obj.id, child_id)
-        if chain_outcome == "chain_fail":
-            # we have already finalized => parent's=incorrect
-            return task_obj.result
-        elif chain_outcome == "chain_success":
-            # we have already finalized => parent's=correct
+        if chain_outcome in ("chain_fail", "chain_success"):
             return task_obj.result
 
         await asyncio.sleep(0.5)
-
-
-
 
 ###############################################################################
 # If a Task was forcibly deleted from DB, re-create it if the job is still active
@@ -299,11 +302,16 @@ async def submit_task_with_persist(db_adapter, job_id: int, iteration_number: in
                 return created
 
         except Exception as e:
+            # If the error message indicates the job is inactive, stop retrying.
+            if "inactive job" in str(e).lower():
+                logger.info(
+                    f"[submit_task_with_persist] job {job_id} is inactive; aborting task creation."
+                )
+                return None
             logger.error(f"[submit_task_with_persist] attempt #{attempt}, error => {e}")
 
         await asyncio.sleep(retry_delay)
         retry_delay = min(2 * retry_delay, 60)
-
 
 
 ###############################################################################
