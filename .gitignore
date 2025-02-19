@@ -13,6 +13,7 @@ spl/sot.log
 spl/loss_plot.png
 
 spl/venv/*
+venv/*
 
 spl/logs/*
 

@@ -12,20 +12,25 @@ import tempfile
 import aiohttp
 import inspect
 import subprocess
+import platform
 
 from .serialize import serialize_data, deserialize_data
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Docker engine URL from environment
-DOCKER_ENGINE_URL = os.environ.get("DOCKER_ENGINE_URL", "unix:///var/run/docker.sock")
+# Detect operating system using platform.system() for a more robust check.
+print(f'Operating system: "{platform.system()}"')
+if platform.system() == "Windows":
+    DOCKER_ENGINE_URL = "npipe:////./pipe/docker_engine"
+else:
+    DOCKER_ENGINE_URL = "unix:///var/run/docker.sock"
+
+logger.info(f"Using Docker engine at {DOCKER_ENGINE_URL}")
+
 global_plugin_dir = tempfile.mkdtemp()
 plugin_package_name = 'plugin_code'
 docker_plugin_dir = f'/app/{plugin_package_name}'
-
-# Instead of a fixed DOCKER_IMAGE constant, we now get the image name
-# from the plugin’s subnet (docker_image field).
 
 CONTAINER_NAME_TEMPLATE = "panthalia_plugin_{plugin_id}"
 HOST_PORT_BASE = 8000
@@ -34,7 +39,11 @@ security_options = ["no-new-privileges:true"]
 mem_limit = "16g"
 pids_limit = 100
 
-docker_client = docker.DockerClient(base_url=DOCKER_ENGINE_URL)
+try:
+    docker_client = docker.DockerClient(base_url=DOCKER_ENGINE_URL)
+except docker.errors.DockerException as e:
+    logger.error(f"Failed to connect to Docker engine. Ensure Docker is running: {e}")
+    raise
 
 last_plugin_id = None
 last_plugin_proxy = None
@@ -45,8 +54,6 @@ class PluginProxy:
         self.host = host
         self.port = port
         self.base_url = f"http://{host}:{port}/execute"
-
-        # Indefinite timeout to avoid session-level timeouts.
         timeout = aiohttp.ClientTimeout(total=None)
         self.session = aiohttp.ClientSession(timeout=timeout)
 
@@ -118,8 +125,6 @@ async def get_plugin(plugin_id, db_adapter, forwarded_port=None):
 
     host_port = get_port(plugin_id)
 
-    # *** NEW: Instead of building an image, we now fetch the subnet info
-    # from the plugin record (via its subnet_id) to get the docker image.
     plugin_record = await db_adapter.get_plugin(plugin_id)
     if not plugin_record:
         raise ValueError(f"No plugin found for plugin_id: {plugin_id}")
@@ -129,7 +134,6 @@ async def get_plugin(plugin_id, db_adapter, forwarded_port=None):
     docker_image = subnet_obj.docker_image
     logger.info(f"Using docker image '{docker_image}' from subnet {subnet_obj.id}")
 
-    # Ensure the image is available by pulling it from Docker Hub.
     await ensure_docker_image(docker_image)
 
     plugin_proxy = await setup_docker_container(plugin_id, plugin_package_dir, host_port, docker_image, forwarded_port)
@@ -197,7 +201,6 @@ def setup_plugin_files(plugin_package_dir):
 async def ensure_docker_image(docker_image):
     logger.info(f"Ensuring Docker image '{docker_image}' is available by pulling from Docker Hub.")
     try:
-        # You can optionally check if the image exists locally first:
         try:
             docker_client.images.get(docker_image)
             logger.info(f"Docker image '{docker_image}' already exists locally.")
@@ -221,7 +224,6 @@ async def setup_docker_container(plugin_id, plugin_package_dir, host_port, docke
     container_name = CONTAINER_NAME_TEMPLATE.format(plugin_id=plugin_id)
     server_url = f"http://localhost:{host_port}/execute"
 
-    # Check for GPU availability
     gpu_available = is_gpu_available()
     device_requests = None
     if gpu_available:
