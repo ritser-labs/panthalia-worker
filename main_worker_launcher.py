@@ -2,7 +2,8 @@
 import sys
 import os
 # Force Qt to use the XCB platform plugin
-os.environ["QT_QPA_PLATFORM"] = "xcb"
+if sys.platform.startswith("linux"):
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 # When frozen, disable typeguard's runtime checking to avoid source-code lookups.
 if getattr(sys, 'frozen', False):

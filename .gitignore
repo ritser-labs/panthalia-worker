@@ -20,3 +20,5 @@ spl/logs/*
 spl/deploy/cloud_adapters/runpod_config.py
 
 *.db
+
+pyinstaller/*
