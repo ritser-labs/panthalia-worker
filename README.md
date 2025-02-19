@@ -1,6 +1,9 @@
 panthalia repo
 
-needs pytorch, docker and nvidia container toolkit
+dependencies:
+- pytorch
+- docker
+- nvidia container toolkit
 
 libgl1-mesa-glx for qt
 

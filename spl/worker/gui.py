@@ -42,7 +42,7 @@ class LoginDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Set Private Key")
         layout = QtWidgets.QVBoxLayout()
-        self.label = QtWidgets.QLabel("Enter Private Key:")
+        self.label = QtWidgets.QLabel("Enter a generated private key from the Panthalia user dashboard:")
         self.edit = QtWidgets.QLineEdit()
         self.edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self.button = QtWidgets.QPushButton("Save")

@@ -24,6 +24,7 @@ eth-account
 stripe
 cachetools
 quart-rate-limiter
+boto3
 
 aiosqlite
 sqlalchemy
