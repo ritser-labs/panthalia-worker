@@ -43,19 +43,19 @@ ORIGINAL_DIR="$(pwd)"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Change into the 'spl' directory relative to the script directory and execute build_image.sh
-cd "$SCRIPT_DIR/spl"
-echo "Changed directory to $(pwd). Running build_image.sh..."
-if [[ -x "./build_image.sh" ]]; then
-  ./build_image.sh
-  echo "build_image.sh completed successfully."
-else
-  echo "Error: build_image.sh is either not found or not executable."
-  exit 1
-fi
+#cd "$SCRIPT_DIR/spl"
+#echo "Changed directory to $(pwd). Running build_image.sh..."
+#if [[ -x "./build_image.sh" ]]; then
+#  ./build_image.sh
+#  echo "build_image.sh completed successfully."
+#else
+#  echo "Error: build_image.sh is either not found or not executable."
+#  exit 1
+#fi
 
 # Return to the original directory
-cd "$ORIGINAL_DIR"
-echo "Returned to original directory: $(pwd)"
+#cd "$ORIGINAL_DIR"
+#echo "Returned to original directory: $(pwd)"
 
 # Define the scripts to be executed
 scripts=(
