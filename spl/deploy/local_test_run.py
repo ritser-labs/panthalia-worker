@@ -352,7 +352,6 @@ async def main():
     task_counts = {}
 
     base_url = f"http://localhost:5002"
-
     db_adapter = DBAdapterClient(db_url, args.private_key)
     
     reset_logs(LOG_DIR)
@@ -390,25 +389,15 @@ async def main():
         flask_thread.start()
 
         logging.info("Starting deployment...")
-
         logging.info(f'Time in string: {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}')
         
-        subnet_id = await db_adapter.create_subnet_key(
-            5 * 60,
-            20 * 60,
-            10
-        )
-
+        subnet_id = await db_adapter.create_subnet_key(5 * 60, 20 * 60, 10)
         db_perm_id = await db_adapter.create_perm_description(PermType.ModifyDb.name)
-        
         assert db_perm_id == GUESS_DB_PERM_ID, f"Expected db_perm_id {GUESS_DB_PERM_ID}, got {db_perm_id}"
-
-
         await db_adapter.create_perm(args.private_key, db_perm_id)
 
         try:
             logging.info("Starting master process...")
-
             master_log = open(os.path.join(LOG_DIR, 'master.log'), 'w')
             master_command = [
                 'python', '-m', 'spl.master',
@@ -424,28 +413,35 @@ async def main():
             master_process = subprocess.Popen(master_command, stdout=master_log, stderr=master_log, cwd=package_root_dir)
             await db_adapter.create_instance("master", ServiceType.Master.name, None, args.private_key, '', master_process.pid)
             logging.info(f"Started master process with command: {' '.join(master_command)}")
-
             logging.info("Master process started.")
 
+            # Start the curses monitor thread and wait for it to finish.
             curses_thread = threading.Thread(target=curses.wrapper, args=(run_monitor_processes, db_adapter, task_counts))
             curses_thread.start()
+            curses_thread.join()  # <-- NEW: Wait here until the user quits from the monitor
+
         except Exception as e:
             logging.error(f"Error: {e}", exc_info=True)
             await terminate_processes(db_adapter)
             exit(1)
+
+        # When the monitor thread finishes, the script will continue here.
+        logging.info("Monitor has ended. Exiting local_test_run.")
+
     except Exception as e:
         logging.error(f"Error: {e}", exc_info=True)
         await terminate_processes(db_adapter)
         exit(1)
-    finally:
-        for instance in await db_adapter.get_all_instances():
-            pid = int(instance.process_id)
-            if (pid > 0) and (os.path.exists(f"/proc/{pid}")):
-                logging.info(f"Process {instance.name} terminated with exit code {pid}")
-            else:
-                logging.warning(f"Process {instance.name} was killed before completion.")
-
-        logging.info("All processes terminated.")
+    # Optionally, remove the following finally block so it does not run automatically on exit.
+    # (It currently logs termination messages immediately when main() completes.)
+    # finally:
+    #     for instance in await db_adapter.get_all_instances():
+    #         pid = int(instance.process_id)
+    #         if (pid > 0) and (os.path.exists(f"/proc/{pid}")):
+    #             logging.info(f"Process {instance.name} terminated with exit code {pid}")
+    #         else:
+    #             logging.warning(f"Process {instance.name} was killed before completion.")
+    #     logging.info("All processes terminated.")
 
 if __name__ == "__main__":
     args = parse_args()

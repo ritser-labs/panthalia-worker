@@ -37,7 +37,8 @@ async def create_instance_route():
     route_func = create_post_route_return_id(
         db_adapter_server.create_instance,
         ['name','service_type','job_id','private_key','pod_id','process_id'],
-        'instance_id'
+        'instance_id',
+        auth_method=AuthMethod.KEY
     )
     return await route_func()
 
@@ -46,7 +47,7 @@ async def delete_instance_route():
     route_func = create_post_route(
         db_adapter_server.delete_instance,
         ['instance_id'],
-        auth_method=AuthMethod.USER
+        auth_method=AuthMethod.KEY
     )
     return await route_func()
 
