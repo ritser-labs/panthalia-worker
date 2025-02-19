@@ -50,52 +50,29 @@ class DBAdapterClient:
         data: Optional[dict] = None, 
         params: Optional[dict] = None
     ) -> Dict[str, Any]:
-        """
-        Sends an HTTP request with optional JSON `data` and `params`, adding a
-        signature header if self.private_key is set. If the server returns an
-        error status (>=400), logs status + body, and returns them in a dict.
-        """
         url = f"{self.base_url}{endpoint}"
         headers = {}
-
-        # If we have a private key, generate & sign a message
         if self.private_key:
             message = self._generate_message(endpoint, data)
             signature = self._sign_message(message)
             if signature:
                 headers["Authorization"] = f"{message}:{signature}"
-
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.request(
                     method, url, json=data, params=params, headers=headers
                 ) as response:
-                    # Check for HTTP error codes explicitly
                     if response.status >= 400:
                         body_text = await response.text()
-                        logger.error(
-                            "Request to %s failed: status=%s, body=%s",
-                            url, response.status, body_text
-                        )
-                        return {
-                            "error": f"HTTP {response.status}",
-                            "details": body_text
-                        }
-
-                    # Otherwise parse as JSON
+                        logger.error("Request to %s failed: status=%s, body=%s", url, response.status, body_text)
+                        return {"error": f"HTTP {response.status}", "details": body_text}
                     json_response = await response.json()
-                    if not isinstance(json_response, (dict, list)):
-                        logger.error(
-                            "Unexpected response format from %s: %s",
-                            url, json_response
-                        )
-                        return {"error": "Unexpected response format"}
+                    logger.debug("Response from %s: %s", url, json_response)  # <-- Added debug log
                     return json_response
-
             except aiohttp.ClientError as e:
-                # This catches network issues, DNS failures, timeouts, etc.
                 logger.error("Request to %s failed: %s", url, e)
                 return {"error": str(e)}
+
 
 
     def _extract_id(self, response: Dict[str, Any], id_key: str) -> Optional[int]:

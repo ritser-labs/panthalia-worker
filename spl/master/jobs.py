@@ -137,102 +137,94 @@ async def check_for_new_jobs(
     deploy_type: str,
     num_master_wallets: int
 ):
+    from ..db.db_adapter_client import DBAdapterClient  # ensure correct import if needed
     db_adapter = DBAdapterClient(db_url, private_key)
     jobs_processing = {}
 
-    # Helper: delete unmatched orders for a job immediately.
-    async def delete_unmatched_orders(db_adapter, job_id: int):
-        try:
-            unmatched_orders = await db_adapter.get_unmatched_orders_for_job(job_id)
-            for order in unmatched_orders:
-                try:
-                    await db_adapter.delete_order(order.id)
-                    logger.info(f"[delete_unmatched_orders] Deleted unmatched order {order.id} for job {job_id}")
-                except Exception as e:
-                    logger.error(f"[delete_unmatched_orders] Failed to delete order {order.id}: {e}")
-        except Exception as ex:
-            logger.error(f"[delete_unmatched_orders] Error fetching unmatched orders for job {job_id}: {ex}")
+    try:
+        while True:
+            # (A) Auto-queue any active, unassigned, unqueued jobs:
+            unassigned_unqueued_active_jobs = await db_adapter.get_unassigned_unqueued_active_jobs()
+            for job_obj in unassigned_unqueued_active_jobs or []:
+                logger.info(f"[check_for_new_jobs] Auto-queuing active job {job_obj.id}.")
+                await db_adapter.update_job_queue_status(job_obj.id, new_queued=True, assigned_master_id=None)
 
-    while True:
-        # (A) Auto-queue any active, unassigned, unqueued jobs:
-        unassigned_unqueued_active_jobs = await db_adapter.get_unassigned_unqueued_active_jobs()
-        for job_obj in unassigned_unqueued_active_jobs or []:
-            logger.info(f"[check_for_new_jobs] Auto-queuing active job {job_obj.id}.")
-            await db_adapter.update_job_queue_status(job_obj.id, new_queued=True, assigned_master_id=None)
+            # Remove finished tasks:
+            done_jobs = [j_id for j_id, master_task in jobs_processing.items() if master_task.done()]
+            for dj in done_jobs:
+                jobs_processing.pop(dj, None)
 
-        # Remove finished tasks:
-        done_jobs = [j_id for j_id, master_task in jobs_processing.items() if master_task.done()]
-        for dj in done_jobs:
-            jobs_processing.pop(dj, None)
+            # Fetch all jobs assigned to this Master:
+            assigned_jobs_in_db = await db_adapter.get_jobs_assigned_to_master(MASTER_ID) or []
+            for assigned_job in assigned_jobs_in_db:
+                if assigned_job.active and assigned_job.id not in jobs_processing:
+                    logger.info(f"[check_for_new_jobs] Found assigned job {assigned_job.id}, launching Master tasks.")
+                    await handle_newly_assigned_job(
+                        db_adapter=db_adapter,
+                        job_obj=assigned_job,
+                        deploy_type=deploy_type,
+                        db_url=db_url,
+                        master_id=MASTER_ID,
+                        jobs_processing=jobs_processing,
+                        unqueue_if_needed=False
+                    )
 
-        # Fetch all jobs assigned to this Master:
-        assigned_jobs_in_db = await db_adapter.get_jobs_assigned_to_master(MASTER_ID) or []
-        for assigned_job in assigned_jobs_in_db:
-            if assigned_job.active and assigned_job.id not in jobs_processing:
-                logger.info(f"[check_for_new_jobs] Found assigned job {assigned_job.id}, launching Master tasks.")
-                await handle_newly_assigned_job(
-                    db_adapter=db_adapter,
-                    job_obj=assigned_job,
-                    deploy_type=deploy_type,
-                    db_url=db_url,
-                    master_id=MASTER_ID,
-                    jobs_processing=jobs_processing,
-                    unqueue_if_needed=False
-                )
+            # Check capacity vs. queued jobs:
+            current_count = len(jobs_processing)
+            capacity = args.max_concurrent_jobs - current_count
+            if capacity > 0:
+                queued_jobs = await db_adapter.get_unassigned_queued_jobs() or []
+                for job_obj in queued_jobs:
+                    if capacity <= 0:
+                        break
+                    await handle_newly_assigned_job(
+                        db_adapter=db_adapter,
+                        job_obj=job_obj,
+                        deploy_type=deploy_type,
+                        db_url=db_url,
+                        master_id=MASTER_ID,
+                        jobs_processing=jobs_processing,
+                        unqueue_if_needed=True
+                    )
+                    capacity -= 1
 
-        # Check capacity vs. queued jobs:
-        current_count = len(jobs_processing)
-        capacity = args.max_concurrent_jobs - current_count
-        if capacity > 0:
-            queued_jobs = await db_adapter.get_unassigned_queued_jobs() or []
-            for job_obj in queued_jobs:
-                if capacity <= 0:
-                    break
-                await handle_newly_assigned_job(
-                    db_adapter=db_adapter,
-                    job_obj=job_obj,
-                    deploy_type=deploy_type,
-                    db_url=db_url,
-                    master_id=MASTER_ID,
-                    jobs_processing=jobs_processing,
-                    unqueue_if_needed=True
-                )
-                capacity -= 1
+            # Now handle assigned jobs (some possibly inactive).
+            assigned_active_jobs = await db_adapter.get_jobs_assigned_to_master(MASTER_ID) or []
+            for job_obj in assigned_active_jobs:
+                master_task = jobs_processing.get(job_obj.id, None)
 
-        # Now handle assigned jobs (some possibly inactive).
-        assigned_active_jobs = await db_adapter.get_jobs_assigned_to_master(MASTER_ID) or []
-        for job_obj in assigned_active_jobs:
-            master_task = jobs_processing.get(job_obj.id, None)
-
-            if job_obj.active:
-                # Possibly check for inactivity/timeouts:
-                job_state = await db_adapter.get_master_state_for_job(job_obj.id)
-                last_t = job_state.get("last_task_creation_time", None)
-                if last_t is not None and (time.time() - last_t > TIMEOUT_SECONDS):
-                    logger.info(f"[check_for_new_jobs] Job {job_obj.id} timed out => marking inactive.")
-                    await db_adapter.update_job_active(job_obj.id, False)
-            else:
-                logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive.")
-                # Immediately delete unmatched orders for this job.
-                await delete_unmatched_orders(db_adapter, job_obj.id)
-                if master_task:
-                    if master_task.done():
-                        logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive & Master is done => finalizing job.")
-                        await finalize_inactive_job(db_adapter, job_obj)
-                        jobs_processing.pop(job_obj.id, None)
-                    else:
-                        logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive & Master is still running.")
-                        # We already deleted unmatched orders; let the Master finish its finalization.
+                if job_obj.active:
+                    # Possibly check for inactivity/timeouts:
+                    job_state = await db_adapter.get_master_state_for_job(job_obj.id)
+                    last_t = job_state.get("last_task_creation_time", None)
+                    if last_t is not None and (time.time() - last_t > TIMEOUT_SECONDS):
+                        logger.info(f"[check_for_new_jobs] Job {job_obj.id} timed out => marking inactive.")
+                        await db_adapter.update_job_active(job_obj.id, False)
                 else:
-                    logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive but no local task found.")
-                    await finalize_inactive_job(db_adapter, job_obj)
+                    logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive.")
+                    # Immediately delete unmatched orders for this job.
+                    await delete_unmatched_orders(db_adapter, job_obj.id)
+                    if master_task:
+                        if master_task.done():
+                            logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive & Master is done => finalizing job.")
+                            await finalize_inactive_job(db_adapter, job_obj)
+                            jobs_processing.pop(job_obj.id, None)
+                        else:
+                            logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive & Master is still running.")
+                    else:
+                        logger.info(f"[check_for_new_jobs] Job {job_obj.id} is inactive but no local task found.")
+                        await finalize_inactive_job(db_adapter, job_obj)
 
-        # Optional debugging:
-        jobs_in_progress = await db_adapter.get_jobs_in_progress() or []
-        if jobs_in_progress:
-            active_count = sum(1 for j in jobs_in_progress if j.active)
-            logger.debug(f"[check_for_new_jobs] Currently {active_count} active job(s).")
-        else:
-            logger.debug("[check_for_new_jobs] No jobs in progress found.")
+            # Optional debugging:
+            jobs_in_progress = await db_adapter.get_jobs_in_progress() or []
+            if jobs_in_progress:
+                active_count = sum(1 for j in jobs_in_progress if j.active)
+                logger.debug(f"[check_for_new_jobs] Currently {active_count} active job(s).")
+            else:
+                logger.debug("[check_for_new_jobs] No jobs in progress found.")
 
-        await asyncio.sleep(2)
+            await asyncio.sleep(2)
+    except asyncio.CancelledError:
+        # Graceful shutdown: perform any cleanup if needed.
+        logger.info("[check_for_new_jobs] Shutdown detected; cancelling job checking loop.")
+        return
