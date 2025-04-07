@@ -1,0 +1,1 @@
+DEFAULT_DOCKER_IMAGE = 'ritser/panthalia-plugin-host:0.0.0'
